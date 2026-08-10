@@ -1,6 +1,11 @@
 # Plan — Linear isolation · data-export path · PR-refresh · second project
 
-Status: **agreed design, not yet built.** Captures the decisions from the MRM-181 first-run review.
+Status: **BUILT** on `feature/linear-keys-data-pr-refresh` (steps 1–3 committed; step 4 is config-only — needs `ticketloop set-key hkbu`). Captures the decisions from the MRM-181 first-run review.
+
+- **Step 1** (`0f9b4d8`, `5b27615`) — model owns posting via per-project `$LINEAR_API_KEY` (env, never in prompt); no harness poster; never the wrong-account MCP. clarify + comment.
+- **Step 2** (`94976b1`) — data-export path: `data` triage kind + `export` stage → `plan → prepare → (export ↔ verify) → comment`, read-only, outcome `exported`, attaches the file; ticket attachments surfaced as readable files.
+- **Step 3** (`<this branch>`) — `locate` step + adaptive `setupWorkspace` (reuse an open PR's branch remote-aware, Option-B guardrail base = tip at checkout; else fresh). Single-repo.
+- **Step 4** — `hkbu` added to the (gitignored) user config as a multi-repo project (team HKB, frontend+backend). Global stage model → opus. **User must run `ticketloop set-key hkbu` and verify team/states/repos/exclude/skills.**
 
 Reference: the live architecture artifact (three triage kinds, data path, locate step, per-project Linear keys).
 
