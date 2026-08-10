@@ -155,10 +155,10 @@ export async function processTicket(
 
     // --- Question path ------------------------------------------------------
     if (isQuestion || project.autonomy === 'clarify') {
+      // The clarify step posts its own answer with the project's Linear key.
       const ans = await stage(ctx, rec, 'clarify', project, ticket, priors, repoPath, extras)
-      skip(rec, 'comment', 'answer posted directly')
-      const url = await tracker.comment(ticket.id, ans.text, commentKey(ticket, 'answer'))
-      rec.commentUrl = url || undefined
+      skip(rec, 'comment', 'answer posted by the clarify step')
+      rec.commentUrl = extractCommentUrl(ans.text)
       finish(rec, 'answered', 'Posted an answer comment.')
       return rec
     }
@@ -279,14 +279,10 @@ export async function processTicket(
         skip(rec, 'comment', 'no PR to report')
         finish(rec, 'failed', `Couldn't pass verify/review within ${iteration} attempt(s); no PR opened.`)
       } else {
+        // The comment step posts to Linear itself, with the project's key (right
+        // workspace). The harness never posts — it just records where it landed.
         const commentText = await stage(ctx, rec, 'comment', project, ticket, priors, workdir, extras)
-        // The comment step posts to Linear itself with the project's key (right
-        // workspace). Trust its reported COMMENT_URL; if it didn't post, the
-        // harness posts the text as a reliable backstop.
-        rec.commentUrl =
-          extractCommentUrl(commentText.text) ||
-          (await tracker.comment(ticket.id, commentText.text, commentKey(ticket, 'pr'))) ||
-          undefined
+        rec.commentUrl = extractCommentUrl(commentText.text)
 
         if (ws.multi && opened.length && failedRepos.length) {
           finish(rec, 'partial', `Opened ${opened.length} PR(s); ${failedRepos.length} repo(s) failed to ship/green — needs a human: ${failedRepos.map((p) => p.repo).join(', ')}.`)

@@ -11,7 +11,7 @@ export const VERDICT_STAGES: StageName[] = [...CHECK_STAGES, 'ship']
 // Steps that reply on the ticket themselves. The harness injects the project's
 // Linear API key as $LINEAR_API_KEY (env) so they post to the CORRECT workspace
 // via the API — never the global Linear MCP (which may be a different client).
-export const POST_STAGES: StageName[] = ['comment']
+export const POST_STAGES: StageName[] = ['clarify', 'comment']
 
 export interface PriorOutputs {
   plan?: string

@@ -255,7 +255,8 @@ const MOCK_TEXTS: Record<string, string> = {
   triage: 'DECISION: eligible\nTriage complete.',
   answer:
     'The 15-minute expiry comes from the access-JWT TTL in auth/session; the ' +
-    'rolling refresh cookie keeps you signed in past it. See auth/session.go.',
+    'rolling refresh cookie keeps you signed in past it. See auth/session.go.\n' +
+    '— 🤖 via ticketloop\nCOMMENT_URL: https://linear.app/demo/issue/DEMO/#comment-mockanswer',
   plan: '1. Update the button label string in the zh-HK locale file.\n2. No logic changes.\n3. Verify with `deno task check`.',
   prepare: 'Created branch feature/demo-102-submit-label off main. Located src/lib/i18n/zh-HK.ts.',
   diff: 'Edited src/lib/i18n/zh-HK.ts: "提交" → "立即提交". 1 file, +1/-1.',
@@ -263,7 +264,8 @@ const MOCK_TEXTS: Record<string, string> = {
   review: 'Pure copy change, scoped, no off-limits paths.\nVERDICT: pass',
   ship: 'Committed, pushed feature/demo-102-submit-label, opened https://github.com/demo/demo-app/pull/142',
   comment:
-    'Updated the submit button label to 立即提交. PR: https://github.com/demo/demo-app/pull/142 — please review.',
+    'Updated the submit button label to 立即提交. PR: https://github.com/demo/demo-app/pull/142 — please review.\n' +
+    '— 🤖 via ticketloop\nCOMMENT_URL: https://linear.app/demo/issue/DEMO/#comment-mockcomment',
 }
 
 let mockVerifyFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFIES) || 0
