@@ -53,6 +53,57 @@ function djb2(s: string): string {
   return h.toString(36)
 }
 
+// The kind triage emitted (question | data | change), or null if it didn't say.
+function parseKind(text: string): 'question' | 'data' | 'change' | null {
+  if (/KIND:\s*data/i.test(text)) return 'data'
+  if (/KIND:\s*change/i.test(text)) return 'change'
+  if (/KIND:\s*question/i.test(text)) return 'question'
+  return null
+}
+
+// Data path: plan → prepare → (export ↔ verify) → comment. Read-only, no
+// worktree/branch/PR — runs in the repo checkout; the comment step posts the
+// export file to the ticket with the project's Linear key.
+async function runDataPath(
+  ctx: EngineCtx,
+  rec: RunRecord,
+  ticket: Ticket,
+  project: ProjectConfig,
+  priors: PriorOutputs,
+  workdir: string,
+  extras: StageExtras,
+): Promise<RunRecord> {
+  priors.plan = (await stage(ctx, rec, 'plan', project, ticket, priors, workdir, extras)).text
+  await stage(ctx, rec, 'prepare', project, ticket, priors, workdir, extras)
+
+  const loopEnabled = ctx.cfg.loop?.enabled !== false
+  const maxIters = Math.max(1, ctx.cfg.loop?.maxFixIterations ?? 1)
+  let iteration = 1
+  let lastSig = ''
+  let exhausted = false
+  while (true) {
+    priors.export = (await stage(ctx, rec, 'export', project, ticket, priors, workdir, extras)).text
+    const v = (await stage(ctx, rec, 'verify', project, ticket, priors, workdir, extras)).text
+    priors.verify = v
+    if (parseVerdict(v).pass) break // data verified correct → deliver
+
+    if (!loopEnabled || iteration >= maxIters) { exhausted = true; break }
+    if (!ctx.governor.canRun().ok) { exhausted = true; break }
+    const sig = djb2(v)
+    if (sig === lastSig) { exhausted = true; break }
+    lastSig = sig
+    priors.openFindings = `The verify step found problems with the export:\n${v.slice(0, 1500)}`
+    iteration++
+    priors.iteration = iteration
+    log.info(`  ↻ export attempt ${iteration}/${maxIters} — ${ticket.identifier}`)
+  }
+
+  const c = await stage(ctx, rec, 'comment', project, ticket, priors, workdir, extras)
+  rec.commentUrl = extractCommentUrl(c.text)
+  finish(rec, 'exported', exhausted ? 'Exported, but verify had unresolved concerns.' : 'Data export posted to the ticket.')
+  return rec
+}
+
 let runCounterSeed = 0
 function newRunId(ticket: string): string {
   runCounterSeed++
@@ -78,6 +129,7 @@ export function makeEngineCtx(cfg: Config, mock: boolean): EngineCtx {
 const MOCK_KIND: Record<StageName, any> = {
   triage: 'triage',
   clarify: 'answer',
+  export: 'export',
   plan: 'plan',
   prepare: 'prepare',
   fix: 'diff',
@@ -142,19 +194,22 @@ export async function processTicket(
     // decision defaults to eligible (real safety is the exclude guardrail + PR
     // review, not this soft filter) — so a stray answer never wrongly skips.
     const eligible = ctx.mock || !/DECISION:\s*ineligible/i.test(triage.text)
-    const isQuestion = /KIND:\s*change/i.test(triage.text)
-      ? false
-      : /KIND:\s*question/i.test(triage.text)
-        ? true
-        : classifyKind(ticket) === 'question' // fallback when KIND wasn't emitted
+    const kind = parseKind(triage.text) || classifyKind(ticket) // question | data | change
 
     if (!eligible) {
       finish(rec, 'skipped', `Triage: ineligible. ${firstLine(triage.text)}`)
       return rec
     }
 
+    // --- Data path: read-only export, no worktree ---------------------------
+    if (kind === 'data') {
+      const rec2 = await runDataPath(ctx, rec, ticket, project, priors, repoPath, extras)
+      return rec2
+    }
+    skip(rec, 'export', 'not a data request')
+
     // --- Question path ------------------------------------------------------
-    if (isQuestion || project.autonomy === 'clarify') {
+    if (kind === 'question' || project.autonomy === 'clarify') {
       // The clarify step posts its own answer with the project's Linear key.
       const ans = await stage(ctx, rec, 'clarify', project, ticket, priors, repoPath, extras)
       skip(rec, 'comment', 'answer posted by the clarify step')

@@ -49,6 +49,7 @@ const DEFAULTS: Config = {
   stages: {
     triage: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
     clarify: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
+    export: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
     plan: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
     prepare: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
     fix: { enabled: true, model: 'sonnet', allowedTools: 'Read,Edit,Bash' },
@@ -69,16 +70,23 @@ export const DEFAULT_INSTRUCTIONS: Record<StageName, string> = {
     'You are ONLY classifying this ticket. Do NOT answer any question, do NOT explain, ' +
     'do NOT make changes. Output EXACTLY these two lines and nothing else:\n' +
     'DECISION: eligible        (or: DECISION: ineligible)\n' +
-    'KIND: question            (or: KIND: change)\n\n' +
+    'KIND: question            (or: KIND: data, or: KIND: change)\n\n' +
     'Rules: mark INELIGIBLE only if handling it would touch an off-limits path, a DB ' +
     'migration, auth/payments/money logic, or date/timezone logic, or is clearly too ' +
     'large/risky for a small automated change — otherwise mark it eligible. Questions are ' +
-    'always eligible. KIND=question if the client is asking something; KIND=change if they ' +
-    'want a code/content change.',
+    'always eligible. KIND=question if the client is asking something; KIND=data if they ' +
+    'want a read-only data pull / export (no code change); KIND=change if they want a ' +
+    'code/content change.',
   clarify:
     'A client asked a question. Read the codebase to answer it accurately and concisely, ' +
     'in plain language a non-engineer can follow. Reply in English. Cite the file(s)/mechanism ' +
-    'you based the answer on. Do not change any files. Return only the answer text.',
+    'you based the answer on. Do not change any files.',
+  export:
+    'The client asked for a read-only data pull / export. Use ONLY the data source and ' +
+    'credentials the ticket provides (attachments / links / env) — never guess or use other ' +
+    'sources. This is READ-ONLY: never write, update, or delete any data. Produce the requested ' +
+    'export as a file in the current directory (CSV unless the ticket says otherwise) and report ' +
+    'the file path and a short summary (row count, columns, any filters applied).',
   plan:
     'Plan the smallest correct change. State which file(s) you will edit, the exact change, ' +
     'and how you will verify it. Do not edit anything yet.',

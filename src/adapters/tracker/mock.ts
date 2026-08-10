@@ -53,6 +53,19 @@ const SAMPLE: Ticket[] = [
     updatedAt: '2026-01-01T00:00:00Z',
     comments: [],
   },
+  {
+    id: 'mock-4',
+    identifier: 'DEMO-104',
+    title: 'Export the member list with opt-in status',
+    description: 'Please export the latest member list with marketing email opt-in status; filter out opt-outs. Read-only DB creds are attached.',
+    url: 'https://linear.app/demo/issue/DEMO-104',
+    state: 'Todo',
+    labels: ['data'],
+    team: 'DEMO',
+    projectName: 'demo-app',
+    updatedAt: '2026-01-01T00:00:00Z',
+    comments: [],
+  },
 ]
 
 export class MockTracker implements Tracker {

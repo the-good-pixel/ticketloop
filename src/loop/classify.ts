@@ -4,11 +4,16 @@ import type { Config, ProjectConfig, Ticket } from '../types.js'
 // FALLBACK used when triage doesn't emit a parseable KIND line.
 const QUESTION_WORDS =
   /\b(why|how|what|when|where|which|does|is it|can (i|we|you)|possible|expected|explain)\b/i
+// read-only data-pull / export requests (EN + zh 匯出/導出/匯出名單 etc.)
+const DATA_WORDS = /\b(export|extract|pull|dump|download|report|list of|csv|excel|spreadsheet)\b|匯出|導出|滙出|export/i
 
-export function classifyKind(t: Ticket): 'question' | 'change' {
+export function classifyKind(t: Ticket): 'question' | 'data' | 'change' {
   const hay = `${t.title}\n${t.description}`
   if (t.labels.map((l) => l.toLowerCase()).includes('question')) return 'question'
   if (t.title.trim().endsWith('?')) return 'question'
+  // data before change: an "export the member list" ask isn't a code change
+  if (DATA_WORDS.test(hay) && !/\b(add|build|implement|create) .*(export|report|tool)\b/i.test(t.title))
+    return 'data'
   if (QUESTION_WORDS.test(hay) && !/\b(change|update|fix|add|remove|set|make)\b/i.test(t.title))
     return 'question'
   return 'change'

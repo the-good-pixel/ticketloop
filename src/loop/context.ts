@@ -55,8 +55,12 @@ export async function downloadImages(
       const res = await fetch(url, { headers: key ? { Authorization: key } : {} })
       if (!res.ok) continue
       const buf = Buffer.from(await res.arrayBuffer())
-      const ext = extFor(url, res.headers.get('content-type'))
-      const p = join(destDir, `image-${i}${ext}`)
+      const ct = res.headers.get('content-type') || ''
+      const isImg = /^image\//.test(ct) || /\.(png|jpe?g|gif|webp)(?:\?|$)/i.test(url)
+      // Non-image uploads (e.g. a .env of DB creds, a CSV) keep a readable name +
+      // extension so the model treats them as files, not images.
+      const ext = isImg ? extFor(url, ct) : /(text|json|csv|xml|yaml|octet-stream)/.test(ct) ? '.txt' : '.dat'
+      const p = join(destDir, `${isImg ? 'image' : 'attachment'}-${i}${ext}`)
       writeFileSync(p, buf)
       paths.push(p)
     } catch {

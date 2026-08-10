@@ -257,6 +257,9 @@ const MOCK_TEXTS: Record<string, string> = {
     'The 15-minute expiry comes from the access-JWT TTL in auth/session; the ' +
     'rolling refresh cookie keeps you signed in past it. See auth/session.go.\n' +
     '— 🤖 via ticketloop\nCOMMENT_URL: https://linear.app/demo/issue/DEMO/#comment-mockanswer',
+  export:
+    'Connected read-only with the credentials from the ticket. Wrote ./member-export.csv ' +
+    '(1,234 rows · columns: email, marketing_opt_in · opt-out rows filtered out).',
   plan: '1. Update the button label string in the zh-HK locale file.\n2. No logic changes.\n3. Verify with `deno task check`.',
   prepare: 'Created branch feature/demo-102-submit-label off main. Located src/lib/i18n/zh-HK.ts.',
   diff: 'Edited src/lib/i18n/zh-HK.ts: "提交" → "立即提交". 1 file, +1/-1.',

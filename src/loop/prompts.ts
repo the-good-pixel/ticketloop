@@ -16,6 +16,7 @@ export const POST_STAGES: StageName[] = ['clarify', 'comment']
 export interface PriorOutputs {
   plan?: string
   fix?: string
+  export?: string // data path: the export step's result (file path + summary)
   verify?: string
   review?: string
   ship?: string
@@ -77,8 +78,8 @@ export function buildStagePrompt(
   if (thread) parts.push(thread)
   if (extras.imagePaths.length)
     parts.push(
-      `Images attached to this ticket (read them with your file tools to see what the ` +
-        `client is referring to):\n${extras.imagePaths.map((p) => `- ${p}`).join('\n')}`,
+      `Attachments on this ticket, already downloaded (read them with your file tools — they may ` +
+        `be screenshots, data, or credentials the ticket wants you to use):\n${extras.imagePaths.map((p) => `- ${p}`).join('\n')}`,
     )
 
   parts.push(`Working directory: ${workdir}`)
@@ -114,20 +115,21 @@ export function buildStagePrompt(
     parts.push(`OFF-LIMITS paths${extras.workspace?.length ? ' (repo-prefixed)' : ''} — never edit these: ${p.exclude.join(', ')}`)
   if (p.devUrl) parts.push(`Local dev URL (if useful): ${p.devUrl}`)
 
-  if (priors.plan && ['prepare', 'fix', 'verify', 'review', 'ship', 'comment'].includes(stage))
+  if (priors.plan && ['prepare', 'fix', 'export', 'verify', 'review', 'ship', 'comment'].includes(stage))
     parts.push(`Plan from the plan step:\n${priors.plan}`)
   if (priors.fix && ['verify', 'review', 'ship', 'comment'].includes(stage))
     parts.push(`Summary of the change made:\n${priors.fix}`)
+  if (priors.export && ['verify', 'comment'].includes(stage))
+    parts.push(`Result of the export step (the file path + summary):\n${priors.export}`)
   if (priors.ship && stage === 'comment')
     parts.push(`Result of the ship step (contains the PR URL):\n${priors.ship}`)
 
-  // Repair-mode fix: a previous attempt didn't pass the checks. Give the model
-  // the open issues and tell it not to repeat what already failed.
-  if (stage === 'fix' && (priors.iteration || 1) > 1 && priors.openFindings) {
+  // Repair mode (fix or export): a previous attempt didn't pass verify. Give the
+  // model the open issues and tell it not to repeat what already failed.
+  if ((stage === 'fix' || stage === 'export') && (priors.iteration || 1) > 1 && priors.openFindings) {
     parts.push(
-      `This is fix attempt ${priors.iteration}. The previous attempt did NOT pass the ` +
-        `checks/review. Address the following issues, and do not repeat approaches that ` +
-        `already failed:\n${priors.openFindings}`,
+      `This is attempt ${priors.iteration}. The previous attempt did NOT pass verification. ` +
+        `Address the following issues, and do not repeat approaches that already failed:\n${priors.openFindings}`,
     )
   }
 
@@ -150,14 +152,18 @@ export function buildStagePrompt(
 
   // Post steps reply on the ticket themselves — pin them to the RIGHT workspace.
   if (POST_STAGES.includes(stage)) {
+    const attach = priors.export
+      ? ` Attach the export file to the comment: upload it with the Linear file API using the same ` +
+        `key, and reference the uploaded file in the comment body.`
+      : ''
     parts.push(
       `POSTING — reply by creating a Linear comment on issue id "${t.id}" via the Linear GraphQL ` +
         `API (POST https://api.linear.app/graphql, header "Authorization: $LINEAR_API_KEY"). The key ` +
         `in the $LINEAR_API_KEY environment variable is authed to THIS ticket's workspace — use it. ` +
         `Do NOT use the Linear MCP connector; it may be signed into a DIFFERENT client's workspace, ` +
-        `and you must never reference or touch another workspace. End the comment body with the line ` +
-        `"— 🤖 via ticketloop". After it posts, print the comment URL on its own final line as ` +
-        `"COMMENT_URL: <url>".`,
+        `and you must never reference or touch another workspace.${attach} End the comment body with ` +
+        `the line "— 🤖 via ticketloop". After it posts, print the comment URL on its own final line ` +
+        `as "COMMENT_URL: <url>".`,
     )
   }
 

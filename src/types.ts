@@ -8,8 +8,9 @@ export type Autonomy = 'clarify' | 'propose' | 'gated-merge'
 // only sequences these, enforces guardrails, and records history — it does not
 // dictate HOW a step is done, so each project's own skills/tools/env/CLI apply.
 export type StageName =
-  | 'triage' // model decides eligibility + kind (question|change)
+  | 'triage' // model decides eligibility + kind (question|data|change)
   | 'clarify' // question path: read code, answer the client
+  | 'export' // data path: read-only data pull → export file
   | 'plan'
   | 'prepare' // pre-fix setup: branch, context, deps — model's call
   | 'fix'
@@ -23,6 +24,7 @@ export const STAGE_ORDER: StageName[] = [
   'clarify',
   'plan',
   'prepare',
+  'export',
   'fix',
   'verify',
   'review',
@@ -234,6 +236,7 @@ export interface UsageSummary {
 
 export type RunOutcome =
   | 'answered' // clarification comment posted
+  | 'exported' // data-export request fulfilled (file posted to the ticket)
   | 'pr-opened'
   | 'pr-opened-with-findings' // shipped but the fix-loop didn't fully clear checks
   | 'partial' // multi-repo: ≥1 PR opened AND ≥1 repo failed to ship
