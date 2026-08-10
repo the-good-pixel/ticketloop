@@ -11,6 +11,7 @@ export type StageName =
   | 'triage' // model decides eligibility + kind (question|data|change)
   | 'clarify' // question path: read code, answer the client
   | 'export' // data path: read-only data pull → export file
+  | 'locate' // change path: find an existing open PR to refresh (read-only)
   | 'plan'
   | 'prepare' // pre-fix setup: branch, context, deps — model's call
   | 'fix'
@@ -22,9 +23,10 @@ export type StageName =
 export const STAGE_ORDER: StageName[] = [
   'triage',
   'clarify',
+  'export',
+  'locate',
   'plan',
   'prepare',
-  'export',
   'fix',
   'verify',
   'review',

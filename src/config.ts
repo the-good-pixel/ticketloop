@@ -50,6 +50,7 @@ const DEFAULTS: Config = {
     triage: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
     clarify: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
     export: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
+    locate: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
     plan: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
     prepare: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
     fix: { enabled: true, model: 'sonnet', allowedTools: 'Read,Edit,Bash' },
@@ -87,6 +88,13 @@ export const DEFAULT_INSTRUCTIONS: Record<StageName, string> = {
     'sources. This is READ-ONLY: never write, update, or delete any data. Produce the requested ' +
     'export as a file in the current directory (CSV unless the ticket says otherwise) and report ' +
     'the file path and a short summary (row count, columns, any filters applied).',
+  locate:
+    'Find whether an OPEN pull request already exists for THIS ticket (it may have been opened by ' +
+    'a human or another agent, on any branch name). Look via `gh pr list` / `gh search prs` by the ' +
+    'ticket id and title, any PR linked on the ticket, and existing branch names. Do NOT make any ' +
+    'changes. Output EXACTLY one final line:\n' +
+    '  REUSE: <branch>   (an OPEN PR for this ticket exists — give its head branch, so we refresh it)\n' +
+    '  REUSE: none       (no open PR — start fresh; ignore merged/closed PRs).',
   plan:
     'Plan the smallest correct change. State which file(s) you will edit, the exact change, ' +
     'and how you will verify it. Do not edit anything yet.',

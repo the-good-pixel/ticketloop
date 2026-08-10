@@ -30,7 +30,13 @@ export interface Repo {
   // Worktree isolation: create a fresh worktree on a new branch off `base`,
   // returning its path. removeWorktree cleans it up (branch is kept).
   createWorktree(repoPath: string, wtPath: string, branch: string, base: string): void
+  // Check out an EXISTING branch (possibly remote-only, opened by a human/other
+  // agent) into a worktree, to refresh its PR. Returns false if it can't fetch it.
+  reuseWorktree(repoPath: string, wtPath: string, branch: string): boolean
   removeWorktree(repoPath: string, wtPath: string): void
+  // Current HEAD commit of a worktree — the guardrail base for a reused PR (so
+  // only the model's new delta is checked, not the PR's already-made changes).
+  tipSha(cwd: string): string
   // Force-delete a local branch (used to drop empty branches of untouched repos).
   deleteBranch(repoPath: string, branch: string): void
 }
@@ -140,9 +146,22 @@ export class GitHubRepo implements Repo {
     const r = git(repoPath, args)
     if (r.code !== 0) throw new Error(`git worktree add failed: ${r.err}`)
   }
+  reuseWorktree(repoPath: string, wtPath: string, branch: string): boolean {
+    git(repoPath, ['fetch', 'origin', branch]) // the branch may be remote-only
+    spawnSync('git', ['-C', repoPath, 'worktree', 'remove', '--force', wtPath], { encoding: 'utf8' })
+    if (this.localBranchExists(repoPath, branch)) {
+      return git(repoPath, ['worktree', 'add', wtPath, branch]).code === 0
+    }
+    const remote = `refs/remotes/origin/${branch}`
+    if (git(repoPath, ['rev-parse', '--verify', '--quiet', remote]).code !== 0) return false
+    return git(repoPath, ['worktree', 'add', '-b', branch, wtPath, remote]).code === 0
+  }
   removeWorktree(repoPath: string, wtPath: string) {
     const r = git(repoPath, ['worktree', 'remove', '--force', wtPath])
     if (r.code !== 0) log.warn(`git worktree remove failed (leaving it): ${r.err}`)
+  }
+  tipSha(cwd: string): string {
+    return git(cwd, ['rev-parse', 'HEAD']).out
   }
   deleteBranch(repoPath: string, branch: string) {
     // best-effort: only called for repos we know are untouched (empty branch),
@@ -207,8 +226,15 @@ export class MockRepo implements Repo {
   createWorktree(_r: string, wtPath: string, branch: string) {
     log.info(`[mock] git worktree add -b ${branch} ${wtPath}`)
   }
+  reuseWorktree(_r: string, wtPath: string, branch: string) {
+    log.info(`[mock] reuse worktree on existing branch ${branch} at ${wtPath}`)
+    return true
+  }
   removeWorktree(_r: string, wtPath: string) {
     log.info(`[mock] git worktree remove ${wtPath}`)
+  }
+  tipSha() {
+    return 'mock-tip-sha'
   }
   deleteBranch(_r: string, branch: string) {
     log.info(`[mock] git branch -D ${branch}`)

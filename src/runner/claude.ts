@@ -260,6 +260,7 @@ const MOCK_TEXTS: Record<string, string> = {
   export:
     'Connected read-only with the credentials from the ticket. Wrote ./member-export.csv ' +
     '(1,234 rows · columns: email, marketing_opt_in · opt-out rows filtered out).',
+  locate: 'Searched gh for an open PR on this ticket; none found.\nREUSE: none',
   plan: '1. Update the button label string in the zh-HK locale file.\n2. No logic changes.\n3. Verify with `deno task check`.',
   prepare: 'Created branch feature/demo-102-submit-label off main. Located src/lib/i18n/zh-HK.ts.',
   diff: 'Edited src/lib/i18n/zh-HK.ts: "提交" → "立即提交". 1 file, +1/-1.',
@@ -306,6 +307,10 @@ async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
   }
   // Demo/testing: TICKETLOOP_MOCK_FAIL_REVIEWS=N makes the first N review checks
   // return VERDICT: fail so you can watch the fix→review loop actually loop.
+  // TICKETLOOP_MOCK_REUSE_BRANCH=<branch> makes locate report an open PR to refresh.
+  if (kind === 'locate' && process.env.TICKETLOOP_MOCK_REUSE_BRANCH) {
+    text = `Found an open PR on this ticket.\nREUSE: ${process.env.TICKETLOOP_MOCK_REUSE_BRANCH}`
+  }
   if (kind === 'verify' && mockVerifyFailsLeft > 0) {
     mockVerifyFailsLeft--
     text = 'Mock verify: the app does not build.\nVERDICT: fail — injected mock verify failure'

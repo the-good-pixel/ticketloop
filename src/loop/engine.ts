@@ -61,6 +61,13 @@ function parseKind(text: string): 'question' | 'data' | 'change' | null {
   return null
 }
 
+// The branch `locate` said to refresh (an open PR's head), or undefined for fresh.
+function parseReuse(text: string): string | undefined {
+  const m = (text || '').match(/REUSE:\s*(\S+)/i)
+  if (!m || /^none$/i.test(m[1])) return undefined
+  return m[1].trim().replace(/[).,]+$/, '')
+}
+
 // Data path: plan → prepare → (export ↔ verify) → comment. Read-only, no
 // worktree/branch/PR — runs in the repo checkout; the comment step posts the
 // export file to the ticket with the project's Linear key.
@@ -130,6 +137,7 @@ const MOCK_KIND: Record<StageName, any> = {
   triage: 'triage',
   clarify: 'answer',
   export: 'export',
+  locate: 'locate',
   plan: 'plan',
   prepare: 'prepare',
   fix: 'diff',
@@ -220,7 +228,16 @@ export async function processTicket(
     skip(rec, 'clarify', 'not a question')
 
     // --- Change path: isolate in a git worktree (default) ------------------
-    const ws = setupWorkspace(ctx, project, ticket.identifier)
+    // LOCATE: find an existing OPEN PR to refresh (single-repo only for now).
+    let reuseBranch: string | undefined
+    if (!project.repos?.length) {
+      const loc = await stage(ctx, rec, 'locate', project, ticket, priors, repoPath, extras)
+      reuseBranch = parseReuse(loc.text)
+      if (reuseBranch) log.info(`  ↩ refreshing existing PR on branch ${reuseBranch} — ${ticket.identifier}`)
+    } else {
+      skip(rec, 'locate', 'multi-repo: PR refresh not supported yet')
+    }
+    const ws = setupWorkspace(ctx, project, ticket.identifier, reuseBranch)
     const workdir = ws.cwd // plan→verify run here (workspace root for multi-repo)
     if (ws.multi) extras.workspace = ws.repos.map((r) => ({ name: r.name, base: r.base, readOnly: r.shipDisabled }))
     let dirty: WorkRepo[] = []
@@ -424,9 +441,26 @@ interface Workspace {
 
 // Create the worktrees/branches and return the workspace. Throws on a dirty
 // in-place repo (caught by the outer handler → 'failed').
-function setupWorkspace(ctx: EngineCtx, project: ProjectConfig, ticketId: string): Workspace {
+function setupWorkspace(ctx: EngineCtx, project: ProjectConfig, ticketId: string, reuseBranch?: string): Workspace {
   const useWorktree = project.useWorktree !== false
   const multi = !!(project.repos && project.repos.length)
+
+  // Single-repo PR refresh: `locate` found an open PR → check out its branch and
+  // guard only the model's new delta (base = the branch tip at checkout).
+  if (!multi && reuseBranch && useWorktree) {
+    const src = project.repoPath
+    const workdir = worktreePath(project, ticketId)
+    if (ctx.repo.reuseWorktree(src, workdir, reuseBranch)) {
+      const base = ctx.repo.tipSha(workdir)
+      return {
+        repos: [{ name: project.name, srcPath: src, workdir, base, branch: reuseBranch, exclude: [], shipDisabled: false }],
+        cwd: workdir,
+        multi,
+        useWorktree,
+      }
+    }
+    log.warn(`locate named branch "${reuseBranch}" but it couldn't be checked out — starting fresh`)
+  }
 
   if (multi) {
     const root = worktreePath(project, ticketId)
