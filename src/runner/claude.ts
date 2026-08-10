@@ -13,6 +13,9 @@ export interface RunClaudeOpts {
   mock?: boolean
   // for mock output shaping — a MOCK_TEXTS key (matches a stage's mock kind)
   mockKind?: string
+  // extra env vars for the subprocess (e.g. the project's Linear API key, so the
+  // posting steps hit the CORRECT workspace instead of the global MCP)
+  env?: Record<string, string>
 }
 
 export interface ClaudeResult {
@@ -103,7 +106,7 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
   const model = o.stage.model || o.runner.defaultModel
 
   // Never use --bare in subscription mode; scrub API key so we don't get billed.
-  const env = { ...process.env }
+  const env = { ...process.env, ...(o.env || {}) }
   if (o.authMode === 'subscription') delete env.ANTHROPIC_API_KEY
 
   return new Promise((resolve) => {

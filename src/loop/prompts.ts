@@ -8,6 +8,11 @@ export const CHECK_STAGES: StageName[] = ['verify', 'review']
 // pass/fail — the harness enforces the same verdict line on all three.
 export const VERDICT_STAGES: StageName[] = [...CHECK_STAGES, 'ship']
 
+// Steps that reply on the ticket themselves. The harness injects the project's
+// Linear API key as $LINEAR_API_KEY (env) so they post to the CORRECT workspace
+// via the API — never the global Linear MCP (which may be a different client).
+export const POST_STAGES: StageName[] = ['comment']
+
 export interface PriorOutputs {
   plan?: string
   fix?: string
@@ -26,6 +31,9 @@ export interface StageExtras {
   workspace?: { name: string; base: string; readOnly: boolean }[]
   // ship stage only: the single repo this invocation must ship
   shipRepo?: string
+  // post stages: the project's Linear API key (goes into the subprocess env as
+  // $LINEAR_API_KEY, NOT into the prompt text — never logged)
+  trackerKey?: string
 }
 
 function ticketBlock(t: Ticket): string {
@@ -137,6 +145,19 @@ export function buildStagePrompt(
         'If it fails, first explain concretely and specifically what is wrong so the fix step ' +
         'can act on it. Judge only what THIS step is responsible for; do not re-litigate ' +
         'earlier steps.',
+    )
+  }
+
+  // Post steps reply on the ticket themselves — pin them to the RIGHT workspace.
+  if (POST_STAGES.includes(stage)) {
+    parts.push(
+      `POSTING — reply by creating a Linear comment on issue id "${t.id}" via the Linear GraphQL ` +
+        `API (POST https://api.linear.app/graphql, header "Authorization: $LINEAR_API_KEY"). The key ` +
+        `in the $LINEAR_API_KEY environment variable is authed to THIS ticket's workspace — use it. ` +
+        `Do NOT use the Linear MCP connector; it may be signed into a DIFFERENT client's workspace, ` +
+        `and you must never reference or touch another workspace. End the comment body with the line ` +
+        `"— 🤖 via ticketloop". After it posts, print the comment URL on its own final line as ` +
+        `"COMMENT_URL: <url>".`,
     )
   }
 

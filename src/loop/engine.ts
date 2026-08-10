@@ -16,7 +16,7 @@ import { makeRepo, type Repo } from '../adapters/repo/github.js'
 import { appendRun, appendUsage } from '../store.js'
 import { classifyKind } from './classify.js'
 import { matchesAny } from './glob.js'
-import { buildStagePrompt, CHECK_STAGES, type PriorOutputs, type StageExtras } from './prompts.js'
+import { buildStagePrompt, CHECK_STAGES, POST_STAGES, type PriorOutputs, type StageExtras } from './prompts.js'
 import { extractImageUrls, downloadImages, latestHumanActivity } from './context.js'
 import { DATA_DIR } from '../paths.js'
 import { join, isAbsolute } from 'node:path'
@@ -131,7 +131,7 @@ export async function processTicket(
         if (imagePaths.length) log.info(`  ⤓ downloaded ${imagePaths.length} image(s) for ${ticket.identifier}`)
       }
     }
-    const extras: StageExtras = { imagePaths, isReprocess: !!opts.reprocess }
+    const extras: StageExtras = { imagePaths, isReprocess: !!opts.reprocess, trackerKey: opts.trackerKey }
 
     // Triage & clarify are read-only — run them against the main checkout.
     const repoPath = project.repoPath
@@ -280,8 +280,13 @@ export async function processTicket(
         finish(rec, 'failed', `Couldn't pass verify/review within ${iteration} attempt(s); no PR opened.`)
       } else {
         const commentText = await stage(ctx, rec, 'comment', project, ticket, priors, workdir, extras)
-        const cu = await tracker.comment(ticket.id, commentText.text, commentKey(ticket, 'pr'))
-        rec.commentUrl = cu || undefined
+        // The comment step posts to Linear itself with the project's key (right
+        // workspace). Trust its reported COMMENT_URL; if it didn't post, the
+        // harness posts the text as a reliable backstop.
+        rec.commentUrl =
+          extractCommentUrl(commentText.text) ||
+          (await tracker.comment(ticket.id, commentText.text, commentKey(ticket, 'pr'))) ||
+          undefined
 
         if (ws.multi && opened.length && failedRepos.length) {
           finish(rec, 'partial', `Opened ${opened.length} PR(s); ${failedRepos.length} repo(s) failed to ship/green — needs a human: ${failedRepos.map((p) => p.repo).join(', ')}.`)
@@ -463,6 +468,12 @@ async function stage(
   const prompt = buildStagePrompt(name, ticket, project, instruction, priors, workdir, extras)
   log.info(`  ▸ ${name} (${sc.model})${sc.skill ? ` +skill:${sc.skill}` : ''} — ${rec.ticket}`)
 
+  // Post steps get the project's Linear key in the env so they hit the RIGHT
+  // workspace via the API (not the global MCP). The key stays out of the prompt.
+  const env =
+    POST_STAGES.includes(name) && extras.trackerKey && ctx.cfg.tracker.type === 'linear'
+      ? { LINEAR_API_KEY: extras.trackerKey }
+      : undefined
   const res = await runClaude({
     prompt,
     cwd: workdir,
@@ -472,6 +483,7 @@ async function stage(
     mcp: project.mcp || ctx.cfg.mcp,
     mock: ctx.mock,
     mockKind: MOCK_KIND[name],
+    env,
   })
 
   // Guard: never let CLI-error text or an echoed prompt be treated as a real
@@ -527,6 +539,15 @@ function skip(rec: RunRecord, name: StageName, why: string) {
 function extractPrUrl(text: string): string | null {
   const m = (text || '').match(/https?:\/\/\S*\/pull\/\d+/) || (text || '').match(/https?:\/\/\S+/)
   return m ? m[0].replace(/[).,]+$/, '') : null
+}
+
+// The comment step reports where it posted as `COMMENT_URL: <url>` (or leaves a
+// bare Linear comment link). Absent → the model didn't post; caller falls back.
+export function extractCommentUrl(text: string): string | undefined {
+  const tagged = (text || '').match(/COMMENT_URL:\s*(\S+)/i)
+  if (tagged) return tagged[1].replace(/[).,]+$/, '')
+  const bare = (text || '').match(/https:\/\/linear\.app\/\S+#comment-\S+/i)
+  return bare ? bare[0].replace(/[).,]+$/, '') : undefined
 }
 
 function beginStage(rec: RunRecord, name: StageName, model?: string): StageRecord {
