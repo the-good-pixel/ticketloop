@@ -77,38 +77,53 @@ async function runDataPath(
   ticket: Ticket,
   project: ProjectConfig,
   priors: PriorOutputs,
-  workdir: string,
   extras: StageExtras,
 ): Promise<RunRecord> {
-  priors.plan = (await stage(ctx, rec, 'plan', project, ticket, priors, workdir, extras)).text
-  await stage(ctx, rec, 'prepare', project, ticket, priors, workdir, extras)
+  // Isolate in a throwaway worktree so a mis-following stage can't touch the real
+  // checkout. It's read-only work — the export file is written here; no push/PR.
+  const ws = setupWorkspace(ctx, project, ticket.identifier)
+  const workdir = ws.cwd
+  extras.dataMode = true // shared stages (prepare/verify) run read-only, data-aware
+  if (ws.multi) extras.workspace = ws.repos.map((r) => ({ name: r.name, base: r.base, readOnly: r.shipDisabled }))
+  try {
+    priors.plan = (await stage(ctx, rec, 'plan', project, ticket, priors, workdir, extras)).text
+    await stage(ctx, rec, 'prepare', project, ticket, priors, workdir, extras)
 
-  const loopEnabled = ctx.cfg.loop?.enabled !== false
-  const maxIters = Math.max(1, ctx.cfg.loop?.maxFixIterations ?? 1)
-  let iteration = 1
-  let lastSig = ''
-  let exhausted = false
-  while (true) {
-    priors.export = (await stage(ctx, rec, 'export', project, ticket, priors, workdir, extras)).text
-    const v = (await stage(ctx, rec, 'verify', project, ticket, priors, workdir, extras)).text
-    priors.verify = v
-    if (parseVerdict(v).pass) break // data verified correct → deliver
+    const loopEnabled = ctx.cfg.loop?.enabled !== false
+    const maxIters = Math.max(1, ctx.cfg.loop?.maxFixIterations ?? 1)
+    let iteration = 1
+    let lastSig = ''
+    let exhausted = false
+    while (true) {
+      priors.export = (await stage(ctx, rec, 'export', project, ticket, priors, workdir, extras)).text
+      const v = (await stage(ctx, rec, 'verify', project, ticket, priors, workdir, extras)).text
+      priors.verify = v
+      if (parseVerdict(v).pass) break // data verified correct → deliver
 
-    if (!loopEnabled || iteration >= maxIters) { exhausted = true; break }
-    if (!ctx.governor.canRun().ok) { exhausted = true; break }
-    const sig = djb2(v)
-    if (sig === lastSig) { exhausted = true; break }
-    lastSig = sig
-    priors.openFindings = `The verify step found problems with the export:\n${v.slice(0, 1500)}`
-    iteration++
-    priors.iteration = iteration
-    log.info(`  ↻ export attempt ${iteration}/${maxIters} — ${ticket.identifier}`)
+      if (!loopEnabled || iteration >= maxIters) { exhausted = true; break }
+      if (!ctx.governor.canRun().ok) { exhausted = true; break }
+      const sig = djb2(v)
+      if (sig === lastSig) { exhausted = true; break }
+      lastSig = sig
+      priors.openFindings = `The verify step found problems with the export:\n${v.slice(0, 1500)}`
+      iteration++
+      priors.iteration = iteration
+      log.info(`  ↻ export attempt ${iteration}/${maxIters} — ${ticket.identifier}`)
+    }
+
+    const c = await stage(ctx, rec, 'comment', project, ticket, priors, workdir, extras)
+    rec.commentUrl = extractCommentUrl(c.text)
+    finish(rec, 'exported', exhausted ? 'Exported, but verify had unresolved concerns.' : 'Data export posted to the ticket.')
+    return rec
+  } finally {
+    // Throwaway worktree — nothing to ship; always remove it + its empty branch.
+    if (ws.useWorktree) {
+      for (const r of ws.repos) {
+        ctx.repo.removeWorktree(r.srcPath, r.workdir)
+        ctx.repo.deleteBranch(r.srcPath, r.branch)
+      }
+    }
   }
-
-  const c = await stage(ctx, rec, 'comment', project, ticket, priors, workdir, extras)
-  rec.commentUrl = extractCommentUrl(c.text)
-  finish(rec, 'exported', exhausted ? 'Exported, but verify had unresolved concerns.' : 'Data export posted to the ticket.')
-  return rec
 }
 
 let runCounterSeed = 0
@@ -209,10 +224,9 @@ export async function processTicket(
       return rec
     }
 
-    // --- Data path: read-only export, no worktree ---------------------------
+    // --- Data path: read-only export in an isolated throwaway worktree ------
     if (kind === 'data') {
-      const rec2 = await runDataPath(ctx, rec, ticket, project, priors, repoPath, extras)
-      return rec2
+      return await runDataPath(ctx, rec, ticket, project, priors, extras)
     }
     skip(rec, 'export', 'not a data request')
 

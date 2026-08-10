@@ -35,6 +35,9 @@ export interface StageExtras {
   // post stages: the project's Linear API key (goes into the subprocess env as
   // $LINEAR_API_KEY, NOT into the prompt text — never logged)
   trackerKey?: string
+  // data path: shared stages (plan/prepare/verify) run read-only for a data
+  // export, overriding any change-oriented wording in the project's instruction
+  dataMode?: boolean
 }
 
 function ticketBlock(t: Ticket): string {
@@ -67,6 +70,14 @@ export function buildStagePrompt(
 ): string {
   const parts: string[] = []
   parts.push(`You are the "${stage}" step of an automated dev-cycle loop.`)
+  if (extras.dataMode)
+    parts.push(
+      'CONTEXT: this is a READ-ONLY DATA EXPORT, not a code change. Do NOT modify, commit, or push ' +
+        'code; do NOT create branches or open a PR; do NOT run or browser-test the app. Ignore any part ' +
+        'of the instruction below that assumes a code change. Use only the data source/credentials the ' +
+        'ticket provides. For "verify", check the EXPORTED DATA is correct (row counts, filters, columns ' +
+        'match the request) — not the app.',
+    )
   if (extras.isReprocess)
     parts.push(
       'NOTE: this ticket was processed before and is being handled again because ' +
