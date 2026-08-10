@@ -1,0 +1,185 @@
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ticketloop</title>
+<link rel="stylesheet" href="style.css" />
+
+<header class="topbar">
+  <div class="brand">
+    <span id="statusDot" class="dot" title="loop status"></span>
+    <span class="brand-name">ticketloop</span>
+    <span id="planBadge" class="plan-badge">—</span>
+  </div>
+  <nav class="nav" role="tablist" aria-label="Views">
+    <button id="navActivity" class="nav-btn is-active" role="tab" aria-selected="true">Activity</button>
+    <button id="navHistory" class="nav-btn" role="tab" aria-selected="false">History</button>
+    <button id="navSetup" class="nav-btn" role="tab" aria-selected="false">Setup</button>
+  </nav>
+  <div class="topbar-right">
+    <span id="connState" class="conn-state" hidden>reconnecting…</span>
+    <button id="scanBtn" class="btn">Scan now</button>
+  </div>
+</header>
+
+<main class="wrap">
+  <!-- ===== Activity view ===== -->
+  <div id="viewActivity" class="view">
+    <div id="warnings" class="warnings" hidden></div>
+
+    <div id="liveMonitor" class="live-monitor" hidden></div>
+
+    <section class="quota-grid">
+      <div id="windowCard" class="meter-card"></div>
+      <div id="weeklyCard" class="meter-card"></div>
+    </section>
+    <p class="disclaimer">
+      <b>real</b> = your actual Claude subscription usage (read from Claude Code); <b>est</b> = a rough token-based estimate shown only when the real number isn't available.
+    </p>
+
+    <section class="activity">
+      <div class="section-head">
+        <h2>Activity</h2>
+        <span id="activityMeta" class="muted"></span>
+      </div>
+      <ul id="feed" class="feed"></ul>
+      <div id="emptyState" class="empty" hidden>No runs yet — click <b>Scan now</b>.</div>
+    </section>
+  </div>
+
+  <!-- ===== History view ===== -->
+  <div id="viewHistory" class="view" hidden>
+    <div id="historyError" class="warnings setup-error" hidden></div>
+
+    <form id="historyFilters" class="history-filters" role="search" autocomplete="off">
+      <div class="hf-toggle-row">
+        <button type="button" id="hFilterToggle" class="btn btn-ghost btn-sm hf-toggle" aria-expanded="true">Filters</button>
+      </div>
+
+      <div id="hFilterBody" class="hf-body">
+        <div class="hf-row hf-row-top">
+          <div class="hf-search">
+            <span class="hf-search-ico" aria-hidden="true">🔍</span>
+            <input
+              id="hQ"
+              class="input hf-search-input"
+              type="text"
+              placeholder="Search ticket or title…"
+              aria-label="Search ticket or title"
+            />
+            <button type="button" id="hQClear" class="hf-search-clear" aria-label="Clear search" hidden>×</button>
+          </div>
+          <label class="hf-field">
+            <span class="hf-label">Project</span>
+            <select id="hProject" class="input" aria-label="Project"></select>
+          </label>
+          <div class="hf-field hf-outcome">
+            <span class="hf-label">Outcome</span>
+            <button
+              type="button"
+              id="hOutcomeBtn"
+              class="input hf-outcome-btn"
+              aria-haspopup="true"
+              aria-expanded="false"
+            >All outcomes</button>
+            <div id="hOutcomePanel" class="hf-popover" hidden></div>
+          </div>
+        </div>
+
+        <div class="hf-row hf-row-bottom">
+          <div class="hf-field hf-dates">
+            <span class="hf-label">Date range</span>
+            <div class="hf-quick" id="hQuick">
+              <button type="button" class="hf-quick-btn" data-range="today">Today</button>
+              <button type="button" class="hf-quick-btn" data-range="7d">7d</button>
+              <button type="button" class="hf-quick-btn" data-range="30d">30d</button>
+              <button type="button" class="hf-quick-btn" data-range="all">All</button>
+            </div>
+            <div class="hf-date-row">
+              <input id="hFrom" class="input" type="date" aria-label="From date" />
+              <span class="hf-arrow" aria-hidden="true">→</span>
+              <input id="hTo" class="input" type="date" aria-label="To date" />
+            </div>
+          </div>
+          <label class="hf-field">
+            <span class="hf-label">Sort</span>
+            <select id="hSort" class="input" aria-label="Sort">
+              <option value="started_desc">Newest first</option>
+              <option value="started_asc">Oldest first</option>
+              <option value="cost_desc">Most expensive</option>
+              <option value="tokens_desc">Most tokens</option>
+              <option value="duration_desc">Longest run</option>
+            </select>
+          </label>
+          <label class="hf-field">
+            <span class="hf-label">Per page</span>
+            <select id="hLimit" class="input" aria-label="Results per page">
+              <option value="25">25 / page</option>
+              <option value="50">50 / page</option>
+              <option value="100">100 / page</option>
+            </select>
+          </label>
+        </div>
+      </div>
+
+      <div id="hChips" class="hf-chips" hidden></div>
+    </form>
+
+    <div class="history-meta">
+      <span id="historyCount" class="muted" aria-live="polite"></span>
+      <div class="history-meta-actions">
+        <button type="button" id="hExpandAll" class="btn btn-ghost btn-sm">Expand all</button>
+        <button type="button" id="hRefresh" class="btn btn-ghost btn-sm">↻ Refresh</button>
+      </div>
+    </div>
+
+    <ul id="historyFeed" class="feed"></ul>
+    <div id="historyEmpty" class="empty" hidden></div>
+
+    <nav id="historyPager" class="pager" aria-label="Pagination" hidden>
+      <button type="button" id="hPrev" class="btn btn-ghost" aria-label="Previous page">‹ Prev</button>
+      <span id="hPageLabel" class="pager-label muted"></span>
+      <button type="button" id="hNext" class="btn btn-ghost" aria-label="Next page">Next ›</button>
+    </nav>
+  </div>
+
+  <!-- ===== Setup view ===== -->
+  <div id="viewSetup" class="view" hidden>
+    <div id="setupError" class="warnings setup-error" hidden></div>
+
+    <section class="env-strip">
+      <div id="envChips" class="env-chips"></div>
+      <div id="envMeta" class="env-meta muted"></div>
+      <p class="env-note muted">Global settings are edited in ticketloop.config.yml / CLI.</p>
+    </section>
+
+    <section class="projects">
+      <div class="section-head">
+        <h2>Projects</h2>
+        <button id="addProjectBtn" class="btn">Add project</button>
+      </div>
+      <div id="projectList" class="project-list"></div>
+      <div id="projectEmpty" class="empty" hidden>No projects yet — click <b>Add project</b>.</div>
+    </section>
+  </div>
+</main>
+
+<!-- ===== Project form modal ===== -->
+<div id="formOverlay" class="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="formTitle">
+    <div class="modal-head">
+      <h2 id="formTitle">Add project</h2>
+      <button id="formClose" class="icon-btn" aria-label="Close">×</button>
+    </div>
+    <form id="projectForm" class="modal-body"></form>
+    <div class="modal-foot">
+      <div id="formInlineError" class="form-inline-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" id="formCancel" class="btn btn-ghost">Cancel</button>
+        <button type="submit" id="formSave" form="projectForm" class="btn">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script type="module" src="app.js"></script>

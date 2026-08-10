@@ -1,0 +1,173 @@
+# ticketloop configuration
+# Copy to `ticketloop.config.yml` (in your working dir or ~/.ticketloop/config.yml)
+# and edit. Run `ticketloop doctor` to sanity-check it.
+
+version: 1
+
+# ---- Bounded fix-loop ------------------------------------------------------
+# After `fix`, the engine runs your check command + verify + review; if it isn't
+# clean it feeds the findings back into another fix, up to maxFixIterations
+# (with no-progress + quota backstops). Set maxFixIterations: 1 for the old
+# single-pass behavior.
+loop:
+  enabled: true
+  maxFixIterations: 3
+
+# ---- Quota / governor ------------------------------------------------------
+# Anthropic does NOT publish real subscription token quotas, so these are
+# tunable ESTIMATES the dashboard uses to show a % of your 5-hour / weekly
+# budget. Adjust to match your plan and how full the meters feel in practice.
+quota:
+  plan: max20x # informational label only
+  windowHours: 5
+  sessionTokenBudget: 220000 # est. tokens per rolling 5h window
+  weeklyTokenBudget: 5000000 # est. tokens per 7 days
+
+# ---- Auth ------------------------------------------------------------------
+# subscription = use your logged-in `claude` CLI (Pro/Max). ticketloop will
+#   refuse --bare and will UNSET ANTHROPIC_API_KEY for the child so you are
+#   billed against your subscription, not the metered API.
+# api = use ANTHROPIC_API_KEY (metered). Choose this for unattended/heavy use.
+auth:
+  mode: subscription
+
+runner:
+  claudeBin: claude
+  defaultModel: sonnet # keep the cheap/large pool for routine work
+  defaultEffort: medium
+  maxTurns: 40
+
+server:
+  host: 127.0.0.1
+  port: 4317 # dashboard: http://127.0.0.1:4317
+
+# ---- Tracker DEFAULTS (per-project overrides below win) --------------------
+# type: linear | mock   (mock = built-in demo tickets, no creds needed)
+# These are just defaults. Each project can point at its OWN Linear workspace
+# (see projects[].tracker) — essential if you have several Linear accounts.
+#
+# API KEYS: don't put keys here. Store each project's key in the daemon with
+#   ticketloop set-key <project>        (prompts, saved chmod 600, no env needed)
+# `apiKeyEnv` below is only a fallback for CI/headless where env vars are easier.
+tracker:
+  type: linear
+  apiKeyEnv: LINEAR_API_KEY # fallback env var (prefer `set-key`)
+  simpleLabel: ai-loop # only tickets with this label are eligible
+  states: [Todo, Backlog] # only these workflow states
+  team: null # optional: restrict to one Linear team key, e.g. "MIL"
+  pollIntervalSec: 300
+
+repo:
+  type: github
+  tokenEnv: GITHUB_TOKEN # optional; `gh` CLI auth is used if already logged in
+
+# ---- MCP servers exposed to Claude during runs (optional) ------------------
+# These are passed to `claude -p --mcp-config`. Use them so Claude can act on
+# Linear / GitHub directly. Credentials come from env vars you set.
+mcp:
+  linear:
+    command: npx
+    args: [-y, mcp-remote, https://mcp.linear.app/sse]
+  # github:
+  #   command: npx
+  #   args: [-y, "@modelcontextprotocol/server-github"]
+  #   env: { GITHUB_PERSONAL_ACCESS_TOKEN: "${GITHUB_TOKEN}" }
+
+# ---- The framework: one instruction-driven step at a time ------------------
+# ticketloop provides a generic sequence of steps and a sensible DEFAULT
+# instruction for each. The MODEL does the work of each step using whatever
+# skills / tools / MCP / CLI it has — the harness does not dictate HOW.
+#
+# Steps (in order):
+#   triage → clarify → plan → prepare → fix → verify → review → ship → comment
+#   (question tickets take triage → clarify → comment; changes take the rest)
+#
+# Each step accepts:
+#   model, effort, skill        model tier / thinking effort / a skill to invoke
+#   allowedTools                which tools the model may use this step
+#   instruction                 YOUR instruction for this step (see below)
+#   instructionMode             replace (default) | append  — vs the built-in default
+#   enabled: false              skip this step entirely
+#
+# `instruction` is where you make it yours: tell the model to use a specific
+# skill to test the app, hit a particular MCP, run your own CLI, follow your
+# commit/PR conventions, etc. With mode: replace it fully replaces the default;
+# with mode: append it is added on top of the default.
+stages:
+  # examples — delete/keep as you like; omitting a step uses its built-in default
+  verify:
+    instructionMode: append
+    instruction: "Run `deno task check` (and `npm run test` if relevant); use the `test-plan` skill to sanity-check UI changes and run the app in the browser to confirm. Fail the verdict if any of these fail."
+  review:
+    skill: code-review
+  ship:
+    instructionMode: append
+    instruction: "Commit style: <50-char summary, no AI attribution line. Open the PR against main; never merge."
+
+# ---- Projects --------------------------------------------------------------
+# One entry per repo. `match` routes a ticket to a project; `exclude` lists
+# glob paths the agent must NEVER auto-edit (your safety rail).
+projects:
+  - name: my-app
+    repoPath: /absolute/path/to/my-app      # your normal checkout — NOT a clone
+    devUrl: http://localhost:5173
+    # autonomy: clarify (answer questions only) | propose (open PR, human merges)
+    #           | gated-merge (auto-merge trivial copy/CSS when review is clean)
+    autonomy: propose
+    # Each change runs in an isolated git WORKTREE off this repo (default), so
+    # the loop never disturbs your working tree. Set false to work in-place.
+    useWorktree: true
+    # worktreeBase: /custom/path        # default: ~/.ticketloop/worktrees/<project>
+    # This project's OWN Linear workspace. Store its key with:
+    #   ticketloop set-key my-app
+    tracker:
+      simpleLabel: ai-loop
+      team: MIL
+    match:
+      linearTeam: MIL # optional; only needed if one workspace serves many projects
+    exclude:
+      - "**/migrations/**"
+      - "**/*auth*"
+      - "**/*timezone*"
+      - "**/schema/**"
+    # per-project stage overrides (optional). Put any build/test/lint command in
+    # the verify step's instruction — there is no separate testCmd.
+    stages:
+      clarify:
+        instruction: "Answer in the client's language. Be concrete about which screen/flow."
+      verify:
+        instructionMode: append
+        instruction: "Run `npm run check`; fail the verdict if it doesn't pass."
+
+  # A second project on a DIFFERENT Linear workspace/account:
+  - name: other-app
+    repoPath: /absolute/path/to/other-app
+    autonomy: clarify
+    tracker:
+      simpleLabel: ai-loop # its own workspace → key via `ticketloop set-key other-app`
+    exclude: ["**/migrations/**"]
+
+  # ---- MULTI-REPO project (sibling repos in one folder) --------------------
+  # When one "project" folder holds several independent git repos and a ticket
+  # can touch any of them, list them under `repos`. `repoPath` becomes the
+  # WORKSPACE ROOT (the container folder, not itself a repo). Each change runs
+  # with one worktree PER repo mirrored under the root, so the model sees all
+  # repos side-by-side; every changed repo gets its OWN branch, commit, and PR.
+  #   • Omit `repos` for the normal single-repo case (zero behaviour change).
+  #   • A MONOREPO is NOT this — just point `repoPath` at the monorepo root.
+  - name: hkbu
+    repoPath: /absolute/path/to/hkbu     # parent folder containing the repos
+    autonomy: propose
+    useWorktree: true
+    repos:
+      - name: frontend                    # dir name in the workspace + PR label
+        path: bu-job-board-frontend       # relative to repoPath (absolute allowed)
+        # base: main                      # optional; default = detected default branch
+      - name: backend
+        path: bu-job-board-backend
+      - name: infra
+        path: iac-hkbu-uat
+        shipDisabled: true                # greppable context only; editing it BLOCKS
+    exclude:                              # repo-PREFIXED in multi-repo mode
+      - backend/migrations/**
+      - "**/*auth*"

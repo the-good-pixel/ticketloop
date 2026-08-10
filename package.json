@@ -1,0 +1,26 @@
+{
+  "name": "ticketloop",
+  "version": "0.1.0",
+  "description": "A local, subscription-powered agent that watches your tracker and runs a configurable dev-cycle loop (triage → clarify → plan → fix → verify → review → PR) on trivial tickets, with a quota + history dashboard.",
+  "type": "module",
+  "bin": {
+    "ticketloop": "./bin/ticketloop.mjs"
+  },
+  "scripts": {
+    "start": "tsx src/cli.ts",
+    "dev": "tsx watch src/cli.ts watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "yaml": "^2.5.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "@types/node": "^22.9.0"
+  },
+  "license": "MIT"
+}
