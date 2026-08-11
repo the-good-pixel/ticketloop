@@ -2,7 +2,9 @@
 
 const POLL_MS = 4000;
 const FAST_POLL_MS = 1500;
-const STAGE_ORDER = ['triage', 'clarify', 'plan', 'prepare', 'fix', 'verify', 'review', 'ship', 'comment'];
+// Keep in sync with STAGE_ORDER in src/types.ts (used as the pill order + a
+// fallback when the server's stageOrder isn't loaded).
+const STAGE_ORDER = ['triage', 'clarify', 'export', 'locate', 'plan', 'prepare', 'fix', 'verify', 'review', 'ship', 'deploy-dev', 'verify-dev', 'comment'];
 
 // ---- tiny DOM helpers ----
 const $ = (sel) => document.querySelector(sel);
@@ -223,7 +225,11 @@ function stageStatusMap(stages) {
 function renderStageTracker(stages) {
   const wrap = el('div', 'stages');
   const map = stageStatusMap(stages);
-  STAGE_ORDER.forEach((name) => {
+  // Show the known pipeline order, then any stage the run has that we don't know
+  // about (future-proof against new stages the frontend list hasn't caught up to).
+  const known = new Set(STAGE_ORDER);
+  const extra = (Array.isArray(stages) ? stages : []).map((s) => s && s.stage).filter((n) => n && !known.has(n));
+  [...STAGE_ORDER, ...extra].forEach((name) => {
     const status = map.get(name);
     let cls = 'stage-none';
     if (status === 'ok') cls = 'stage-ok';
