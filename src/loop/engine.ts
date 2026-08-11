@@ -471,13 +471,15 @@ export async function processTicket(
         } else if (!opened.length) {
           finish(rec, 'failed', `Ship produced no PRs across ${prs.length} repo(s).`)
         } else {
-          finish(
-            rec,
-            exhausted ? 'pr-opened-with-findings' : 'pr-opened',
-            rec.prUrl
+          // Clean finish (not exhausted) with deploy-dev on ⇒ it reached dev.
+          const deployedToDev = deployDevEnabled && !exhausted
+          const outcome = exhausted ? 'pr-opened-with-findings' : deployedToDev ? 'deployed' : 'pr-opened'
+          const note = deployedToDev
+            ? `Deployed to dev${verifyDevEnabled ? ' (verified in dev)' : ''}${rec.prUrl ? ` · PR: ${rec.prUrl}` : ''}.`
+            : rec.prUrl
               ? `Opened PR${exhausted ? ` (unresolved findings/CI after ${iteration} attempt(s))` : ''}${ws.multi ? ` in ${opened.length} repo(s)` : ''}: ${rec.prUrl}`
-              : 'Shipped (no PR URL parsed).',
-          )
+              : 'Shipped (no PR URL parsed).'
+          finish(rec, outcome, note)
         }
       }
 

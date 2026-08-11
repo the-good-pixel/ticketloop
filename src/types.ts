@@ -245,6 +245,7 @@ export type RunOutcome =
   | 'exported' // data-export request fulfilled (file posted to the ticket)
   | 'pr-opened'
   | 'pr-opened-with-findings' // shipped but the fix-loop didn't fully clear checks
+  | 'deployed' // shipped AND deployed to dev (deploy-dev, and verify-dev if on, passed)
   | 'partial' // multi-repo: ≥1 PR opened AND ≥1 repo failed to ship
   | 'merged'
   | 'skipped' // did not qualify

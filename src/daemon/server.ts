@@ -110,7 +110,7 @@ function usageSeries(windowHours: number) {
   return { buckets, days }
 }
 
-const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'partial', 'merged', 'skipped', 'blocked', 'paused', 'failed', 'running']
+const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'deployed', 'partial', 'merged', 'skipped', 'blocked', 'paused', 'failed', 'running']
 
 function parseDate(v: string | null, endOfDay = false): number | null {
   if (!v) return null

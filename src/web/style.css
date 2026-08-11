@@ -577,6 +577,17 @@ body {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
+/* Shipped AND deployed to dev — green, the strongest "done" state. */
+.badge-deployed {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+  border-color: color-mix(in srgb, var(--green) 45%, transparent);
+}
+.badge-exported {
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 15%, transparent);
+  border-color: color-mix(in srgb, var(--green) 45%, transparent);
+}
 /* PR opened, but the review flagged something worth a human look — amber so it
    reads as "needs attention", distinct from the plain blue pr-opened. */
 .badge-pr-opened-with-findings {
