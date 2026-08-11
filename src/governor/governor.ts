@@ -1,6 +1,7 @@
 import type { Config, UsageSummary, WindowUsage, UsageEvent } from '../types.js'
 import { readUsage } from '../store.js'
 import { readRealUsage } from '../realUsage.js'
+import { resetUntil } from './cooldown.js'
 
 // The governor tracks the tokens Claude reports back and expresses them as a
 // percentage of a *configured* budget. Anthropic does not publish real
@@ -64,13 +65,17 @@ export class Governor {
    * (Claude actually returning "limit reached") protects us instead.
    * `headroomPct` reserves a small margin so a single run doesn't blow past.
    */
-  canRun(_now = Date.now(), headroomPct = 3): {
+  canRun(now = Date.now(), headroomPct = 3): {
     ok: boolean
     reason?: string
     resetAt?: number
   } {
+    // A known rate-limit reset takes priority — the usage gauge below can read
+    // low while Claude is actually limiting, so the reset time is the real gate.
+    const rl = resetUntil(now)
+    if (rl > now) return { ok: false, reason: 'Claude usage limit — waiting for reset', resetAt: rl }
     const real = readRealUsage()
-    if (!real) return { ok: true } // no real data → allow; rate-limit backstop guards
+    if (!real) return { ok: true } // no real data → allow; rate-limit backoff guards
     if (real.fiveHour && real.fiveHour.pct >= 100 - headroomPct) {
       return { ok: false, reason: `5h usage at ${real.fiveHour.pct}% (real)`, resetAt: real.fiveHour.resetsAt }
     }

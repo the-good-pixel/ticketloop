@@ -11,6 +11,7 @@ import { sweepOrphans, killAllChildren } from '../runner/children.js'
 import { latestHumanActivity } from '../loop/context.js'
 import { deleteCheckpoint } from '../loop/checkpoint.js'
 import { isPaused, pausedTickets, setTicketPaused } from './control.js'
+import { resetUntil } from '../governor/cooldown.js'
 import { log } from '../logger.js'
 import { renameSync } from 'node:fs'
 
@@ -216,6 +217,13 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     // Paused: don't pick up new work OR resume anything until `resume`. In-flight
     // runs pause themselves at their next stage boundary (checkpointed).
     if (isPaused()) return { processed: 0 }
+    // Rate-limited: Claude returned a usage limit — don't scan/run until its
+    // reset time passes, so we never retry into the wall and burn tokens.
+    const rl = resetUntil()
+    if (rl > Date.now()) {
+      log.info(`rate-limited — waiting for Claude's reset at ${new Date(rl).toLocaleTimeString()} before scanning again`)
+      return { processed: 0 }
+    }
     scanning = true
     let launched = 0
     try {

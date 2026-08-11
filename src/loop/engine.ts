@@ -9,6 +9,7 @@ import type {
 } from '../types.js'
 import { resolveStage, resolveInstruction } from '../config.js'
 import { Governor } from '../governor/governor.js'
+import { resetUntil, setRateLimited, clearRateLimited } from '../governor/cooldown.js'
 import { runClaude } from '../runner/claude.js'
 import type { ClaudeResult } from '../runner/claude.js'
 import type { Tracker } from '../adapters/tracker/tracker.js'
@@ -749,6 +750,15 @@ async function stage(
     throw new PausedError(name)
   }
 
+  // QUOTA check before spending a model call: if we're still inside Claude's
+  // usage-limit window, don't run — end the run (blocked); it resumes here once
+  // the reset passes. (Guards mid-run steps + parallel runs after one hits it.)
+  const rl = resetUntil()
+  if (rl > Date.now()) {
+    saveCheckpoint(s.ck)
+    throw new Error(`RATE_LIMIT: Claude usage limit — waiting for reset at ${new Date(rl).toLocaleTimeString()}`)
+  }
+
   const sr = beginStage(rec, name, sc.model)
   const instruction = resolveInstruction(name, sc)
   const prompt = buildStagePrompt(name, ticket, project, instruction, priors, workdir, extras)
@@ -800,9 +810,15 @@ async function stage(
   endStage(rec, sr, res.isError || res.rateLimited ? 'failed' : 'ok', firstLine(res.text), res.text)
   // Claude's actual usage/rate limit — the reliable backstop. Pause (block) so
   // the ticket retries after reset, regardless of the token estimate.
-  if (res.rateLimited) throw new Error(`RATE_LIMIT: Claude usage limit reached during "${name}"`)
+  if (res.rateLimited) {
+    // Real usage limit — record its reset time; nothing runs until it passes.
+    setRateLimited(res.rateLimitResetAt)
+    throw new Error(`RATE_LIMIT: Claude usage limit reached during "${name}"`)
+  }
   if (res.isError) throw new Error(`stage "${name}" failed: ${firstLine(res.text)}`)
 
+  // A clean stage means we're not limited — drop any reset window.
+  clearRateLimited()
   // CACHE the successful output (reached only when the stage did NOT throw) so a
   // later resume replays it instead of re-running the model. A verdict-fail
   // still returns normally and is cached — the loop reconstructs its state on

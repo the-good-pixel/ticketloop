@@ -29,6 +29,7 @@ export interface ClaudeResult {
   model: string
   isError: boolean
   rateLimited?: boolean // Claude reported an actual usage/rate limit
+  rateLimitResetAt?: number // epoch ms Claude said the limit resets, if we could parse it
   raw?: string
 }
 
@@ -37,6 +38,30 @@ export function isRateLimitText(t: string): boolean {
   return /rate limit|usage limit|hit your (5-hour|weekly|usage|opus).{0,20}limit|limit .{0,10}reset|429|too many requests/i.test(
     t || '',
   )
+}
+
+// Best-effort: pull a reset time out of a rate-limit message. Handles a unix
+// timestamp, "try again in N minutes/hours", and a clock time like "resets 3pm".
+export function parseResetHint(t: string, now = Date.now()): number | undefined {
+  if (!t) return undefined
+  const ts = t.match(/reset[^0-9]{0,25}(\d{10,13})/i)
+  if (ts) return Number(ts[1]) < 1e12 ? Number(ts[1]) * 1000 : Number(ts[1])
+  const rel = t.match(/(?:try again|retry|reset[a-z]*)\D{0,20}?(\d+)\s*(second|minute|hour)s?/i)
+  if (rel) {
+    const n = Number(rel[1])
+    const mult = /hour/i.test(rel[2]) ? 3600 : /minute/i.test(rel[2]) ? 60 : 1
+    return now + n * mult * 1000
+  }
+  const clock = t.match(/reset[a-z]*\D{0,20}?(\d{1,2})(?::(\d{2}))?\s*(am|pm)/i)
+  if (clock) {
+    let h = Number(clock[1]) % 12
+    if (/pm/i.test(clock[3])) h += 12
+    const d = new Date(now)
+    d.setHours(h, clock[2] ? Number(clock[2]) : 0, 0, 0)
+    if (d.getTime() <= now) d.setDate(d.getDate() + 1) // next occurrence
+    return d.getTime()
+  }
+  return undefined
 }
 
 /**
@@ -159,6 +184,7 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
     }
     let isError = false
     let rateLimited = false
+    let resetHint: number | undefined
     let buf = ''
     let stderr = ''
 
@@ -173,6 +199,8 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
           const ev = JSON.parse(line)
           if (ev.type === 'system' && ev.subtype === 'api_retry' && ev.error === 'rate_limit') {
             rateLimited = true
+            const ra = ev.retry_after ?? ev.reset_at ?? ev.resets_at
+            if (typeof ra === 'number') resetHint = ra > 1e9 ? (ra > 1e12 ? ra : ra * 1000) : Date.now() + ra * 1000
           }
           if (ev.type === 'result') {
             if (typeof ev.result === 'string') text = ev.result
@@ -209,9 +237,11 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
         return
       }
       const limited = rateLimited || isRateLimitText(text) || isRateLimitText(stderr)
+      const resetAt = limited ? resetHint ?? parseResetHint(`${text}\n${stderr}`) : undefined
       if (code !== 0 && !text) {
         const r = errorResult(model, `claude exited ${code}: ${stderr.trim().slice(0, 300)}`)
         r.rateLimited = limited
+        r.rateLimitResetAt = resetAt
         resolve(r)
         return
       }
@@ -228,6 +258,7 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
         model,
         isError,
         rateLimited: limited,
+        rateLimitResetAt: resetAt,
       })
     })
   })
