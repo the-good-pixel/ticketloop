@@ -268,8 +268,9 @@ function renderRun(r) {
   main.appendChild(sub);
   main.appendChild(renderStageTracker(r.stages));
   if (r.error) main.appendChild(el('div', 'run-error', r.error));
-  // Resume / Restart on a ticket's LATEST run when it's failed or paused.
-  if ((r.outcome === 'failed' || r.outcome === 'paused') && newestRunIds.has(r.id)) {
+  // Resume / Restart on a ticket's LATEST run when it stopped short — failed,
+  // paused, or blocked (quota/rate-limit).
+  if ((r.outcome === 'failed' || r.outcome === 'paused' || r.outcome === 'blocked') && newestRunIds.has(r.id)) {
     const key = (r.project || '') + ':' + (r.ticket || '');
     const actions = el('div', 'run-actions');
     const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
