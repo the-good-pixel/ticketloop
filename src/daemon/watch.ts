@@ -256,20 +256,48 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
   }
 
   // Manually re-run a failed/paused ticket now. `fresh` discards the resume
-  // checkpoint so it re-runs from scratch under the CURRENT workflow (use this
-  // after changing an already-completed stage); otherwise it resumes from the
-  // checkpoint. Either way it clears any ticket-pause, makes the ticket eligible
-  // again (attempts reset — even past the give-up cap), and kicks a scan.
-  function retryTicket(ticketKey: string, fresh: boolean): { ok: true } {
+  // checkpoint so it re-runs from scratch under the CURRENT workflow (use after
+  // changing an already-completed stage); otherwise it resumes from the
+  // checkpoint. It fetches the ticket DIRECTLY (so it works even if the ticket
+  // has moved out of the watched states) and launches it — subject to the
+  // one-per-project rule.
+  function retryTicket(ticketKey: string, fresh: boolean): { ok: true } | { error: string } {
+    const idx = ticketKey.indexOf(':')
+    if (idx < 0) return { error: 'bad ticket key' }
+    const projectName = ticketKey.slice(0, idx)
+    const identifier = ticketKey.slice(idx + 1)
+    const project = cfg.projects.find((p) => p.name === projectName)
+    if (!project) return { error: `unknown project "${projectName}"` }
+    if (activeRuns.has(project.name)) {
+      return { error: `Project "${project.name}" is busy with ${activeRuns.get(project.name)} — one run per project. Try again once it finishes.` }
+    }
     setTicketPaused(ticketKey, false)
     if (fresh) deleteCheckpoint(ticketKey)
     const prev = state.get(ticketKey)
     if (prev) {
-      state.set(ticketKey, { ...prev, attempts: 0 })
+      state.set(ticketKey, { ...prev, attempts: 0 }) // clear the give-up cap
       saveState(state)
     }
     log.info(`↻ ${fresh ? 'restart (fresh)' : 'resume'} requested for ${ticketKey}`)
-    void scanNow()
+    // Fetch + launch out of band (works regardless of the ticket's current state).
+    activeRuns.set(project.name, identifier) // reserve the slot immediately
+    const tc = resolveTracker(cfg, project)
+    const key = resolveTrackerKey(project, tc)
+    const tracker = makeTracker(tc, key)
+    const p = (async () => {
+      const t = await tracker.getTicket(identifier).catch(() => null)
+      if (!t) {
+        log.error(`retry: ticket ${identifier} not found in ${project.name}`)
+        return
+      }
+      await runJob({ project, tracker, ticket: t, key, marker: latestHumanActivity(t), reprocess: true })
+    })()
+      .catch((e) => log.error(`retry ${ticketKey}: ${String(e)}`))
+      .finally(() => {
+        activeRuns.delete(project.name)
+        inflight.delete(p)
+      })
+    inflight.add(p)
     return { ok: true }
   }
 

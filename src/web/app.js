@@ -561,8 +561,8 @@ async function doTicketPause(ticketKey, paused) {
 // Resume (fresh=false) or restart-fresh (fresh=true) a failed/paused ticket now.
 async function doRetry(ticketKey, fresh) {
   try {
-    await api('/api/retry', { method: 'POST', body: JSON.stringify({ ticketKey, fresh }) });
-    pauseNote = '';
+    const r = await api('/api/retry', { method: 'POST', body: JSON.stringify({ ticketKey, fresh }) });
+    pauseNote = r && r.error ? r.error : '';
     await poll();
   } catch (e) {
     setConn(false);
