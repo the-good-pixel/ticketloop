@@ -1718,10 +1718,27 @@ function openForm(name) {
   ));
 
   const pStages = (p && p.stages) || {};
+  const gStages = g.stages || {};
   stageOrder.forEach((stage) => {
     const cur = pStages[stage] || {};
     const block = el('div', 'stage-config');
-    block.appendChild(el('div', 'stage-config-name', stage));
+
+    // name + an Enabled toggle (reflects the effective state: project override,
+    // else the global default — deploy-dev / verify-dev default OFF).
+    const head = el('div', 'stage-config-head');
+    head.appendChild(el('div', 'stage-config-name', stage));
+    const globalEnabled = gStages[stage] ? gStages[stage].enabled !== false : true;
+    const effEnabled = cur.enabled !== undefined ? cur.enabled : globalEnabled;
+    const enWrap = el('label', 'stage-enable');
+    const enCb = el('input');
+    enCb.type = 'checkbox';
+    enCb.id = 'f_stage_enabled_' + stage;
+    enCb.dataset.stage = stage;
+    enCb.checked = effEnabled;
+    enWrap.appendChild(enCb);
+    enWrap.appendChild(el('span', null, 'Enabled'));
+    head.appendChild(enWrap);
+    block.appendChild(head);
 
     // read-only default instruction
     const defWrap = el('div', 'stage-default');
@@ -1990,6 +2007,7 @@ function buildProjectFromForm() {
 
   // per-stage overrides — only non-empty
   const stageOrder = (setup.config && setup.config.stageOrder) || STAGE_ORDER;
+  const gStages = (setup.config && setup.config.globals && setup.config.globals.stages) || {};
   const stages = {};
   stageOrder.forEach((stage) => {
     const model = val('f_stage_model_' + stage);
@@ -2003,6 +2021,13 @@ function buildProjectFromForm() {
       ov.instruction = instruction;
       const modeEl = document.getElementById('f_stage_mode_' + stage);
       ov.instructionMode = modeEl ? modeEl.value : 'replace';
+    }
+    // Emit `enabled` only when it differs from the global default, so we don't
+    // bloat every stage — but a deliberate on/off (e.g. deploy-dev on) persists.
+    const enEl = document.getElementById('f_stage_enabled_' + stage);
+    if (enEl) {
+      const globalEnabled = gStages[stage] ? gStages[stage].enabled !== false : true;
+      if (enEl.checked !== globalEnabled) ov.enabled = enEl.checked;
     }
     if (Object.keys(ov).length) stages[stage] = ov;
   });

@@ -1302,11 +1302,31 @@ select.input {
   border-top: 1px solid var(--border);
 }
 
+.stage-config-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .stage-config-name {
   font-size: 13px;
   font-weight: 600;
   text-transform: capitalize;
   color: var(--text);
+}
+
+.stage-enable {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.stage-enable input {
+  cursor: pointer;
 }
 
 .stage-default {
