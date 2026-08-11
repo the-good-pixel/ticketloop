@@ -268,10 +268,12 @@ function renderRun(r) {
   main.appendChild(sub);
   main.appendChild(renderStageTracker(r.stages));
   if (r.error) main.appendChild(el('div', 'run-error', r.error));
-  // Resume / Restart on a ticket's LATEST run when it stopped short — failed,
-  // paused, or blocked (quota/rate-limit).
-  if ((r.outcome === 'failed' || r.outcome === 'paused' || r.outcome === 'blocked') && newestRunIds.has(r.id)) {
-    const key = (r.project || '') + ':' + (r.ticket || '');
+  // Resume / Restart on any stopped run card (failed / paused / blocked) of a
+  // ticket that is still stopped — so a blocked card gets buttons too, while a
+  // ticket that later succeeded shows none.
+  const rkey = (r.project || '') + ':' + (r.ticket || '');
+  if ((r.outcome === 'failed' || r.outcome === 'paused' || r.outcome === 'blocked') && resumableTicketKeys.has(rkey)) {
+    const key = rkey;
     const actions = el('div', 'run-actions');
     const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
     resume.title = 'Continue from the checkpoint (already-done stages are reused)';
@@ -457,20 +459,24 @@ function feedSignature(runs, expanded) {
     .join('|');
 }
 
-// Newest run id per ticket (project:ticket). Retry buttons show only on a
-// ticket's LATEST run, so a stale older failed attempt never offers them.
-let newestRunIds = new Set();
+// Tickets whose LATEST run is still stopped (failed/blocked/paused) → all their
+// stopped run cards offer Resume/Restart. A ticket that later succeeded/ran is
+// NOT in the set, so stale older attempts never offer them.
+let resumableTicketKeys = new Set();
 
 function renderActivity(runs) {
   lastRuns = Array.isArray(runs) ? runs : [];
   state.runsById.clear();
   lastRuns.forEach((r) => state.runsById.set(r.id, r));
-  newestRunIds = new Set();
+  resumableTicketKeys = new Set();
   const seenTickets = new Set();
   for (const r of lastRuns) {
     // lastRuns is newest-first → first time we see a ticket is its latest run.
     const key = (r.project || '') + ':' + (r.ticket || '');
-    if (!seenTickets.has(key)) { seenTickets.add(key); newestRunIds.add(r.id); }
+    if (!seenTickets.has(key)) {
+      seenTickets.add(key);
+      if (r.outcome === 'failed' || r.outcome === 'blocked' || r.outcome === 'paused') resumableTicketKeys.add(key);
+    }
   }
   // Drop expanded ids that no longer exist.
   for (const id of [...state.expanded]) {
