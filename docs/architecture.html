@@ -1,0 +1,546 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ticketloop — loop architecture</title>
+<style>
+  :root {
+    --bg: #f5f7f9;
+    --surface: #ffffff;
+    --surface-2: #eef1f5;
+    --border: #d9e0e8;
+    --text: #171c22;
+    --muted: #5a6673;
+    --api: #0f766e;
+    --api-bg: #d7f0ec;
+    --model: #6d28d9;
+    --model-bg: #ece3fb;
+    --local: #475569;
+    --local-bg: #e4e9ef;
+    --warn: #b45309;
+    --warn-bg: #fbe6d0;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c0e12;
+      --surface: #14181e;
+      --surface-2: #1b212a;
+      --border: #29313c;
+      --text: #e7ecf1;
+      --muted: #8c98a6;
+      --api: #2dd4bf;
+      --api-bg: #0f2b2a;
+      --model: #a78bfa;
+      --model-bg: #241a3a;
+      --local: #9aa7b5;
+      --local-bg: #1e242d;
+      --warn: #fbbf24;
+      --warn-bg: #2e2410;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f5f7f9; --surface: #ffffff; --surface-2: #eef1f5; --border: #d9e0e8;
+    --text: #171c22; --muted: #5a6673; --api: #0f766e; --api-bg: #d7f0ec;
+    --model: #6d28d9; --model-bg: #ece3fb; --local: #475569; --local-bg: #e4e9ef;
+    --warn: #b45309; --warn-bg: #fbe6d0;
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c0e12; --surface: #14181e; --surface-2: #1b212a; --border: #29313c;
+    --text: #e7ecf1; --muted: #8c98a6; --api: #2dd4bf; --api-bg: #0f2b2a;
+    --model: #a78bfa; --model-bg: #241a3a; --local: #9aa7b5; --local-bg: #1e242d;
+    --warn: #fbbf24; --warn-bg: #2e2410;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--sans); line-height: 1.5;
+    -webkit-font-smoothing: antialiased; overflow-x: hidden;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 40px 24px 72px; }
+
+  header { margin-bottom: 8px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--muted); margin: 0 0 10px;
+  }
+  h1 { font-size: clamp(26px, 4vw, 36px); margin: 0 0 8px; letter-spacing: -.02em; text-wrap: balance; }
+  .lede { color: var(--muted); max-width: 64ch; margin: 0 0 20px; font-size: 15px; }
+  .rev { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin: 0 0 24px; }
+  .rev b { color: var(--text); }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 32px; }
+  .lg {
+    display: inline-flex; align-items: center; gap: 8px; font-size: 13px;
+    padding: 7px 12px; border: 1px solid var(--border); border-radius: 999px;
+    background: var(--surface); font-family: var(--mono);
+  }
+  .dot { width: 11px; height: 11px; border-radius: 3px; flex: none; }
+  .dot.api { background: var(--api); }
+  .dot.model { background: var(--model); }
+  .dot.local { background: var(--local); }
+  .dot.warn { background: var(--warn); }
+
+  /* loop scaffold */
+  .loop-head {
+    display: flex; align-items: center; gap: 10px; font-family: var(--mono);
+    font-size: 12.5px; color: var(--muted); margin: 0 0 14px;
+  }
+  .loop-head .badge {
+    border: 1px dashed var(--border); border-radius: 999px; padding: 4px 11px;
+    color: var(--text); background: var(--surface);
+  }
+
+  .flow { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+
+  .node {
+    display: grid; grid-template-columns: 34px 1fr auto; align-items: center; gap: 14px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-left: 3px solid var(--drv, var(--local));
+    border-radius: 11px; padding: 13px 15px;
+  }
+  .node[data-d="api"]   { --drv: var(--api); }
+  .node[data-d="model"] { --drv: var(--model); }
+  .node[data-d="local"] { --drv: var(--local); }
+  .node[data-d="warn"]  { --drv: var(--warn); }
+
+  .glyph {
+    width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center;
+    font-family: var(--mono); font-size: 15px; font-weight: 600;
+    background: var(--surface-2); color: var(--drv, var(--local));
+    border: 1px solid var(--border);
+  }
+  .node-body .t { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+  .node-body .s { font-size: 12.5px; color: var(--muted); font-family: var(--mono); margin-top: 2px; }
+
+  .chip {
+    font-family: var(--mono); font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    padding: 5px 9px; border-radius: 6px; white-space: nowrap; text-transform: uppercase;
+  }
+  .chip.api   { background: var(--api-bg);   color: var(--api); }
+  .chip.model { background: var(--model-bg); color: var(--model); }
+  .chip.local { background: var(--local-bg); color: var(--local); }
+  .chip.warn  { background: var(--warn-bg);  color: var(--warn); }
+
+  .link { width: 2px; height: 18px; background: var(--border); margin: 0 auto; }
+  .link.dash { background: repeating-linear-gradient(var(--border) 0 4px, transparent 4px 8px); }
+
+  /* decision + branch */
+  .decision {
+    align-self: center; display: inline-flex; align-items: center; gap: 10px;
+    font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+    background: var(--surface-2); border: 1px dashed var(--border);
+    padding: 8px 15px; border-radius: 999px;
+  }
+  .branch { display: grid; grid-template-columns: 1fr 1fr 1.35fr; gap: 16px; margin-top: 18px; }
+  .lane { display: flex; flex-direction: column; gap: 0; }
+  .lane-head {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase;
+    padding: 8px 12px; border-radius: 8px 8px 0 0; font-weight: 700;
+    border: 1px solid var(--border); border-bottom: none;
+  }
+  .lane.q .lane-head { color: var(--api); background: var(--api-bg); }
+  .lane.d .lane-head { color: var(--warn); background: var(--warn-bg); }
+  .lane.c .lane-head { color: var(--model); background: var(--model-bg); }
+  .lane-inner {
+    border: 1px solid var(--border); border-radius: 0 0 11px 11px; padding: 14px;
+    background: color-mix(in srgb, var(--surface) 60%, var(--bg));
+    display: flex; flex-direction: column; gap: 0;
+  }
+  .node.sm { grid-template-columns: 26px 1fr; padding: 10px 12px; gap: 11px; border-radius: 9px; }
+  .node.sm .glyph { width: 26px; height: 26px; font-size: 12px; }
+  .node.sm .node-body .t { font-size: 13.5px; }
+  .node.sm .chip { display: none; }
+  .node.sm .tag {
+    grid-column: 2; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase;
+    letter-spacing: .04em; margin-top: 3px; color: var(--drv);
+  }
+  .link.sm { height: 12px; }
+
+  /* fix loop group inside the change lane */
+  .loopgroup {
+    border: 1px dashed color-mix(in srgb, var(--model) 55%, var(--border));
+    border-radius: 10px; padding: 10px 10px 4px; margin: 2px 0;
+    background: color-mix(in srgb, var(--model-bg) 22%, transparent);
+    display: flex; flex-direction: column; gap: 0;
+  }
+  .loopgroup .lghead, .loopgroup .lgfoot {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--model); font-weight: 700; display: flex; align-items: center; gap: 7px;
+  }
+  .loopgroup .lghead { margin-bottom: 9px; }
+  .loopgroup .lgfoot {
+    margin-top: 9px; padding-top: 9px; text-transform: none; font-weight: 600; letter-spacing: 0;
+    border-top: 1px dashed color-mix(in srgb, var(--model) 40%, var(--border));
+  }
+  .loopgroup .lgfoot .rot { font-size: 13px; }
+
+  /* generic converge / return */
+  .converge { margin-top: 16px; text-align: center; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+  .return {
+    display: flex; align-items: center; justify-content: center; gap: 9px;
+    margin-top: 18px; padding: 11px; border-radius: 11px;
+    border: 1px dashed var(--border); background: var(--surface);
+    font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+  }
+  .return b { color: var(--text); font-weight: 600; }
+
+  /* detail sections */
+  .detail { margin-top: 46px; }
+  .detail h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .detail p.note { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 66ch; }
+
+  .cyclewrap { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+  .exitcard, .infocard {
+    border: 1px solid var(--border); border-radius: 12px; background: var(--surface); padding: 16px 18px;
+  }
+  .exitcard h3, .infocard h3 { margin: 0 0 12px; font-size: 13px; font-family: var(--mono); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .exit { display: flex; gap: 11px; padding: 9px 0; border-top: 1px solid var(--border); font-size: 13.5px; }
+  .exit:first-of-type { border-top: none; }
+  .exit .oc { font-family: var(--mono); font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 6px; white-space: nowrap; height: fit-content; }
+  .oc.ok { background: var(--api-bg); color: var(--api); }
+  .oc.warn { background: var(--warn-bg); color: var(--warn); }
+  .oc.dead { background: var(--local-bg); color: var(--local); }
+  .exit .ex-b { color: var(--text); }
+  .exit .ex-b span { color: var(--muted); }
+
+  .code {
+    font-family: var(--mono); font-size: 12px; line-height: 1.7; color: var(--text);
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+    padding: 11px 13px; white-space: pre; overflow-x: auto; margin: 0 0 4px;
+  }
+  .code .g { color: var(--api); }
+  .code .r { color: var(--warn); }
+  .code .c { color: var(--muted); }
+
+  /* multi-repo tree */
+  .repolist { display: flex; flex-direction: column; gap: 9px; }
+  .repo {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px;
+    border: 1px solid var(--border); border-left: 3px solid var(--drv, var(--local));
+    border-radius: 10px; padding: 11px 14px; background: var(--surface);
+  }
+  .repo[data-d="model"] { --drv: var(--model); }
+  .repo[data-d="local"] { --drv: var(--local); }
+  .repo .rn { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+  .repo .rs { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .repo .rr { font-family: var(--mono); font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 6px; white-space: nowrap; }
+  .rr.pr { background: var(--api-bg); color: var(--api); }
+  .rr.gone { background: var(--local-bg); color: var(--local); }
+  .rootlabel { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
+  .rootlabel .fdr { color: var(--text); font-weight: 600; }
+
+  /* summary table */
+  .summary { margin-top: 46px; }
+  .summary h2 { font-size: 18px; margin: 0 0 4px; letter-spacing: -.01em; }
+  .summary p.note { color: var(--muted); font-size: 13.5px; margin: 0 0 18px; max-width: 62ch; }
+  .tbl-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; }
+  table { border-collapse: collapse; width: 100%; min-width: 520px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-family: var(--mono); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: none; }
+  td .who { font-family: var(--mono); font-size: 12px; }
+  td.steps { color: var(--muted); }
+  .pill { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11.5px; font-weight: 600; padding: 3px 8px; border-radius: 6px; }
+  .pill.api { background: var(--api-bg); color: var(--api); }
+  .pill.model { background: var(--model-bg); color: var(--model); }
+  .pill.local { background: var(--local-bg); color: var(--local); }
+
+  .principle {
+    margin-top: 28px; padding: 16px 18px; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--surface);
+    border-left: 3px solid var(--model);
+  }
+  .principle .k { font-family: var(--mono); font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+  .principle p { margin: 6px 0 0; font-size: 14px; }
+  .principle b { color: var(--model); }
+
+  @media (max-width: 680px) {
+    .branch { grid-template-columns: 1fr; }
+    .cyclewrap { grid-template-columns: 1fr; }
+    .node { grid-template-columns: 30px 1fr; }
+    .node > .chip { grid-column: 2; justify-self: start; margin-top: 4px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <p class="eyebrow">ticketloop · architecture</p>
+    <h1>How the loop works — and who drives each step</h1>
+    <p class="lede">The harness owns only the framework, the git plumbing, and a few safety rails; the model does the actual work of every step — using each project's own skills, tools, MCP, and CLI. Triage routes a ticket to one of three kinds — <b style="color:var(--text)">answer a question</b>, <b style="color:var(--text)">export data</b>, or <b style="color:var(--text)">open/refresh a PR</b>. On the change path, every gating step (verify, review, ship) returns a pass/fail <b style="color:var(--text)">verdict</b>, and <b style="color:var(--text)">ship</b> drives the PR to green CI. All Linear I/O uses each project's own API key, so multiple client workspaces never cross.</p>
+    <p class="rev">revised for review · three triage kinds (question · data · change) · data-export path with its own verify · change path can locate &amp; refresh an existing PR · per-project Linear keys (no cross-workspace MCP) · multi-repo</p>
+  </header>
+
+  <div class="legend">
+    <span class="lg"><span class="dot model"></span>Model · <span style="color:var(--muted)">claude&nbsp;-p</span></span>
+    <span class="lg"><span class="dot api"></span>External API / CLI · <span style="color:var(--muted)">Linear · gh · git</span></span>
+    <span class="lg"><span class="dot local"></span>Local harness logic</span>
+    <span class="lg"><span class="dot warn"></span>Gate / guardrail</span>
+  </div>
+
+  <p class="loop-head"><span class="badge">↻ loop</span> repeats every poll interval (default 5&nbsp;min)</p>
+
+  <div class="flow">
+    <div class="node" data-d="local">
+      <div class="glyph">⏱</div>
+      <div class="node-body"><div class="t">Scheduler tick</div><div class="s">setInterval · pollIntervalSec</div></div>
+      <span class="chip local">local</span>
+    </div>
+    <div class="link"></div>
+
+    <div class="node" data-d="api">
+      <div class="glyph">↧</div>
+      <div class="node-body"><div class="t">Fetch eligible tickets</div><div class="s">by label + state · re-run on new human activity</div></div>
+      <span class="chip api">Linear GraphQL API</span>
+    </div>
+    <div class="link"></div>
+
+    <div class="node" data-d="warn">
+      <div class="glyph">⛽</div>
+      <div class="node-body"><div class="t">Governor quota gate</div><div class="s">5h + weekly meters · pause near cap</div></div>
+      <span class="chip warn">local · gate</span>
+    </div>
+    <div class="link"></div>
+
+    <div class="node" data-d="local">
+      <div class="glyph">≈</div>
+      <div class="node-body"><div class="t">Route to project</div><div class="s">match ticket → project config · dedupe</div></div>
+      <span class="chip local">local</span>
+    </div>
+    <div class="link"></div>
+
+    <div class="node" data-d="model">
+      <div class="glyph">◆</div>
+      <div class="node-body"><div class="t">Triage</div><div class="s">model decides: eligible? · question · data · change</div></div>
+      <span class="chip model">claude -p</span>
+    </div>
+    <div class="link dash"></div>
+    <div class="decision">◆ &nbsp;branch on triage kind — question · data · change</div>
+
+    <div class="branch">
+      <!-- QUESTION LANE -->
+      <div class="lane q">
+        <div class="lane-head">Question → answer</div>
+        <div class="lane-inner">
+          <div class="node sm" data-d="model">
+            <div class="glyph">✎</div>
+            <div class="node-body"><div class="t">Clarify</div><div class="tag">model · reads code, writes the answer</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="api">
+            <div class="glyph">💬</div>
+            <div class="node-body"><div class="t">Deliver comment</div><div class="tag">model posts · project's Linear key · idempotent</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DATA LANE -->
+      <div class="lane d">
+        <div class="lane-head">Data → export</div>
+        <div class="lane-inner">
+          <div class="node sm" data-d="model">
+            <div class="glyph">✎</div>
+            <div class="node-body"><div class="t">Plan</div><div class="tag">model · what to pull, how, output format</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="model">
+            <div class="glyph">✎</div>
+            <div class="node-body"><div class="t">Prepare</div><div class="tag">model · read-only · creds/source from the ticket · connect</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="model">
+            <div class="glyph">⤓</div>
+            <div class="node-body"><div class="t">Export</div><div class="tag">model · run the read-only pull, build the file</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="model">
+            <div class="glyph">✓</div>
+            <div class="node-body"><div class="t">Verify → VERDICT</div><div class="tag">model · data correct? re-export if not (↺)</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="model">
+            <div class="glyph">📎</div>
+            <div class="node-body"><div class="t">Comment + file</div><div class="tag">model · attaches the export · project's Linear key</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- CHANGE LANE -->
+      <div class="lane c">
+        <div class="lane-head">Change → PR</div>
+        <div class="lane-inner">
+          <div class="node sm" data-d="model">
+            <div class="glyph">🔎</div>
+            <div class="node-body"><div class="t">Locate — existing PR?</div><div class="tag">model · find an OPEN PR for this ticket (gh / ticket link) · else fresh</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="local">
+            <div class="glyph">⌥</div>
+            <div class="node-body"><div class="t">Workspace setup</div><div class="tag">harness · reuse that PR's branch, or fresh off origin/main · 1 per repo</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="model">
+            <div class="glyph">✎</div>
+            <div class="node-body"><div class="t">Plan</div><div class="tag">model</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="model">
+            <div class="glyph">✎</div>
+            <div class="node-body"><div class="t">Prepare</div><div class="tag">model · gather context / deps</div></div>
+          </div>
+          <div class="link sm"></div>
+
+          <div class="loopgroup">
+            <div class="lghead"><span class="rot">↻</span> fix loop · until every step's verdict passes · ≤ maxFixIterations</div>
+            <div class="node sm" data-d="model">
+              <div class="glyph">✎</div>
+              <div class="node-body"><div class="t">Fix — edit files</div><div class="tag">model · Read / Edit / Bash</div></div>
+            </div>
+            <div class="link sm"></div>
+            <div class="node sm" data-d="warn">
+              <div class="glyph">⛨</div>
+              <div class="node-body"><div class="t">Guardrail — off-limits + changed?</div><div class="tag">harness · every iteration · all repos</div></div>
+            </div>
+            <div class="link sm"></div>
+            <div class="node sm" data-d="model">
+              <div class="glyph">✓</div>
+              <div class="node-body"><div class="t">Verify — check · VERDICT</div><div class="tag">model · runs your checks/tests</div></div>
+            </div>
+            <div class="link sm"></div>
+            <div class="node sm" data-d="model">
+              <div class="glyph">✓</div>
+              <div class="node-body"><div class="t">Review — check · VERDICT</div><div class="tag">model · e.g. /code-review skill</div></div>
+            </div>
+            <div class="link sm"></div>
+            <div class="node sm" data-d="model">
+              <div class="glyph">⇧</div>
+              <div class="node-body"><div class="t">Ship — PR + get CI green · VERDICT</div><div class="tag">model · open/update PR, watch CI &amp; fix until green · no CI → pass · never merges</div></div>
+            </div>
+            <div class="lgfoot"><span class="rot">↺</span> any step's <b style="color:var(--warn)">VERDICT: fail</b> → back to Fix with the findings</div>
+          </div>
+
+          <div class="link sm"></div>
+          <div class="node sm" data-d="model">
+            <div class="glyph">✎</div>
+            <div class="node-body"><div class="t">Comment — write outcome</div><div class="tag">model authors &amp; posts · project's Linear key</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="local">
+            <div class="glyph">⌫</div>
+            <div class="node-body"><div class="t">Cleanup</div><div class="tag">harness · remove worktrees · drop empty branches</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="converge">every step feeds the next; the harness records usage &amp; history <b style="color:var(--local)">(local store)</b> → dashboard</div>
+    <div class="return">↻ &nbsp;<b>next tick</b> — poll again; a ticket re-runs only when a new human comment arrives</div>
+  </div>
+
+  <!-- ============ THE FIX LOOP ============ -->
+  <section class="detail">
+    <h2>The fix loop, in detail</h2>
+    <p class="note">The first <b style="color:var(--text)">fix</b> runs once. Then the gates run <b style="color:var(--text)">in sequence — verify → review → ship — and each must pass before the next runs</b>: the moment one fails, its findings go straight back to fix (no point reviewing or shipping a change verify already rejected). Bounded by <span style="font-family:var(--mono)">maxFixIterations</span>, with no-progress and quota backstops. <b style="color:var(--text)">Ship</b> is the last gate: its instruction opens/updates the PR, watches the PR's CI, and fixes until green (no CI → mergeable → pass). The harness never reads CI — how to watch and wait is the ship instruction's business.</p>
+    <div class="cyclewrap">
+      <div class="flow">
+        <div class="node sm" data-d="model">
+          <div class="glyph">✎</div><div class="node-body"><div class="t">fix</div><div class="tag">edit files (repair pass gets the findings)</div></div>
+        </div>
+        <div class="link sm"></div>
+        <div class="node sm" data-d="warn">
+          <div class="glyph">⛨</div><div class="node-body"><div class="t">guardrail</div><div class="tag">off-limits path? something changed?</div></div>
+        </div>
+        <div class="link sm"></div>
+        <div class="node sm" data-d="model">
+          <div class="glyph">✓</div><div class="node-body"><div class="t">verify → VERDICT</div><div class="tag">does it actually work?</div></div>
+        </div>
+        <div class="link sm"></div>
+        <div class="node sm" data-d="model">
+          <div class="glyph">✓</div><div class="node-body"><div class="t">review → VERDICT</div><div class="tag">correct &amp; in scope?</div></div>
+        </div>
+        <div class="link sm"></div>
+        <div class="node sm" data-d="model">
+          <div class="glyph">⇧</div><div class="node-body"><div class="t">ship → VERDICT</div><div class="tag">open/update PR · watch CI · fix until green</div></div>
+        </div>
+        <div class="link sm dash"></div>
+        <div class="decision" style="margin-top:6px">◆ every step's VERDICT: pass?</div>
+        <div class="return" style="margin-top:12px; border-color: color-mix(in srgb, var(--model) 45%, var(--border)); color: var(--model)">↺ &nbsp;<b style="color:var(--model)">no → back to fix</b> &nbsp;·&nbsp; yes → done</div>
+      </div>
+
+      <div class="exitcard">
+        <h3>One signal: the verdict</h3>
+        <div class="code"><span class="c"># harness appends this to every gating step</span>
+VERDICT: <span class="g">pass</span>
+VERDICT: <span class="r">fail</span> — &lt;reason&gt;</div>
+        <p class="note" style="margin:10px 0 16px; font-size:12.5px">verify, review, and ship each end with this one line — last wins · synonyms ok · missing → fail-open. <b style="color:var(--text)">CI lives inside ship</b>: the instruction runs <span style="font-family:var(--mono)">gh pr checks</span>, fixes reds, and only passes when green. No CI → immediately mergeable → pass. The harness stays out of it.</p>
+        <h3>How it exits — the PR exists only past ship</h3>
+        <div class="exit"><span class="oc ok">pr-opened</span><div class="ex-b">every verdict passes, CI green <span>→ clean PR</span></div></div>
+        <div class="exit"><span class="oc warn">with-findings</span><div class="ex-b"><b>reached ship</b>, but checks/CI still red at the cap · no-progress · quota <span>→ flagged PR left open</span></div></div>
+        <div class="exit"><span class="oc dead">failed</span><div class="ex-b"><b>failed before ship</b> — verify/review never passed <span>→ ship not reached, no PR</span></div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ MULTI-REPO ============ -->
+  <section class="detail">
+    <h2>Multi-repo — prepare all, ship the dirty ones</h2>
+    <p class="note">A project can be a folder of sibling repos. The harness mirrors a worktree + branch for <em>every</em> repo up front (so the model sees them side-by-side and can touch any), the model edits whichever the ticket needs, then it ships one PR per <em>changed</em> repo. The guardrail runs over all repos; untouched repos' empty branches are deleted on success.</p>
+    <div class="infocard">
+      <div class="rootlabel">⌥ workspace root — <span class="fdr">~/dev/myapp/</span> · one branch <span style="font-family:var(--mono)">ticketloop/&lt;id&gt;</span> across all repos</div>
+      <div class="repolist">
+        <div class="repo" data-d="model">
+          <div><div class="rn">frontend/</div><div class="rs">worktree off origin/main · model edited it</div></div>
+          <div class="rr pr">→ PR</div>
+        </div>
+        <div class="repo" data-d="model">
+          <div><div class="rn">backend/</div><div class="rs">worktree off origin/main · model edited it</div></div>
+          <div class="rr pr">→ PR</div>
+        </div>
+        <div class="repo" data-d="local">
+          <div><div class="rn">infra/</div><div class="rs">worktree created · untouched (or read-only)</div></div>
+          <div class="rr gone">branch dropped</div>
+        </div>
+      </div>
+      <p class="note" style="margin:14px 0 0; font-size:12.5px">The model decides which repos a ticket touches — the harness never pre-assigns. A change may legitimately span repos (an API field in <span style="font-family:var(--mono)">backend</span> + the UI in <span style="font-family:var(--mono)">frontend</span>). If some repos ship and others fail, the run is <span style="font-family:var(--mono)">partial</span>.</p>
+    </div>
+  </section>
+
+  <section class="summary">
+    <h2>Who drives what</h2>
+    <p class="note">The model runs every <em>step</em> and, inside a step, reaches for that project's own git / gh / checks / skills / MCP as its instruction directs. The harness stays thin: it discovers work, does the deterministic git plumbing, enforces the guardrails, and records history.</p>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Driver</th><th>Owns</th><th>Steps / responsibilities</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><span class="pill model">■ Model</span></td>
+            <td class="who">claude -p (your subscription)</td>
+            <td class="steps">Triage · Clarify · <b>Export + Verify (data)</b> · <b>Locate</b> · Plan · Prepare · Fix · <b>Verify + Review + Ship (each emit VERDICT)</b> · Comment — <b>all the work</b>, each via its own instruction. Ship watches CI &amp; fixes to green; Locate finds an existing PR to refresh; <b>posts every comment itself</b> with the project's Linear key</td>
+          </tr>
+          <tr>
+            <td><span class="pill api">■ API / CLI</span></td>
+            <td class="who">Linear (per-project key) · git·gh·CI (model)</td>
+            <td class="steps">Harness: fetch tickets with <b>each project's own Linear key</b> (never the shared MCP → no cross-workspace), and hand that key to the model's post steps. Model: git / gh / <span style="font-family:var(--mono)">gh pr checks</span> / Linear API (right key) / skills, inside its steps</td>
+          </tr>
+          <tr>
+            <td><span class="pill local">■ Local</span></td>
+            <td class="who">the daemon itself (thin)</td>
+            <td class="steps">Scheduler · quota governor · project routing · <b>worktree setup &amp; cleanup</b> (fresh off origin/main, or reuse a located PR's branch) · off-limits guardrail (all repos) · <b>drive the loops by parsing verdicts</b> (never reads CI) · usage/history store · dashboard</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="principle">
+      <span class="k">design principle</span>
+      <p>Provide the <b>framework, not the method</b>. The harness fixes the sequence, does the mechanical git (worktree, branch off main, cleanup), and holds the safety rails — the <b>quota gate</b>, the <b>off-limits-path check</b> over every repo, and <b>“open a PR, never merge.”</b> Everything about <em>how</em> a step is done — which repos a ticket touches, where export data comes from, whether a check passes — is the model's, shaped by a per-step instruction. Each project is <b>isolated</b>: its own repo, its own Linear key, its own credentials — one client's work can never reach another's. <span style="color:var(--muted)">Trade-off: more flexible and project-adaptive, slightly less deterministic than a hard-coded harness — which is why the guardrails, git plumbing, and per-project keys stay in plain code.</span></p>
+    </div>
+  </section>
+</div>
+</body>
+</html>
