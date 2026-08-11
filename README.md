@@ -127,7 +127,7 @@ a *kind*, and the harness routes accordingly:
 |---|---|---|
 | **question** | `clarify → comment` | posts an answer on the ticket. Read-only. |
 | **data** | `plan → prepare → export → verify → comment` | posts a data file on the ticket. Read-only; runs in a throwaway worktree. |
-| **change** | `locate → plan → prepare → (fix ⇄ verify → review → ship) → comment` | opens/updates a PR (never merges) + posts a comment. |
+| **change** | `locate → plan → prepare → (fix ⇄ verify → review → ship → deploy-dev? → verify-dev?) → comment` | opens/updates a PR (never merges), optionally deploys to dev + verifies it there, + posts a comment. |
 
 ### The fix loop (change path)
 
@@ -142,6 +142,35 @@ the PR and drives its **CI to green**. It ends by shipping a PR — clean, or fl
 > There is **no** separate test/lint command. Put any build/test/lint you want gated
 > inside the **`verify`** step's instruction (e.g. "run `deno task check`; fail if it
 > doesn't pass") and it becomes part of that step's verdict.
+
+### Deploy to dev + verify in dev (opt-in)
+
+Two optional stages run after `ship` and gate the same way (`VERDICT: pass` / `fail`; a
+failure routes back to `fix`):
+
+- **`deploy-dev`** — deploy the shipped change to the **dev** environment.
+- **`verify-dev`** — confirm it actually **works in dev** (browser-test / hit the dev API),
+  not just that the build passed locally.
+
+Both are **off by default** (they need a real per-project mechanism) and named `*-dev` on
+purpose — the harness pins them to **dev only, never staging/prod**, regardless of the
+instruction. Turn them on where you want them:
+
+```yaml
+stages:
+  deploy-dev:
+    enabled: true
+    instruction: >
+      Push this branch to deployment/web/dev and wait for the dev pipeline to go
+      green (gh run watch). Confirm the change is live on https://dev.example.com.
+  verify-dev:
+    enabled: true
+    instruction: >
+      Browser-test the affected flow on https://dev.example.com and confirm it
+      behaves as the ticket asked. Fail with specifics if it doesn't.
+```
+
+When disabled, the loop ends at `ship` exactly as before.
 
 ### PR refresh (the `locate` step)
 

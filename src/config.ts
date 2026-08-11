@@ -57,6 +57,11 @@ const DEFAULTS: Config = {
     verify: { enabled: true, model: 'sonnet', allowedTools: 'Read,Edit,Bash' },
     review: { enabled: true, model: 'sonnet', skill: 'code-review', allowedTools: 'Read,Bash' },
     ship: { enabled: true, model: 'sonnet', allowedTools: 'Read,Bash' },
+    // Opt-in dev steps: deploying/verifying in dev needs a real per-project
+    // mechanism, so both are OFF by default. Turn them on (enabled: true) + give
+    // an instruction to auto-deploy each shipped change to DEV and verify it there.
+    'deploy-dev': { enabled: false, model: 'sonnet', allowedTools: 'Read,Bash' },
+    'verify-dev': { enabled: false, model: 'sonnet', allowedTools: 'Read,Bash' },
     comment: { enabled: true, model: 'sonnet', allowedTools: 'Read,Bash' },
   },
   projects: [],
@@ -131,6 +136,17 @@ export const DEFAULT_INSTRUCTIONS: Record<StageName, string> = {
     'push your commits to it. NEVER merge — stop at ready-to-merge. Report the PR URL. ' +
     '(If you want the loop to keep working until CI is green, say so in THIS instruction — the ' +
     'harness will not watch CI for you.)',
+  'deploy-dev':
+    'Deploy the change you just shipped to the DEV environment only (never staging or production). ' +
+    'Use this project\'s own deploy mechanism — describe it here per project (e.g. push the branch ' +
+    'to a deploy branch, trigger the dev pipeline, run a deploy CLI). Wait until the deploy actually ' +
+    'lands (pipeline success or a health check), then report what you did and where it went live. If ' +
+    'there is no dev-deploy step for this project, say so and pass.',
+  'verify-dev':
+    'The change is now live on DEV. Verify it actually works there: exercise the affected flow ' +
+    'against the dev URL / dev API (browser-test it or hit the endpoint) and confirm it behaves as ' +
+    'the ticket asked — this is the real-environment check, not the local build. Describe how to ' +
+    'reach dev per project. If it works, pass; if not, fail with concrete details for the fix step.',
   comment:
     'Write a concise comment for the ticket, in English, summarizing the outcome: for a question, ' +
     'the answer; for a change, what changed and the PR link. Return only the comment text.',

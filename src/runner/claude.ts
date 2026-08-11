@@ -267,6 +267,8 @@ const MOCK_TEXTS: Record<string, string> = {
   verify: 'Ran `deno task check` → passed. Rendered the apply page; button now reads 立即提交.\nVERDICT: pass',
   review: 'Pure copy change, scoped, no off-limits paths.\nVERDICT: pass',
   ship: 'Committed, pushed feature/demo-102-submit-label, opened https://github.com/demo/demo-app/pull/142',
+  'deploy-dev': 'Pushed the branch to deployment/web/dev; the dev pipeline finished green; change is live on dev.\nVERDICT: pass',
+  'verify-dev': 'Browser-tested the apply page on the dev URL; the submit button now reads 立即提交. Works in dev.\nVERDICT: pass',
   comment:
     'Updated the submit button label to 立即提交. PR: https://github.com/demo/demo-app/pull/142 — please review.\n' +
     '— 🤖 via ticketloop\nCOMMENT_URL: https://linear.app/demo/issue/DEMO/#comment-mockcomment',
@@ -275,6 +277,8 @@ const MOCK_TEXTS: Record<string, string> = {
 let mockVerifyFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFIES) || 0
 let mockReviewFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_REVIEWS) || 0
 let mockShipFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_SHIPS) || 0
+let mockDeployFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_DEPLOYS) || 0
+let mockVerifyDevFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFYDEV) || 0
 // TICKETLOOP_MOCK_ERROR_SHIP=N: the first N ship calls THROW (isError) like a
 // dropped connection — used to test resume-after-crash (the run fails, then a
 // later attempt resumes from the checkpoint and re-runs only ship).
@@ -331,6 +335,14 @@ async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
   if (kind === 'review' && mockReviewFailsLeft > 0) {
     mockReviewFailsLeft--
     text = 'Mock review: found a problem to force another fix pass.\nVERDICT: fail — injected mock failure'
+  }
+  if (kind === 'deploy-dev' && mockDeployFailsLeft > 0) {
+    mockDeployFailsLeft--
+    text = 'Mock deploy-dev: the dev pipeline failed to go green.\nVERDICT: fail — injected mock deploy failure'
+  }
+  if (kind === 'verify-dev' && mockVerifyDevFailsLeft > 0) {
+    mockVerifyDevFailsLeft--
+    text = 'Mock verify-dev: the change does not work in dev.\nVERDICT: fail — injected mock dev-verify failure'
   }
   return {
     text,

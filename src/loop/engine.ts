@@ -196,6 +196,8 @@ const MOCK_KIND: Record<StageName, any> = {
   verify: 'verify',
   review: 'review',
   ship: 'ship',
+  'deploy-dev': 'deploy-dev',
+  'verify-dev': 'verify-dev',
   comment: 'comment',
 }
 
@@ -343,6 +345,9 @@ export async function processTicket(
       // not clean, up to maxFixIterations, with no-progress + quota backstops.
       const loopEnabled = ctx.cfg.loop?.enabled !== false
       const maxIters = Math.max(1, ctx.cfg.loop?.maxFixIterations ?? 1)
+      // Dev steps are opt-in per project; when on they gate after ship.
+      const deployDevEnabled = resolveStage(ctx.cfg, 'deploy-dev', project.stages).enabled !== false
+      const verifyDevEnabled = resolveStage(ctx.cfg, 'verify-dev', project.stages).enabled !== false
       let iteration = 1
       let lastSig = ''
       let exhausted = false
@@ -396,7 +401,21 @@ export async function processTicket(
             if (!ws.multi) priors.ship = shipRes.text
             if (!shipOk) failures.push({ stage: 'ship', detail: `[${r.name}] ${shipRes.text}` })
           }
-          if (!failures.length) break // checks + ship + green CI all passed → done
+          // All repos shipped → (optionally) deploy to dev, then verify in dev.
+          // Each is gated; a failure routes back to fix like any other gate.
+          if (!failures.length && deployDevEnabled) {
+            if (ws.multi) priors.ship = prs.map((p) => (p.url ? `${p.repo}: ${p.url}` : `${p.repo}: SHIP FAILED`)).join('\n')
+            const dep = await stage(ctx, session, 'deploy-dev', `deploy-dev#${iteration}`, project, ticket, priors, workdir, extras)
+            priors.deployDev = dep.text
+            if (!parseVerdict(dep.text).pass) failures.push({ stage: 'deploy-dev', detail: dep.text })
+            else if (verifyDevEnabled) {
+              // Deployed OK → check it actually works in the dev environment.
+              const vd = await stage(ctx, session, 'verify-dev', `verify-dev#${iteration}`, project, ticket, priors, workdir, extras)
+              priors.verifyDev = vd.text
+              if (!parseVerdict(vd.text).pass) failures.push({ stage: 'verify-dev', detail: vd.text })
+            }
+          }
+          if (!failures.length) break // checks + ship (+ deploy-dev + verify-dev) all passed → done
         }
 
         if (!loopEnabled || iteration >= maxIters) {

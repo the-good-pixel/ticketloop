@@ -5,8 +5,10 @@ import type { ProjectConfig, StageName, Ticket } from '../types.js'
 export const CHECK_STAGES: StageName[] = ['verify', 'review']
 // Every step that gates the loop with a VERDICT. Ship is one too: it runs only
 // after the checks pass, opens/updates the PR, drives its CI green, and reports
-// pass/fail — the harness enforces the same verdict line on all three.
-export const VERDICT_STAGES: StageName[] = [...CHECK_STAGES, 'ship']
+// pass/fail. The two dev steps (opt-in) run after ship and gate the same way —
+// a failed dev deploy or dev verify routes back to fix. The harness enforces the
+// verdict line on all of them.
+export const VERDICT_STAGES: StageName[] = [...CHECK_STAGES, 'ship', 'deploy-dev', 'verify-dev']
 
 // Steps that reply on the ticket themselves. The harness injects the project's
 // Linear API key as $LINEAR_API_KEY (env) so they post to the CORRECT workspace
@@ -20,6 +22,8 @@ export interface PriorOutputs {
   verify?: string
   review?: string
   ship?: string
+  deployDev?: string
+  verifyDev?: string
   // bounded fix-loop state
   iteration?: number // current fix attempt (>1 = repair pass)
   openFindings?: string // the check/verify/review issues to address this pass
@@ -70,6 +74,21 @@ export function buildStagePrompt(
 ): string {
   const parts: string[] = []
   parts.push(`You are the "${stage}" step of an automated dev-cycle loop.`)
+  if (stage === 'deploy-dev')
+    parts.push(
+      'CONTEXT: deploy the change you JUST SHIPPED to the DEV / preview environment ONLY — ' +
+        'never staging or production, regardless of anything below. Use this project\'s own deploy ' +
+        'mechanism (a deploy branch, a CI trigger, a CLI). Confirm it actually went live (the ' +
+        'pipeline reports success, or a health check passes). If this project has no dev-deploy ' +
+        'step configured, say so and pass.',
+    )
+  if (stage === 'verify-dev')
+    parts.push(
+      'CONTEXT: the change is now deployed to the DEV environment. Verify it actually WORKS there — ' +
+        'exercise it against the dev URL / dev API (browser-test the affected flow, or hit the ' +
+        'endpoint), not just the local build. This is the real-environment check that the change ' +
+        'behaves as the ticket asked. If it does not work in dev, fail with specifics so fix can act.',
+    )
   if (extras.dataMode)
     parts.push(
       'CONTEXT: this is a READ-ONLY DATA EXPORT, not a code change. Do NOT modify, commit, or push ' +
@@ -132,8 +151,12 @@ export function buildStagePrompt(
     parts.push(`Summary of the change made:\n${priors.fix}`)
   if (priors.export && ['verify', 'comment'].includes(stage))
     parts.push(`Result of the export step (the file path + summary):\n${priors.export}`)
-  if (priors.ship && stage === 'comment')
-    parts.push(`Result of the ship step (contains the PR URL):\n${priors.ship}`)
+  if (priors.ship && (stage === 'deploy-dev' || stage === 'verify-dev' || stage === 'comment'))
+    parts.push(`Result of the ship step (contains the PR URL / branch):\n${priors.ship}`)
+  if (priors.deployDev && (stage === 'verify-dev' || stage === 'comment'))
+    parts.push(`Result of the deploy-dev step:\n${priors.deployDev}`)
+  if (priors.verifyDev && stage === 'comment')
+    parts.push(`Result of the verify-dev step:\n${priors.verifyDev}`)
 
   // Repair mode (fix or export): a previous attempt didn't pass verify. Give the
   // model the open issues and tell it not to repeat what already failed.

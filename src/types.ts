@@ -18,6 +18,8 @@ export type StageName =
   | 'verify'
   | 'review'
   | 'ship' // commit / push / open PR (model runs git+gh per instruction)
+  | 'deploy-dev' // deploy the shipped change to DEV (gated; opt-in per project)
+  | 'verify-dev' // verify the change works in DEV after deploy (gated; opt-in)
   | 'comment' // deliver the outcome back to the ticket
 
 export const STAGE_ORDER: StageName[] = [
@@ -31,6 +33,8 @@ export const STAGE_ORDER: StageName[] = [
   'verify',
   'review',
   'ship',
+  'deploy-dev',
+  'verify-dev',
   'comment',
 ]
 
