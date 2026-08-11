@@ -272,8 +272,8 @@
   <header>
     <p class="eyebrow">ticketloop · architecture</p>
     <h1>How the loop works — and who drives each step</h1>
-    <p class="lede">The harness owns only the framework, the git plumbing, and a few safety rails; the model does the actual work of every step — using each project's own skills, tools, MCP, and CLI. Triage routes a ticket to one of three kinds — <b style="color:var(--text)">answer a question</b>, <b style="color:var(--text)">export data</b>, or <b style="color:var(--text)">open/refresh a PR</b>. On the change path, every gating step (verify, review, ship, and the opt-in dev steps) returns a pass/fail <b style="color:var(--text)">verdict</b>, and <b style="color:var(--text)">ship</b> drives the PR to green CI. Projects run <b style="color:var(--text)">in parallel (one ticket each)</b>; any run is <b style="color:var(--text)">checkpointed</b> so it resumes where it stopped, and can be <b style="color:var(--text)">paused</b> system-wide or per ticket. All Linear I/O uses each project's own API key, so multiple client workspaces never cross.</p>
-    <p class="rev">revised · three triage kinds (question · data · change) · data-export path with its own verify · locate &amp; refresh an existing PR · opt-in deploy-dev + verify-dev after ship · parallel runs (one per project) · checkpoint resume + system/ticket pause · per-project Linear keys · multi-repo</p>
+    <p class="lede">The harness owns only the framework, the git plumbing, and a few safety rails; the model does the actual work of every step — using each project's own skills, tools, MCP, and CLI. Triage first decides whether any action is needed at all (a sign-off / approval is <b style="color:var(--text)">skipped</b>), then routes a ticket to one of four kinds — <b style="color:var(--text)">answer a question</b>, <b style="color:var(--text)">export data</b>, <b style="color:var(--text)">open/refresh a PR</b>, or <b style="color:var(--text)">investigate a bug</b> (reproduce → root-cause before planning). On the change/bug path, every gating step (verify, review, ship, and the opt-in dev steps) returns a pass/fail <b style="color:var(--text)">verdict</b>; ship drives the PR to green CI, and a run that also passes deploy-dev/verify-dev finishes <b style="color:var(--text)">deployed</b>. Projects run <b style="color:var(--text)">in parallel (one ticket each)</b>; any run is <b style="color:var(--text)">checkpointed</b> so it resumes where it stopped, and can be <b style="color:var(--text)">paused</b> system-wide or per ticket. All Linear I/O uses each project's own API key, so multiple client workspaces never cross.</p>
+    <p class="rev">revised · triage no-action skip + four kinds (question · data · change · bug) · Bug Investigation adds a reproduce step before plan · data-export path with its own verify · locate &amp; refresh an existing PR · opt-in deploy-dev + verify-dev after ship (→ deployed) · parallel runs (one per project) · checkpoint resume + system/ticket pause · per-project Linear keys · multi-repo</p>
   </header>
 
   <div class="legend">
@@ -316,11 +316,11 @@
 
     <div class="node" data-d="model">
       <div class="glyph">◆</div>
-      <div class="node-body"><div class="t">Triage</div><div class="s">model decides: eligible? · question · data · change</div></div>
+      <div class="node-body"><div class="t">Triage</div><div class="s">model decides: no-action? · question · data · change · bug</div></div>
       <span class="chip model">claude -p</span>
     </div>
     <div class="link dash"></div>
-    <div class="decision">◆ &nbsp;branch on triage kind — question · data · change</div>
+    <div class="decision">◆ &nbsp;branch on triage — <b style="color:var(--local)">no-action → skip</b> · question · data · change · bug</div>
 
     <div class="branch">
       <!-- QUESTION LANE -->
@@ -370,9 +370,9 @@
         </div>
       </div>
 
-      <!-- CHANGE LANE -->
+      <!-- CHANGE / BUG LANE -->
       <div class="lane c">
-        <div class="lane-head">Change → PR</div>
+        <div class="lane-head">Change / Bug → PR</div>
         <div class="lane-inner">
           <div class="node sm" data-d="model">
             <div class="glyph">🔎</div>
@@ -382,6 +382,11 @@
           <div class="node sm" data-d="local">
             <div class="glyph">⌥</div>
             <div class="node-body"><div class="t">Workspace setup</div><div class="tag">harness · reuse that PR's branch, or fresh off origin/main · 1 per repo</div></div>
+          </div>
+          <div class="link sm"></div>
+          <div class="node sm" data-d="model">
+            <div class="glyph">🐞</div>
+            <div class="node-body"><div class="t">Reproduce <span style="opacity:.6">· bug only</span></div><div class="tag">model · reproduce the bug + root-cause it before planning (Bug Investigation)</div></div>
           </div>
           <div class="link sm"></div>
           <div class="node sm" data-d="model">
@@ -497,9 +502,11 @@ VERDICT: <span class="g">pass</span>
 VERDICT: <span class="r">fail</span> — &lt;reason&gt;</div>
         <p class="note" style="margin:10px 0 16px; font-size:12.5px">verify, review, and ship each end with this one line — last wins · synonyms ok · missing → fail-open. <b style="color:var(--text)">CI lives inside ship</b>: the instruction runs <span style="font-family:var(--mono)">gh pr checks</span>, fixes reds, and only passes when green. No CI → immediately mergeable → pass. The harness stays out of it.</p>
         <h3>How it exits — the PR exists only past ship</h3>
+        <div class="exit"><span class="oc ok">deployed</span><div class="ex-b">shipped <b>and</b> deploy-dev (+ verify-dev) passed <span>→ live on dev</span></div></div>
         <div class="exit"><span class="oc ok">pr-opened</span><div class="ex-b">every verdict passes, CI green <span>→ clean PR</span></div></div>
         <div class="exit"><span class="oc warn">with-findings</span><div class="ex-b"><b>reached ship</b>, but checks/CI still red at the cap · no-progress · quota <span>→ flagged PR left open</span></div></div>
         <div class="exit"><span class="oc dead">failed</span><div class="ex-b"><b>failed before ship</b> — verify/review never passed <span>→ ship not reached, no PR</span></div></div>
+        <div class="exit"><span class="oc dead">skipped</span><div class="ex-b"><b>no-action</b> — a sign-off / approval / ack <span>→ triage skips, no pipeline</span></div></div>
       </div>
     </div>
   </section>
