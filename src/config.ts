@@ -68,16 +68,25 @@ const DEFAULTS: Config = {
 // wishes (use skill X, run CLI Y, hit MCP Z) belong in the user's override.
 export const DEFAULT_INSTRUCTIONS: Record<StageName, string> = {
   triage:
-    'You are ONLY classifying this ticket. Do NOT answer any question, do NOT explain, ' +
-    'do NOT make changes. Output EXACTLY these two lines and nothing else:\n' +
+    'You are ONLY classifying this ticket. Do NOT answer, explain, or make changes. Output ' +
+    'EXACTLY these two lines and nothing else:\n' +
     'DECISION: eligible        (or: DECISION: ineligible)\n' +
     'KIND: question            (or: KIND: data, or: KIND: change)\n\n' +
-    'Rules: mark INELIGIBLE only if handling it would touch an off-limits path, a DB ' +
+    'Decide KIND from what the client most recently wants — READ THE LATEST COMMENTS, not ' +
+    'just the original description (a ticket is often re-opened because of a new comment):\n' +
+    '- KIND=change — they want a code/content change. This INCLUDES follow-up feedback and ' +
+    'revisions on work already done: e.g. "this isn\'t right, please fix", "can you also ' +
+    'change X", review comments on an existing PR, or any request to adjust/redo/continue ' +
+    'prior changes. If the newest activity asks for a modification, it is a CHANGE even when ' +
+    'it is phrased as a question or politely. A ticket that already has a PR and just got ' +
+    'feedback is a change (to refresh that PR), not a question.\n' +
+    '- KIND=data — they want a read-only data pull / export, with no code change.\n' +
+    '- KIND=question — they ONLY want information or an explanation and are NOT asking for ' +
+    'any change, fix, or revision.\n\n' +
+    'Eligibility: mark INELIGIBLE only if handling it would touch an off-limits path, a DB ' +
     'migration, auth/payments/money logic, or date/timezone logic, or is clearly too ' +
-    'large/risky for a small automated change — otherwise mark it eligible. Questions are ' +
-    'always eligible. KIND=question if the client is asking something; KIND=data if they ' +
-    'want a read-only data pull / export (no code change); KIND=change if they want a ' +
-    'code/content change.',
+    'large/risky for a small automated change — otherwise mark it eligible. Questions and ' +
+    'data pulls are always eligible.',
   clarify:
     'A client asked a question. Read the codebase to answer it accurately and concisely, ' +
     'in plain language a non-engineer can follow. Reply in English. Cite the file(s)/mechanism ' +
