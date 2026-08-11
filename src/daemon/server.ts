@@ -423,6 +423,12 @@ function serverError(res: ServerResponse, e: unknown) {
   res.end(JSON.stringify({ error: String(e) }))
 }
 
+// The dashboard is served fresh from disk and changes whenever the daemon is
+// updated, so tell browsers never to cache it — otherwise a stale app.js/style
+// keeps rendering an old UI even after a hard refresh (the source of every
+// "hard-refresh needed / button missing" surprise).
+const NO_CACHE = 'no-cache, no-store, must-revalidate'
+
 function serveStatic(path: string, res: ServerResponse) {
   const rel = path === '/' ? 'index.html' : path.replace(/^\//, '')
   const file = resolve(WEB_DIR, rel)
@@ -430,12 +436,15 @@ function serveStatic(path: string, res: ServerResponse) {
     // SPA-ish fallback to index
     const index = join(WEB_DIR, 'index.html')
     if (existsSync(index)) {
-      res.writeHead(200, { 'Content-Type': MIME['.html'] })
+      res.writeHead(200, { 'Content-Type': MIME['.html'], 'Cache-Control': NO_CACHE })
       res.end(readFileSync(index))
       return
     }
     return notFound(res)
   }
-  res.writeHead(200, { 'Content-Type': MIME[extname(file)] || 'application/octet-stream' })
+  res.writeHead(200, {
+    'Content-Type': MIME[extname(file)] || 'application/octet-stream',
+    'Cache-Control': NO_CACHE,
+  })
   res.end(readFileSync(file))
 }
