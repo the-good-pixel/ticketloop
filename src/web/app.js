@@ -4,7 +4,7 @@ const POLL_MS = 4000;
 const FAST_POLL_MS = 1500;
 // Keep in sync with STAGE_ORDER in src/types.ts (used as the pill order + a
 // fallback when the server's stageOrder isn't loaded).
-const STAGE_ORDER = ['triage', 'clarify', 'export', 'locate', 'plan', 'prepare', 'fix', 'verify', 'review', 'ship', 'deploy-dev', 'verify-dev', 'comment'];
+const STAGE_ORDER = ['triage', 'clarify', 'export', 'locate', 'reproduce', 'plan', 'prepare', 'fix', 'verify', 'review', 'ship', 'deploy-dev', 'verify-dev', 'comment'];
 
 // ---- tiny DOM helpers ----
 const $ = (sel) => document.querySelector(sel);

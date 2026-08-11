@@ -16,6 +16,7 @@ export const VERDICT_STAGES: StageName[] = [...CHECK_STAGES, 'ship', 'deploy-dev
 export const POST_STAGES: StageName[] = ['clarify', 'comment']
 
 export interface PriorOutputs {
+  reproduce?: string // bug path: the reproduction + root cause
   plan?: string
   fix?: string
   export?: string // data path: the export step's result (file path + summary)
@@ -74,6 +75,12 @@ export function buildStagePrompt(
 ): string {
   const parts: string[] = []
   parts.push(`You are the "${stage}" step of an automated dev-cycle loop.`)
+  if (stage === 'reproduce')
+    parts.push(
+      'CONTEXT: this is a BUG INVESTIGATION. Your job in THIS step is only to reproduce the bug ' +
+        'and find its root cause — do NOT write the fix yet (the later fix step does that). Produce ' +
+        'a concrete reproduction and the root cause so the plan and fix steps can act on it.',
+    )
   if (stage === 'deploy-dev')
     parts.push(
       'CONTEXT: deploy the change you JUST SHIPPED to the DEV / preview environment ONLY — ' +
@@ -145,6 +152,8 @@ export function buildStagePrompt(
     parts.push(`OFF-LIMITS paths${extras.workspace?.length ? ' (repo-prefixed)' : ''} — never edit these: ${p.exclude.join(', ')}`)
   if (p.devUrl) parts.push(`Local dev URL (if useful): ${p.devUrl}`)
 
+  if (priors.reproduce && ['plan', 'prepare', 'fix', 'verify', 'review', 'comment'].includes(stage))
+    parts.push(`Reproduction + root cause from the reproduce step:\n${priors.reproduce}`)
   if (priors.plan && ['prepare', 'fix', 'export', 'verify', 'review', 'ship', 'comment'].includes(stage))
     parts.push(`Plan from the plan step:\n${priors.plan}`)
   if (priors.fix && ['verify', 'review', 'ship', 'comment'].includes(stage))

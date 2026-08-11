@@ -261,6 +261,9 @@ const MOCK_TEXTS: Record<string, string> = {
     'Connected read-only with the credentials from the ticket. Wrote ./member-export.csv ' +
     '(1,234 rows · columns: email, marketing_opt_in · opt-out rows filtered out).',
   locate: 'Searched gh for an open PR on this ticket; none found.\nREUSE: none',
+  reproduce:
+    'Reproduced the bug: the submit button throws on click because the handler reads an undefined ' +
+    'field. Root cause: missing null-guard in apply/submit.ts. Repro: open the apply page, click 提交.',
   plan: '1. Update the button label string in the zh-HK locale file.\n2. No logic changes.\n3. Verify with `deno task check`.',
   prepare: 'Created branch feature/demo-102-submit-label off main. Located src/lib/i18n/zh-HK.ts.',
   diff: 'Edited src/lib/i18n/zh-HK.ts: "提交" → "立即提交". 1 file, +1/-1.',

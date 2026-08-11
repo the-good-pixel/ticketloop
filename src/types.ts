@@ -12,6 +12,7 @@ export type StageName =
   | 'clarify' // question path: read code, answer the client
   | 'export' // data path: read-only data pull → export file
   | 'locate' // change path: find an existing open PR to refresh (read-only)
+  | 'reproduce' // bug path: reproduce the bug + find root cause before planning
   | 'plan'
   | 'prepare' // pre-fix setup: branch, context, deps — model's call
   | 'fix'
@@ -27,6 +28,7 @@ export const STAGE_ORDER: StageName[] = [
   'clarify',
   'export',
   'locate',
+  'reproduce',
   'plan',
   'prepare',
   'fix',

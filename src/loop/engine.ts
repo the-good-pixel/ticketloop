@@ -83,9 +83,10 @@ function djb2(s: string): string {
   return h.toString(36)
 }
 
-// The kind triage emitted (question | data | change), or null if it didn't say.
-function parseKind(text: string): 'question' | 'data' | 'change' | null {
+// The kind triage emitted (question | data | change | bug), or null if unset.
+function parseKind(text: string): 'question' | 'data' | 'change' | 'bug' | null {
   if (/KIND:\s*data/i.test(text)) return 'data'
+  if (/KIND:\s*bug/i.test(text)) return 'bug'
   if (/KIND:\s*change/i.test(text)) return 'change'
   if (/KIND:\s*question/i.test(text)) return 'question'
   return null
@@ -190,6 +191,7 @@ const MOCK_KIND: Record<StageName, any> = {
   clarify: 'answer',
   export: 'export',
   locate: 'locate',
+  reproduce: 'reproduce',
   plan: 'plan',
   prepare: 'prepare',
   fix: 'diff',
@@ -336,6 +338,12 @@ export async function processTicket(
     let dirty: WorkRepo[] = []
 
     try {
+      // Bug Investigation: reproduce + root-cause the bug before planning a fix.
+      if (kind === 'bug') {
+        priors.reproduce = (await stage(ctx, session, 'reproduce', 'reproduce', project, ticket, priors, workdir, extras)).text
+      } else {
+        skip(rec, 'reproduce', 'not a bug investigation')
+      }
       priors.plan = (await stage(ctx, session, 'plan', 'plan', project, ticket, priors, workdir, extras)).text
       await stage(ctx, session, 'prepare', 'prepare', project, ticket, priors, workdir, extras)
       priors.iteration = 1

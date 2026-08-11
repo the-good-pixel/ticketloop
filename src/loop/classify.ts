@@ -6,8 +6,10 @@ const QUESTION_WORDS =
   /\b(why|how|what|when|where|which|does|is it|can (i|we|you)|possible|expected|explain)\b/i
 // read-only data-pull / export requests (EN + zh 匯出/導出/匯出名單 etc.)
 const DATA_WORDS = /\b(export|extract|pull|dump|download|report|list of|csv|excel|spreadsheet)\b|匯出|導出|滙出|export/i
+// something is broken (EN + zh) — a bug report, not a feature/enhancement
+const BUG_WORDS = /\b(bug|broken|crash(es|ed|ing)?|regression|exception|stack ?trace|null ?pointer|npe|not working|doesn'?t work|stopped working|throws?|500 error)\b|壞(咗|了)?|錯誤|異常|報錯|閃退|崩潰/i
 
-export function classifyKind(t: Ticket): 'question' | 'data' | 'change' {
+export function classifyKind(t: Ticket): 'question' | 'data' | 'change' | 'bug' {
   const hay = `${t.title}\n${t.description}`
   if (t.labels.map((l) => l.toLowerCase()).includes('question')) return 'question'
   if (t.title.trim().endsWith('?')) return 'question'
@@ -16,6 +18,8 @@ export function classifyKind(t: Ticket): 'question' | 'data' | 'change' {
     return 'data'
   if (QUESTION_WORDS.test(hay) && !/\b(change|update|fix|add|remove|set|make)\b/i.test(t.title))
     return 'question'
+  // a broken-behavior report → bug investigation (reproduce before planning)
+  if (BUG_WORDS.test(hay)) return 'bug'
   return 'change'
 }
 

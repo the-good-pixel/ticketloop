@@ -51,6 +51,7 @@ const DEFAULTS: Config = {
     clarify: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
     export: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
     locate: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
+    reproduce: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Edit,Bash' },
     plan: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
     prepare: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
     fix: { enabled: true, model: 'sonnet', allowedTools: 'Read,Edit,Bash' },
@@ -76,15 +77,20 @@ export const DEFAULT_INSTRUCTIONS: Record<StageName, string> = {
     'You are ONLY classifying this ticket. Do NOT answer, explain, or make changes. Output ' +
     'EXACTLY these two lines and nothing else:\n' +
     'DECISION: eligible        (or: DECISION: ineligible)\n' +
-    'KIND: question            (or: KIND: data, or: KIND: change)\n\n' +
+    'KIND: question            (or: KIND: data, or: KIND: change, or: KIND: bug)\n\n' +
     'Decide KIND from what the client most recently wants — READ THE LATEST COMMENTS, not ' +
     'just the original description (a ticket is often re-opened because of a new comment):\n' +
-    '- KIND=change — they want a code/content change. This INCLUDES follow-up feedback and ' +
-    'revisions on work already done: e.g. "this isn\'t right, please fix", "can you also ' +
-    'change X", review comments on an existing PR, or any request to adjust/redo/continue ' +
-    'prior changes. If the newest activity asks for a modification, it is a CHANGE even when ' +
-    'it is phrased as a question or politely. A ticket that already has a PR and just got ' +
-    'feedback is a change (to refresh that PR), not a question.\n' +
+    '- KIND=bug — they report something BROKEN / not working as expected: an error, a crash, ' +
+    'wrong output, a regression, "X is broken", "this stopped working", a reproducible defect. ' +
+    'This is a change that first needs the bug reproduced and root-caused. Prefer bug over ' +
+    'change whenever the ask is "fix this broken behavior" rather than "build/adjust this".\n' +
+    '- KIND=change — they want a code/content change that is NOT a bug fix: a new feature, an ' +
+    'enhancement, a copy/label tweak. This INCLUDES follow-up feedback and revisions on work ' +
+    'already done: e.g. "this isn\'t right, please fix", "can you also change X", review ' +
+    'comments on an existing PR, or any request to adjust/redo/continue prior changes. If the ' +
+    'newest activity asks for a modification, it is a CHANGE (or a BUG) even when phrased as a ' +
+    'question or politely. A ticket that already has a PR and just got feedback is a change ' +
+    '(to refresh that PR), not a question.\n' +
     '- KIND=data — they want a read-only data pull / export, with no code change.\n' +
     '- KIND=question — they ONLY want information or an explanation and are NOT asking for ' +
     'any change, fix, or revision.\n\n' +
@@ -109,6 +115,13 @@ export const DEFAULT_INSTRUCTIONS: Record<StageName, string> = {
     'changes. Output EXACTLY one final line:\n' +
     '  REUSE: <branch>   (an OPEN PR for this ticket exists — give its head branch, so we refresh it)\n' +
     '  REUSE: none       (no open PR — start fresh; ignore merged/closed PRs).',
+  reproduce:
+    'This ticket reports a bug. BEFORE planning any fix, reproduce it and find the root cause. ' +
+    'Confirm the buggy behavior actually happens (run the app / write a failing test / follow the ' +
+    'repro steps), pin down exactly what triggers it and why (the root cause in the code), and ' +
+    'capture a concrete reproduction (steps, a failing test, logs/errors). If you CANNOT reproduce ' +
+    'it, say so clearly with what you tried and your best hypothesis. Do NOT fix it yet — only ' +
+    'establish the reproduction + root cause so the plan step can act on it.',
   plan:
     'Plan the smallest correct change. State which file(s) you will edit, the exact change, ' +
     'and how you will verify it. Do not edit anything yet.',
