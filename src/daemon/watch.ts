@@ -78,12 +78,12 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
   }
   let running = true
   let lastScan: number | undefined
-  let scanning = false
-  // live scan progress for the real-time monitor
-  let scanTotal = 0
-  let scanDone = 0
-  let activeTicket: string | undefined
-  let activeProject: string | undefined
+  let scanning = false // guards the SELECTION pass only (not the runs)
+  // Parallelism: one run per project at a time (avoids two worktrees/dev-servers
+  // colliding in the same repo). `activeRuns` maps a busy project → its ticket;
+  // a project already in the map is skipped until its run finishes.
+  const activeRuns = new Map<string, string>() // project name → ticket identifier
+  const inflight = new Set<Promise<void>>() // launched runs (awaited on once/shutdown)
 
   for (const w of assertAuthSafe(cfg.auth.mode).warnings) log.warn(w)
   if (cfg.runner.permissionMode === 'bypass') {
@@ -99,145 +99,158 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       (opts.mock ? '  [DEMO/MOCK MODE]' : ''),
   )
 
+  type Job = {
+    project: (typeof cfg.projects)[number]
+    tracker: ReturnType<typeof makeTracker>
+    ticket: Awaited<ReturnType<ReturnType<typeof makeTracker>['listCandidates']>>[number]
+    key: string
+    marker: string
+    reprocess: boolean
+  }
+
+  // Pick the FIRST ticket this project should work on now (or null). One ticket
+  // per project keeps the per-project single-run invariant simple.
+  async function selectJob(project: (typeof cfg.projects)[number]): Promise<Job | null> {
+    const tc = resolveTracker(cfg, project)
+    if (tc.type === 'linear' && !tc.simpleLabel) {
+      log.warn(
+        `[${project.name}] no tracker label set — the loop will consider ALL ` +
+          `tickets in states [${tc.states.join(', ')}]. Set a label to opt tickets in.`,
+      )
+    }
+    const key = resolveTrackerKey(project, tc)
+    const tracker = makeTracker(tc, key)
+    let tickets
+    try {
+      tickets = await tracker.listCandidates()
+    } catch (e) {
+      log.error(`scan ${project.name}: tracker error — ${String(e)}`)
+      return null
+    }
+    for (const t of tickets) {
+      const sKey = `${project.name}:${t.identifier}`
+      const marker = latestHumanActivity(t)
+      // After state corruption: adopt every current ticket as done (don't re-run)
+      // so recovery can't cause mass re-processing.
+      if (adoptMode) {
+        state.set(sKey, { marker, attempts: 0, lastOutcome: 'adopted' })
+        continue
+      }
+      const prev = state.get(sKey)
+      // Process when: never seen, OR a genuinely NEW human comment arrived (newest
+      // timestamp advanced), OR the last run failed / was interrupted mid-run and
+      // we're under the retry cap, OR it paused mid-flight (resume when unpaused).
+      const newActivity = !prev || marker > prev.marker
+      const needsRetry =
+        !!prev &&
+        prev.attempts < MAX_ATTEMPTS &&
+        (prev.lastOutcome === 'failed' || prev.lastOutcome === 'running')
+      const needsResume = !!prev && prev.lastOutcome === 'paused'
+      if (!newActivity && !needsRetry && !needsResume) continue
+      return { project, tracker, ticket: t, key, marker, reprocess: !!prev }
+    }
+    return null
+  }
+
+  // Run one job to completion and fold its outcome back into per-ticket state.
+  // Called fire-and-forget from scanNow (one per project, concurrently).
+  async function runJob(job: Job): Promise<void> {
+    const sKey = `${job.project.name}:${job.ticket.identifier}`
+    // Persist state BEFORE the run (marked 'running', attempts pre-incremented)
+    // so a crash mid-run still counts toward MAX_ATTEMPTS.
+    const prev = state.get(sKey)
+    const attempts = (prev?.attempts || 0) + 1
+    state.set(sKey, { marker: job.marker, attempts, lastOutcome: 'running' })
+    saveState(state)
+
+    log.info(`→ [${job.project.name}] ${job.ticket.identifier}: ${job.ticket.title}${job.reprocess ? ' (re-processing)' : ''}`)
+    let rec
+    try {
+      rec = await processTicket(ctx, job.ticket, job.project, job.tracker, {
+        reprocess: job.reprocess,
+        trackerKey: job.key,
+        marker: job.marker,
+        isPaused: () => isPaused(), // checked at every stage boundary → checkpoint + pause
+      })
+    } catch (e) {
+      log.error(`[${job.project.name}] ${job.ticket.identifier} crashed: ${String(e)}`)
+      state.set(sKey, { marker: job.marker, attempts, lastOutcome: 'failed' })
+      saveState(state)
+      return
+    }
+
+    if (rec.outcome === 'paused') {
+      // Not an attempt — the run checkpointed and will resume when unpaused.
+      state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: 'paused' })
+    } else if (rec.outcome === 'blocked') {
+      // quota/guardrail — not an attempt; restore prior state so it retries.
+      if (prev) state.set(sKey, prev)
+      else state.delete(sKey)
+    } else if (rec.outcome === 'failed') {
+      state.set(sKey, { marker: job.marker, attempts, lastOutcome: 'failed' })
+      if (attempts >= MAX_ATTEMPTS) {
+        log.warn(`${job.ticket.identifier}: failed ${attempts}× — giving up, flagging for a human`)
+        deleteCheckpoint(sKey) // give up cleanly: a human starts fresh
+        try {
+          await job.tracker.comment(
+            job.ticket.id,
+            `⚠️ ticketloop tried to handle this ${attempts} times but couldn't complete it. It needs a human. (Last error: ${(rec.error || '').slice(0, 200)})`,
+          )
+        } catch { /* best effort */ }
+      }
+    } else {
+      // answered / exported / pr-opened / partial / skipped — done at this marker
+      state.set(sKey, { marker: job.marker, attempts: 0, lastOutcome: rec.outcome })
+    }
+    saveState(state)
+  }
+
+  // A scan LAUNCHES at most one run per free project (fire-and-forget) and
+  // returns — it does NOT await the runs. Projects run concurrently; a project
+  // with a run in flight is skipped until it finishes. This is what lets several
+  // tickets progress at once while a single project is never doubly-worked.
   async function scanNow(): Promise<{ processed: number }> {
     if (scanning) return { processed: 0 }
     // Paused: don't pick up new work OR resume anything until `resume`. In-flight
     // runs pause themselves at their next stage boundary (checkpointed).
     if (isPaused()) return { processed: 0 }
     scanning = true
-    let count = 0
+    let launched = 0
     try {
-      // Phase 1: gather all not-yet-processed jobs (each project = its own
-      // tracker/workspace) so we know the total upfront for the progress bar.
-      const jobs: {
-        project: (typeof cfg.projects)[number]
-        tracker: ReturnType<typeof makeTracker>
-        ticket: Awaited<ReturnType<ReturnType<typeof makeTracker>['listCandidates']>>[number]
-        key: string
-        marker: string
-        reprocess: boolean
-      }[] = []
       for (const project of cfg.projects) {
-        const tc = resolveTracker(cfg, project)
-        if (tc.type === 'linear' && !tc.simpleLabel) {
-          log.warn(
-            `[${project.name}] no tracker label set — the loop will consider ALL ` +
-              `tickets in states [${tc.states.join(', ')}]. Set a label to opt tickets in.`,
-          )
+        if (activeRuns.has(project.name)) continue // one run per project
+        const job = await selectJob(project)
+        if (!job) continue
+        const gate = ctx.governor.canRun()
+        if (!gate.ok) {
+          log.warn(`holding new runs — ${gate.reason}`)
+          break
         }
-        const key = resolveTrackerKey(project, tc)
-        const tracker = makeTracker(tc, key)
-        let tickets
-        try {
-          tickets = await tracker.listCandidates()
-        } catch (e) {
-          log.error(`scan ${project.name}: tracker error — ${String(e)}`)
-          continue
-        }
-        for (const t of tickets) {
-          const sKey = `${project.name}:${t.identifier}`
-          const marker = latestHumanActivity(t)
-          // After state corruption: adopt every current ticket as done (don't
-          // re-run) so recovery can't cause mass re-processing.
-          if (adoptMode) {
-            state.set(sKey, { marker, attempts: 0, lastOutcome: 'adopted' })
-            continue
-          }
-          const prev = state.get(sKey)
-          // Process when: never seen, OR a genuinely NEW human comment arrived
-          // (newest-comment timestamp advanced — edits/typo-fixes don't count),
-          // OR the last run failed / was interrupted mid-run and we're under the
-          // retry cap.
-          const newActivity = !prev || marker > prev.marker
-          const needsRetry =
-            !!prev &&
-            prev.attempts < MAX_ATTEMPTS &&
-            (prev.lastOutcome === 'failed' || prev.lastOutcome === 'running')
-          // A run paused mid-flight resumes on the next (unpaused) scan.
-          const needsResume = !!prev && prev.lastOutcome === 'paused'
-          if (!newActivity && !needsRetry && !needsResume) continue
-          jobs.push({ project, tracker, ticket: t, key, marker, reprocess: !!prev })
-        }
+        activeRuns.set(project.name, job.ticket.identifier)
+        launched++
+        const p = runJob(job)
+          .catch((e) => log.error(`runJob ${job.ticket.identifier}: ${String(e)}`))
+          .finally(() => {
+            activeRuns.delete(project.name)
+            inflight.delete(p)
+          })
+        inflight.add(p)
       }
       if (adoptMode) {
         adoptMode = false
         saveState(state)
         log.warn(`adopted ${state.size} existing ticket(s) after state recovery — none re-run`)
       }
-      scanTotal = jobs.length
-      scanDone = 0
-      log.info(`scan: ${jobs.length} ticket(s) to process`)
-
-      // Phase 2: process sequentially, updating live progress.
-      for (const job of jobs) {
-        // A pause between jobs stops the scan here; in-flight jobs pause at their
-        // own stage boundary (below).
-        if (isPaused()) {
-          saveState(state)
-          return { processed: count }
-        }
-        const gate = ctx.governor.canRun()
-        if (!gate.ok) {
-          log.warn(`pausing scan — ${gate.reason}`)
-          saveState(state)
-          return { processed: count }
-        }
-        activeTicket = job.ticket.identifier
-        activeProject = job.project.name
-        const sKey = `${job.project.name}:${job.ticket.identifier}`
-        // Persist state BEFORE the run (marked 'running', attempts pre-incremented)
-        // so a crash mid-run still counts toward MAX_ATTEMPTS — otherwise a ticket
-        // that crashes the daemon would restart-and-rerun forever.
-        const prev = state.get(sKey)
-        const attempts = (prev?.attempts || 0) + 1
-        state.set(sKey, { marker: job.marker, attempts, lastOutcome: 'running' })
-        saveState(state)
-
-        log.info(`→ [${job.project.name}] ${job.ticket.identifier}: ${job.ticket.title}${job.reprocess ? ' (re-processing)' : ''}`)
-        const rec = await processTicket(ctx, job.ticket, job.project, job.tracker, {
-          reprocess: job.reprocess,
-          trackerKey: job.key,
-          marker: job.marker,
-          isPaused, // checked at every stage boundary → checkpoint + pause
-        })
-        // Update per-ticket state based on outcome.
-        if (rec.outcome === 'paused') {
-          // Not an attempt — the run checkpointed and will resume when unpaused.
-          state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: 'paused' })
-        } else if (rec.outcome === 'blocked') {
-          // quota/guardrail — not an attempt; restore prior state so it retries.
-          if (prev) state.set(sKey, prev)
-          else state.delete(sKey)
-        } else if (rec.outcome === 'failed') {
-          state.set(sKey, { marker: job.marker, attempts, lastOutcome: 'failed' })
-          if (attempts >= MAX_ATTEMPTS) {
-            log.warn(`${job.ticket.identifier}: failed ${attempts}× — giving up, flagging for a human`)
-            // Give up cleanly: drop the resume checkpoint so a human starts fresh.
-            deleteCheckpoint(sKey)
-            try {
-              await job.tracker.comment(
-                job.ticket.id,
-                `⚠️ ticketloop tried to handle this ${attempts} times but couldn't complete it. It needs a human. (Last error: ${(rec.error || '').slice(0, 200)})`,
-              )
-            } catch { /* best effort */ }
-          }
-        } else {
-          // answered / pr-opened / partial / skipped — done at this fingerprint
-          state.set(sKey, { marker: job.marker, attempts: 0, lastOutcome: rec.outcome })
-        }
-        saveState(state)
-        count++
-        scanDone++
-      }
+      if (launched) log.info(`scan: launched ${launched} run(s) — active: ${[...activeRuns.entries()].map(([p, t]) => `${p}:${t}`).join(', ')}`)
     } catch (e) {
       log.error(`scan failed: ${String(e)}`)
     } finally {
       lastScan = Date.now()
       scanning = false
-      activeTicket = undefined
-      activeProject = undefined
     }
-    return { processed: count }
+    // One-shot `run` awaits the launched work so the process doesn't exit early.
+    if (opts.once) await Promise.all([...inflight])
+    return { processed: launched }
   }
 
   // Persist UI edits: mutate the LIVE cfg (so the next scan sees them) + write YAML.
@@ -260,10 +273,13 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       lastScan,
       nextScan: lastScan ? lastScan + cfg.tracker.pollIntervalSec * 1000 : undefined,
       scanning,
-      scanDone,
-      scanTotal,
-      activeTicket,
-      activeProject,
+      // parallel runs — one per project; the UI lists them all
+      activeRuns: [...activeRuns.entries()].map(([project, ticket]) => ({ project, ticket })),
+      // first active kept for the legacy single-run widgets
+      activeTicket: activeRuns.values().next().value,
+      activeProject: activeRuns.keys().next().value,
+      scanTotal: activeRuns.size,
+      scanDone: 0,
     }),
     saveProject: (p: ProjectConfig) => {
       try {
@@ -290,13 +306,16 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     },
   })
 
-  // initial scan
-  await scanNow()
-
   if (opts.once) {
+    // one-shot `run --all`: drain every project's queue (each scanNow awaits its
+    // launched runs), one ticket per project per round, until nothing's left.
+    while ((await scanNow()).processed > 0) { /* keep draining */ }
     running = false
     return
   }
+
+  // initial scan
+  await scanNow()
 
   const timer = setInterval(scanNow, cfg.tracker.pollIntervalSec * 1000)
   let shuttingDown = false

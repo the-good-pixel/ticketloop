@@ -488,41 +488,36 @@ function renderLiveMonitor(status, activity) {
     return;
   }
 
-  const run = findRunningRun(activity, status.activeTicket);
-  const project = status.activeProject || (run && run.project) || '';
-  const ticket = status.activeTicket || (run && run.ticket) || '';
-  const step = runningStageName(run) || '…';
-  const total = Number(status.scanTotal) || 0;
-  const done = Number(status.scanDone) || 0;
+  // Parallel runs: one row per active run (one per project). Fall back to the
+  // running runs in the activity feed if the daemon didn't report activeRuns.
+  let runs = Array.isArray(status.activeRuns) && status.activeRuns.length
+    ? status.activeRuns.map((a) => ({ project: a.project, ticket: a.ticket, run: findRunByTicket(activity, a.ticket) }))
+    : (Array.isArray(activity) ? activity : [])
+        .filter((r) => r && r.outcome === 'running')
+        .map((r) => ({ project: r.project, ticket: r.ticket, run: r }));
 
   box.replaceChildren();
+  if (runs.length > 1) box.appendChild(el('div', 'live-head mono', runs.length + ' running in parallel'));
 
-  const row = el('div', 'live-row');
-  const dot = el('span', 'live-dot');
-  dot.setAttribute('aria-hidden', 'true');
-  row.appendChild(dot);
-  row.appendChild(el('span', 'live-label', 'Processing'));
-
-  if (total > 0) {
-    // guard: never show a count above the total when scanDone has caught up.
-    const current = Math.min(done + 1, total);
-    row.appendChild(el('span', 'live-count mono', current + ' of ' + total));
-  }
-
-  const who = project && ticket ? project + ' · ' + ticket : project || ticket;
-  if (who) row.appendChild(el('span', 'live-ticket', who));
-
-  row.appendChild(el('span', 'live-step-chip', step));
-  box.appendChild(row);
-
-  const bar = el('div', 'live-bar');
-  const fill = el('div', 'live-bar-fill');
-  const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0;
-  fill.style.width = pct + '%';
-  bar.appendChild(fill);
-  box.appendChild(bar);
+  runs.forEach(({ project, ticket, run }) => {
+    const step = runningStageName(run) || '…';
+    const row = el('div', 'live-row');
+    const dot = el('span', 'live-dot');
+    dot.setAttribute('aria-hidden', 'true');
+    row.appendChild(dot);
+    row.appendChild(el('span', 'live-label', 'Processing'));
+    const who = project && ticket ? project + ' · ' + ticket : project || ticket;
+    if (who) row.appendChild(el('span', 'live-ticket', who));
+    row.appendChild(el('span', 'live-step-chip', step));
+    box.appendChild(row);
+  });
 
   box.hidden = false;
+}
+
+// The running run for a given ticket in the activity feed (for its live stage).
+function findRunByTicket(activity, ticket) {
+  return (Array.isArray(activity) ? activity : []).find((r) => r && r.ticket === ticket && r.outcome === 'running') || null;
 }
 
 // ---- poll loop ----

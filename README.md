@@ -152,6 +152,14 @@ it finds one, the harness checks out that branch and the loop **refreshes the sa
 **model's new delta**, not the PR's already-made (possibly approved) changes. No open PR
 → a fresh branch off `origin/main`.
 
+### Parallel runs — one per project
+
+The daemon works **multiple tickets at once, but at most one per project**. Each scan
+launches a run for every *free* project concurrently; a project with a run already in
+flight is skipped until it finishes. This keeps several clients moving in parallel while
+never letting two runs fight over the same repo's worktree, branches, or dev server.
+Quota is shared — the global governor gates all of them.
+
 ### Resume & pause
 
 A run **checkpoints after every completed stage** (`~/.ticketloop/checkpoints/`),

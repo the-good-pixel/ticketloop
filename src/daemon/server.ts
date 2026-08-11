@@ -35,6 +35,7 @@ export interface ServerHooks {
     scanTotal?: number
     activeTicket?: string
     activeProject?: string
+    activeRuns?: { project: string; ticket: string }[]
   }
   // project setup (UI-driven); these persist config / credentials on disk
   saveProject: (p: ProjectConfig) => { ok: true } | { error: string }
@@ -280,6 +281,7 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
     scanTotal: s.scanTotal ?? 0,
     activeTicket: s.activeTicket,
     activeProject: s.activeProject,
+    activeRuns: s.activeRuns ?? [],
     authMode: cfg.auth.mode,
     plan: cfg.quota.plan,
     tracker: cfg.tracker.type,
