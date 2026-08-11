@@ -262,6 +262,20 @@ function renderRun(r) {
   main.appendChild(sub);
   main.appendChild(renderStageTracker(r.stages));
   if (r.error) main.appendChild(el('div', 'run-error', r.error));
+  // Resume / Restart on a ticket's LATEST run when it's failed or paused.
+  if ((r.outcome === 'failed' || r.outcome === 'paused') && newestRunIds.has(r.id)) {
+    const key = (r.project || '') + ':' + (r.ticket || '');
+    const actions = el('div', 'run-actions');
+    const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
+    resume.title = 'Continue from the checkpoint (already-done stages are reused)';
+    resume.addEventListener('click', (e) => { e.stopPropagation(); doRetry(key, false); });
+    const fresh = el('button', 'btn btn-ghost btn-sm', '↻ Restart fresh');
+    fresh.title = 'Discard the checkpoint and re-run the whole ticket under the current workflow';
+    fresh.addEventListener('click', (e) => { e.stopPropagation(); doRetry(key, true); });
+    actions.appendChild(resume);
+    actions.appendChild(fresh);
+    main.appendChild(actions);
+  }
   head.appendChild(main);
 
   // side column
@@ -436,10 +450,21 @@ function feedSignature(runs, expanded) {
     .join('|');
 }
 
+// Newest run id per ticket (project:ticket). Retry buttons show only on a
+// ticket's LATEST run, so a stale older failed attempt never offers them.
+let newestRunIds = new Set();
+
 function renderActivity(runs) {
   lastRuns = Array.isArray(runs) ? runs : [];
   state.runsById.clear();
   lastRuns.forEach((r) => state.runsById.set(r.id, r));
+  newestRunIds = new Set();
+  const seenTickets = new Set();
+  for (const r of lastRuns) {
+    // lastRuns is newest-first → first time we see a ticket is its latest run.
+    const key = (r.project || '') + ':' + (r.ticket || '');
+    if (!seenTickets.has(key)) { seenTickets.add(key); newestRunIds.add(r.id); }
+  }
   // Drop expanded ids that no longer exist.
   for (const id of [...state.expanded]) {
     if (!state.runsById.has(id)) state.expanded.delete(id);
@@ -484,15 +509,8 @@ let pauseNote = ''; // transient warning shown after a ticket resume that can't 
 function renderLiveMonitor(status, activity) {
   const box = $('#liveMonitor');
   status = status || {};
-  // Failed OR paused tickets the user can act on. Merge the state-derived list
-  // with any control-file pauses not yet reflected in state.
-  const resumable = Array.isArray(status.resumableTickets) ? status.resumableTickets.slice() : [];
-  const seen = new Set(resumable.map((r) => r.key));
-  (Array.isArray(status.pausedTickets) ? status.pausedTickets : []).forEach((k) => {
-    if (!seen.has(k)) resumable.push({ key: k, outcome: 'paused', attempts: 0 });
-  });
   const live = isLive(status, activity);
-  if (!live && !resumable.length && !pauseNote) {
+  if (!live && !pauseNote) {
     box.hidden = true;
     box.replaceChildren();
     return;
@@ -524,23 +542,6 @@ function renderLiveMonitor(status, activity) {
     btn.title = 'Pause this ticket at its next stage boundary';
     btn.addEventListener('click', () => doTicketPause(project + ':' + ticket, true));
     row.appendChild(btn);
-    box.appendChild(row);
-  });
-
-  // Failed / paused tickets (not currently running): offer Resume + Restart.
-  resumable.forEach(({ key, outcome, attempts }) => {
-    const row = el('div', 'live-row live-row-paused');
-    const isFailed = outcome === 'failed';
-    row.appendChild(el('span', 'live-label', isFailed ? '✕ Failed' + (attempts ? ' ' + attempts + '×' : '') : '⏸ Paused'));
-    row.appendChild(el('span', 'live-ticket', key.replace(':', ' · ')));
-    const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
-    resume.title = 'Continue from the checkpoint (already-done stages are reused)';
-    resume.addEventListener('click', () => doRetry(key, false));
-    row.appendChild(resume);
-    const fresh = el('button', 'btn btn-ghost btn-sm', '↻ Restart fresh');
-    fresh.title = 'Discard the checkpoint and re-run the whole ticket under the current workflow';
-    fresh.addEventListener('click', () => doRetry(key, true));
-    row.appendChild(fresh);
     box.appendChild(row);
   });
 
