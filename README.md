@@ -43,7 +43,7 @@ Three jobs, one loop:
 - [Configuring the steps](#configuring-the-steps) — **the main knob**
 - [What each step must output](#what-each-step-must-output) — the contracts
 - [Safety rails](#safety-rails) · [Quota / governor](#quota--the-governor)
-- [TODO / Upcoming development](#todo--upcoming-development) — multi-CLI harness support, catalog, workflow manager
+- [TODO / Upcoming development](#todo--upcoming-development) — multi-CLI harness support, more trackers, catalog, workflow manager
 
 ---
 
@@ -366,8 +366,10 @@ reset.
 - **Step catalog** — curate and reuse your own steps across workflows and projects.
 - **Workflow manager** — compose your own *enforced* workflows instead of only the
   built-in pipeline. See [`docs/design-step-catalog-workflow-manager.md`](docs/design-step-catalog-workflow-manager.md).
-- **Broader triggers** — beyond Linear (e.g. GitHub Issues, Jira) to widen where tickets
-  come from.
+- **Support more issue trackers.** The tracker is already abstracted behind a `Tracker`
+  interface (Linear + mock today) — add adapters for **GitHub Issues**, **Jira**, **Linear**
+  (done), **GitLab**, **Asana**, etc., so tickets can come from wherever your team works.
+  Same shape as the harness abstraction above: one interface, pluggable adapters.
 - **Multi-repo PR-refresh** — `locate` is single-repo for now.
 
 ---
