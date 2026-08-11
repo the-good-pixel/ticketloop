@@ -272,8 +272,8 @@
   <header>
     <p class="eyebrow">ticketloop · architecture</p>
     <h1>How the loop works — and who drives each step</h1>
-    <p class="lede">The harness owns only the framework, the git plumbing, and a few safety rails; the model does the actual work of every step — using each project's own skills, tools, MCP, and CLI. Triage routes a ticket to one of three kinds — <b style="color:var(--text)">answer a question</b>, <b style="color:var(--text)">export data</b>, or <b style="color:var(--text)">open/refresh a PR</b>. On the change path, every gating step (verify, review, ship) returns a pass/fail <b style="color:var(--text)">verdict</b>, and <b style="color:var(--text)">ship</b> drives the PR to green CI. All Linear I/O uses each project's own API key, so multiple client workspaces never cross.</p>
-    <p class="rev">revised for review · three triage kinds (question · data · change) · data-export path with its own verify · change path can locate &amp; refresh an existing PR · per-project Linear keys (no cross-workspace MCP) · multi-repo</p>
+    <p class="lede">The harness owns only the framework, the git plumbing, and a few safety rails; the model does the actual work of every step — using each project's own skills, tools, MCP, and CLI. Triage routes a ticket to one of three kinds — <b style="color:var(--text)">answer a question</b>, <b style="color:var(--text)">export data</b>, or <b style="color:var(--text)">open/refresh a PR</b>. On the change path, every gating step (verify, review, ship, and the opt-in dev steps) returns a pass/fail <b style="color:var(--text)">verdict</b>, and <b style="color:var(--text)">ship</b> drives the PR to green CI. Projects run <b style="color:var(--text)">in parallel (one ticket each)</b>; any run is <b style="color:var(--text)">checkpointed</b> so it resumes where it stopped, and can be <b style="color:var(--text)">paused</b> system-wide or per ticket. All Linear I/O uses each project's own API key, so multiple client workspaces never cross.</p>
+    <p class="rev">revised · three triage kinds (question · data · change) · data-export path with its own verify · locate &amp; refresh an existing PR · opt-in deploy-dev + verify-dev after ship · parallel runs (one per project) · checkpoint resume + system/ticket pause · per-project Linear keys · multi-repo</p>
   </header>
 
   <div class="legend">
@@ -421,6 +421,16 @@
               <div class="glyph">⇧</div>
               <div class="node-body"><div class="t">Ship — PR + get CI green · VERDICT</div><div class="tag">model · open/update PR, watch CI &amp; fix until green · no CI → pass · never merges</div></div>
             </div>
+            <div class="link sm"></div>
+            <div class="node sm" data-d="model">
+              <div class="glyph">▲</div>
+              <div class="node-body"><div class="t">Deploy-dev — VERDICT <span style="opacity:.6">· opt-in</span></div><div class="tag">model · deploy the shipped branch to DEV only (never prod) · off by default</div></div>
+            </div>
+            <div class="link sm"></div>
+            <div class="node sm" data-d="model">
+              <div class="glyph">✓</div>
+              <div class="node-body"><div class="t">Verify-dev — VERDICT <span style="opacity:.6">· opt-in</span></div><div class="tag">model · confirm it actually works in the DEV env · off by default</div></div>
+            </div>
             <div class="lgfoot"><span class="rot">↺</span> any step's <b style="color:var(--warn)">VERDICT: fail</b> → back to Fix with the findings</div>
           </div>
 
@@ -467,6 +477,14 @@
         <div class="node sm" data-d="model">
           <div class="glyph">⇧</div><div class="node-body"><div class="t">ship → VERDICT</div><div class="tag">open/update PR · watch CI · fix until green</div></div>
         </div>
+        <div class="link sm"></div>
+        <div class="node sm" data-d="model">
+          <div class="glyph">▲</div><div class="node-body"><div class="t">deploy-dev → VERDICT <span style="opacity:.6">· opt-in</span></div><div class="tag">deploy to DEV only · off by default</div></div>
+        </div>
+        <div class="link sm"></div>
+        <div class="node sm" data-d="model">
+          <div class="glyph">✓</div><div class="node-body"><div class="t">verify-dev → VERDICT <span style="opacity:.6">· opt-in</span></div><div class="tag">does it work in DEV?</div></div>
+        </div>
         <div class="link sm dash"></div>
         <div class="decision" style="margin-top:6px">◆ every step's VERDICT: pass?</div>
         <div class="return" style="margin-top:12px; border-color: color-mix(in srgb, var(--model) 45%, var(--border)); color: var(--model)">↺ &nbsp;<b style="color:var(--model)">no → back to fix</b> &nbsp;·&nbsp; yes → done</div>
@@ -510,6 +528,22 @@ VERDICT: <span class="r">fail</span> — &lt;reason&gt;</div>
     </div>
   </section>
 
+  <!-- ============ RUNTIME: PARALLEL · RESUME · PAUSE ============ -->
+  <section class="detail">
+    <h2>Scheduling — parallel, resumable, pausable</h2>
+    <p class="note">Each poll launches at most <b style="color:var(--text)">one run per project</b>, all projects at once. A project with a run in flight is skipped until it finishes, so two runs never fight over the same repo's worktree — while several tickets across different projects progress together. Quota is shared: the governor gates every launch.</p>
+    <div class="cyclewrap">
+      <div class="infocard">
+        <h3>Checkpoint &amp; resume</h3>
+        <p class="note" style="margin:0; font-size:12.5px">Every completed stage is cached to a per-ticket checkpoint (with the worktree/branch it used). A run interrupted by a dropped connection, a rate limit, a restart, or a pause <b style="color:var(--text)">resumes at the exact stage it stopped</b> — earlier stages replay from cache (0 tokens) and the same worktree is reattached. A new human comment invalidates the checkpoint (the ask changed → start fresh).</p>
+      </div>
+      <div class="infocard">
+        <h3>Pause / resume</h3>
+        <p class="note" style="margin:0; font-size:12.5px"><b style="color:var(--text)">System-level</b> (<span style="font-family:var(--mono)">pause</span>/<span style="font-family:var(--mono)">resume</span>) halts the whole loop at the next stage boundary; <b style="color:var(--text)">ticket-level</b> pauses just one ticket while the other projects keep running. Because of one-per-project, resuming a ticket whose project is busy <b style="color:var(--text)">warns and queues</b> it — it resumes once that project frees.</p>
+      </div>
+    </div>
+  </section>
+
   <section class="summary">
     <h2>Who drives what</h2>
     <p class="note">The model runs every <em>step</em> and, inside a step, reaches for that project's own git / gh / checks / skills / MCP as its instruction directs. The harness stays thin: it discovers work, does the deterministic git plumbing, enforces the guardrails, and records history.</p>
@@ -520,7 +554,7 @@ VERDICT: <span class="r">fail</span> — &lt;reason&gt;</div>
           <tr>
             <td><span class="pill model">■ Model</span></td>
             <td class="who">claude -p (your subscription)</td>
-            <td class="steps">Triage · Clarify · <b>Export + Verify (data)</b> · <b>Locate</b> · Plan · Prepare · Fix · <b>Verify + Review + Ship (each emit VERDICT)</b> · Comment — <b>all the work</b>, each via its own instruction. Ship watches CI &amp; fixes to green; Locate finds an existing PR to refresh; <b>posts every comment itself</b> with the project's Linear key</td>
+            <td class="steps">Triage · Clarify · <b>Export + Verify (data)</b> · <b>Locate</b> · Plan · Prepare · Fix · <b>Verify + Review + Ship + Deploy-dev + Verify-dev (each emit VERDICT)</b> · Comment — <b>all the work</b>, each via its own instruction. Ship watches CI &amp; fixes to green; Deploy-dev/Verify-dev (opt-in) push to DEV &amp; check it there; Locate finds an existing PR to refresh; <b>posts every comment itself</b> with the project's Linear key</td>
           </tr>
           <tr>
             <td><span class="pill api">■ API / CLI</span></td>
@@ -530,7 +564,7 @@ VERDICT: <span class="r">fail</span> — &lt;reason&gt;</div>
           <tr>
             <td><span class="pill local">■ Local</span></td>
             <td class="who">the daemon itself (thin)</td>
-            <td class="steps">Scheduler · quota governor · project routing · <b>worktree setup &amp; cleanup</b> (fresh off origin/main, or reuse a located PR's branch) · off-limits guardrail (all repos) · <b>drive the loops by parsing verdicts</b> (never reads CI) · usage/history store · dashboard</td>
+            <td class="steps"><b>Scheduler — one run per project, in parallel</b> · quota governor · project routing · <b>worktree setup &amp; cleanup</b> (fresh off origin/main, or reuse a located PR's branch) · off-limits guardrail (all repos) · <b>drive the loops by parsing verdicts</b> (never reads CI) · <b>checkpoint / resume</b> · <b>system- &amp; ticket-level pause</b> · usage/history store · dashboard</td>
           </tr>
         </tbody>
       </table>
