@@ -479,10 +479,14 @@ function runningStageName(run) {
   return s ? s.stage : null;
 }
 
+let pauseNote = ''; // transient warning shown after a ticket resume that can't run yet
+
 function renderLiveMonitor(status, activity) {
   const box = $('#liveMonitor');
   status = status || {};
-  if (!isLive(status, activity)) {
+  const pausedKeys = Array.isArray(status.pausedTickets) ? status.pausedTickets : [];
+  const live = isLive(status, activity);
+  if (!live && !pausedKeys.length && !pauseNote) {
     box.hidden = true;
     box.replaceChildren();
     return;
@@ -490,13 +494,14 @@ function renderLiveMonitor(status, activity) {
 
   // Parallel runs: one row per active run (one per project). Fall back to the
   // running runs in the activity feed if the daemon didn't report activeRuns.
-  let runs = Array.isArray(status.activeRuns) && status.activeRuns.length
+  const runs = Array.isArray(status.activeRuns) && status.activeRuns.length
     ? status.activeRuns.map((a) => ({ project: a.project, ticket: a.ticket, run: findRunByTicket(activity, a.ticket) }))
     : (Array.isArray(activity) ? activity : [])
         .filter((r) => r && r.outcome === 'running')
         .map((r) => ({ project: r.project, ticket: r.ticket, run: r }));
 
   box.replaceChildren();
+  if (pauseNote) box.appendChild(el('div', 'live-note', pauseNote));
   if (runs.length > 1) box.appendChild(el('div', 'live-head mono', runs.length + ' running in parallel'));
 
   runs.forEach(({ project, ticket, run }) => {
@@ -509,10 +514,37 @@ function renderLiveMonitor(status, activity) {
     const who = project && ticket ? project + ' · ' + ticket : project || ticket;
     if (who) row.appendChild(el('span', 'live-ticket', who));
     row.appendChild(el('span', 'live-step-chip', step));
+    const btn = el('button', 'btn btn-ghost btn-sm live-pause', '⏸');
+    btn.title = 'Pause this ticket at its next stage boundary';
+    btn.addEventListener('click', () => doTicketPause(project + ':' + ticket, true));
+    row.appendChild(btn);
+    box.appendChild(row);
+  });
+
+  // Ticket-paused runs (not currently running): offer resume.
+  pausedKeys.forEach((key) => {
+    const ticket = key.slice(key.indexOf(':') + 1);
+    const row = el('div', 'live-row live-row-paused');
+    row.appendChild(el('span', 'live-label', '⏸ Paused'));
+    row.appendChild(el('span', 'live-ticket', key.replace(':', ' · ')));
+    const btn = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
+    btn.addEventListener('click', () => doTicketPause(key, false));
+    row.appendChild(btn);
     box.appendChild(row);
   });
 
   box.hidden = false;
+}
+
+// Pause/resume a single ticket; surface the one-per-project warning inline.
+async function doTicketPause(ticketKey, paused) {
+  try {
+    const r = await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused, ticketKey }) });
+    pauseNote = r && r.warning ? r.warning : '';
+    await poll();
+  } catch (e) {
+    setConn(false);
+  }
 }
 
 // The running run for a given ticket in the activity feed (for its live stage).

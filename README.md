@@ -176,6 +176,10 @@ instead of starting over:
 - **`ticketloop pause`** stops the loop at the next stage boundary: the in-flight run
   checkpoints and ends `paused`, and no new tickets are picked up. **`ticketloop resume`**
   (or the dashboard's ⏸/▶ button) continues each paused run from its checkpoint.
+- **Ticket-level**: `ticketloop pause <ID>` / `resume <ID>` (or the ⏸/▶ on a run's row)
+  pauses just that ticket — the other projects keep running. Because of one-per-project,
+  resuming a ticket whose project is busy with another one **warns** and queues it: it
+  resumes automatically once that project's current run finishes.
 - A checkpoint is **kept** only for `failed` / `blocked` / `paused` outcomes; success or
   give-up deletes it. It's also **invalidated by new human activity** — if the client
   comments again, the ask changed, so the run starts fresh rather than resuming stale work.

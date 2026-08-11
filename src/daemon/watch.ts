@@ -10,7 +10,7 @@ import { assertAuthSafe } from '../runner/claude.js'
 import { sweepOrphans, killAllChildren } from '../runner/children.js'
 import { latestHumanActivity } from '../loop/context.js'
 import { deleteCheckpoint } from '../loop/checkpoint.js'
-import { isPaused, setPaused } from './control.js'
+import { isPaused, pausedTickets } from './control.js'
 import { log } from '../logger.js'
 import { renameSync } from 'node:fs'
 
@@ -147,6 +147,8 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         (prev.lastOutcome === 'failed' || prev.lastOutcome === 'running')
       const needsResume = !!prev && prev.lastOutcome === 'paused'
       if (!newActivity && !needsRetry && !needsResume) continue
+      // Individually paused → leave it (a global pause already stopped the scan).
+      if (isPaused(sKey)) continue
       return { project, tracker, ticket: t, key, marker, reprocess: !!prev }
     }
     return null
@@ -170,7 +172,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         reprocess: job.reprocess,
         trackerKey: job.key,
         marker: job.marker,
-        isPaused: () => isPaused(), // checked at every stage boundary → checkpoint + pause
+        isPaused: () => isPaused(sKey), // system- or ticket-level pause at each stage boundary
       })
     } catch (e) {
       log.error(`[${job.project.name}] ${job.ticket.identifier} crashed: ${String(e)}`)
@@ -275,6 +277,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       scanning,
       // parallel runs — one per project; the UI lists them all
       activeRuns: [...activeRuns.entries()].map(([project, ticket]) => ({ project, ticket })),
+      pausedTickets: pausedTickets(),
       // first active kept for the legacy single-run widgets
       activeTicket: activeRuns.values().next().value,
       activeProject: activeRuns.keys().next().value,

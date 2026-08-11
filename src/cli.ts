@@ -8,7 +8,9 @@ import { watch } from './daemon/watch.js'
 import { makeEngineCtx, processTicket } from './loop/engine.js'
 import { makeTracker } from './adapters/tracker/tracker.js'
 import { resolveTrackerKey } from './credentials.js'
-import { isPaused, setPaused } from './daemon/control.js'
+import { isPaused, setPaused, setTicketPaused } from './daemon/control.js'
+import { readJson } from './store.js'
+import { DAEMON_STATE } from './paths.js'
 
 interface Flags {
   config?: string
@@ -42,8 +44,8 @@ Usage:
   ticketloop demo                 Run the loop on built-in demo tickets + dashboard (no creds)
   ticketloop watch                Start the daemon: poll tracker + run loop + dashboard
   ticketloop run [--ticket ID]    Scan once (or one ticket) then exit
-  ticketloop pause                Pause the running daemon at the next stage boundary (checkpoints)
-  ticketloop resume               Resume a paused daemon (in-flight runs continue where they stopped)
+  ticketloop pause [ticket]       Pause the whole loop, or one ticket, at the next stage boundary
+  ticketloop resume [ticket]      Resume the loop (or one ticket) from where it stopped
   ticketloop status               Print quota meters + recent runs
 
 Flags:
@@ -53,6 +55,40 @@ Flags:
   --port <n>        Override dashboard port
   --debug           Verbose logging
 `
+
+interface DaemonState {
+  tickets: Record<string, { marker: string; attempts: number; lastOutcome: string }>
+}
+
+// Map a user-typed "<project>:<ID>" or bare "<ID>" to a live daemon state key.
+function resolveTicketKey(arg: string): string | null {
+  let state: DaemonState | null = null
+  try {
+    state = readJson<DaemonState>(DAEMON_STATE)
+  } catch {
+    state = null
+  }
+  if (arg.includes(':')) return arg // explicit "<project>:<ID>" — trust it
+  const keys = Object.keys(state?.tickets || {})
+  const hit = keys.find((k) => k.slice(k.indexOf(':') + 1).toLowerCase() === arg.toLowerCase())
+  return hit || null
+}
+
+// If another ticket in this ticket's project is mid-run, return its identifier.
+function projectBusyWith(sKey: string): string | null {
+  let state: DaemonState | null = null
+  try {
+    state = readJson<DaemonState>(DAEMON_STATE)
+  } catch {
+    return null
+  }
+  const proj = sKey.slice(0, sKey.indexOf(':'))
+  for (const [k, v] of Object.entries(state?.tickets || {})) {
+    if (k === sKey) continue
+    if (k.startsWith(proj + ':') && v.lastOutcome === 'running') return k.slice(k.indexOf(':') + 1)
+  }
+  return null
+}
 
 async function main() {
   const { cmd, flags } = parse(process.argv.slice(2))
@@ -64,14 +100,30 @@ async function main() {
   if (cmd === 'init') return initCmd()
   // Pause/resume just flip the cross-process control file — no config needed.
   // The running daemon reads it before its next scan / stage boundary.
-  if (cmd === 'pause') {
-    setPaused(true)
-    log.info('⏸ paused — the daemon will stop at the next stage boundary (in-flight work is checkpointed). Run `ticketloop resume` to continue.')
-    return
-  }
-  if (cmd === 'resume') {
-    setPaused(false)
-    log.info('▶ resumed — paused runs continue from their checkpoint on the next scan.')
+  // With no arg → system-level; with a ticket id/key → that ticket only.
+  if (cmd === 'pause' || cmd === 'resume') {
+    const paused = cmd === 'pause'
+    const arg = flags.positional[0]
+    if (arg) {
+      const sKey = resolveTicketKey(arg)
+      if (!sKey) {
+        log.error(`no known ticket "${arg}" in daemon state. Use "<project>:<ID>" or a live ticket id.`)
+        process.exit(1)
+      }
+      setTicketPaused(sKey, paused)
+      if (paused) {
+        log.info(`⏸ paused ticket ${sKey} — it stops at its next stage boundary (checkpointed). Resume with \`ticketloop resume ${arg}\`.`)
+      } else {
+        const warn = projectBusyWith(sKey)
+        log.info(`▶ resumed ticket ${sKey} — continues from its checkpoint on the next scan.`)
+        if (warn) log.warn(`…but project "${sKey.split(':')[0]}" is busy with ${warn} — it will only resume once that finishes (one run per project).`)
+      }
+      return
+    }
+    setPaused(paused)
+    log.info(paused
+      ? '⏸ paused — the daemon stops at the next stage boundary (in-flight work is checkpointed). Run `ticketloop resume` to continue.'
+      : '▶ resumed — paused runs continue from their checkpoint on the next scan.')
     return
   }
 

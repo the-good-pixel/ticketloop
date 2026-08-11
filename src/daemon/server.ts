@@ -12,7 +12,7 @@ import { assertAuthSafe } from '../runner/claude.js'
 import { resolveTracker, DEFAULT_INSTRUCTIONS } from '../config.js'
 import { hasCredential, resolveTrackerKey } from '../credentials.js'
 import { readRealUsage } from '../realUsage.js'
-import { isPaused, setPaused } from './control.js'
+import { isPaused, setPaused, setTicketPaused, pausedTickets } from './control.js'
 import { log } from '../logger.js'
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web')
@@ -36,6 +36,7 @@ export interface ServerHooks {
     activeTicket?: string
     activeProject?: string
     activeRuns?: { project: string; ticket: string }[]
+    pausedTickets?: string[]
   }
   // project setup (UI-driven); these persist config / credentials on disk
   saveProject: (p: ProjectConfig) => { ok: true } | { error: string }
@@ -207,13 +208,28 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
         hooks.scanNow().then((r) => json(res, r)).catch((e) => serverError(res, e))
         return
       }
-      // ---- Pause / resume the loop ----
+      // ---- Pause / resume — system-level (no ticketKey) or per-ticket ----
       if (path === '/api/pause' && req.method === 'POST') {
         readBody(req).then((body) => {
-          const paused = !!(body as { paused?: boolean }).paused
-          setPaused(paused)
-          log.info(paused ? '⏸ paused via dashboard' : '▶ resumed via dashboard')
-          json(res, { paused })
+          const b = body as { paused?: boolean; ticketKey?: string }
+          const paused = !!b.paused
+          if (b.ticketKey) {
+            setTicketPaused(b.ticketKey, paused)
+            log.info(`${paused ? '⏸ paused' : '▶ resumed'} ticket ${b.ticketKey} via dashboard`)
+            // On resume, warn if the project is busy with a DIFFERENT ticket —
+            // one-per-project means this one waits until that finishes.
+            let warning: string | undefined
+            if (!paused) {
+              const proj = b.ticketKey.split(':')[0]
+              const busy = (hooks.status().activeRuns || []).find((a) => a.project === proj && `${a.project}:${a.ticket}` !== b.ticketKey)
+              if (busy) warning = `Project "${proj}" is busy with ${busy.ticket} — this ticket will resume once that finishes (one run per project).`
+            }
+            json(res, { paused, ticketKey: b.ticketKey, warning })
+          } else {
+            setPaused(paused)
+            log.info(paused ? '⏸ paused via dashboard' : '▶ resumed via dashboard')
+            json(res, { paused })
+          }
         }).catch((e) => serverError(res, e))
         return
       }
@@ -282,6 +298,7 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
     activeTicket: s.activeTicket,
     activeProject: s.activeProject,
     activeRuns: s.activeRuns ?? [],
+    pausedTickets: s.pausedTickets ?? [],
     authMode: cfg.auth.mode,
     plan: cfg.quota.plan,
     tracker: cfg.tracker.type,
