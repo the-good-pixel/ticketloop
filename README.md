@@ -43,6 +43,7 @@ Three jobs, one loop:
 - [Configuring the steps](#configuring-the-steps) — **the main knob**
 - [What each step must output](#what-each-step-must-output) — the contracts
 - [Safety rails](#safety-rails) · [Quota / governor](#quota--the-governor)
+- [TODO / Upcoming development](#todo--upcoming-development) — multi-CLI harness support, catalog, workflow manager
 
 ---
 
@@ -350,6 +351,24 @@ as a percentage of **tunable estimates** (`quota.sessionTokenBudget`,
 Code's status line. The governor tracks every stage's tokens, shows a rolling 5-hour and
 weekly meter, and **pauses the batch** when a meter nears its budget, resuming after
 reset.
+
+---
+
+## TODO / Upcoming development
+
+- **Support other coding-agent harnesses (multi-CLI).** The model runner is already
+  abstracted behind a single interface — make it a pluggable **adapter** so ticketloop can
+  drive coding agents beyond Claude Code: **opencode** (model-agnostic, 75+ providers),
+  **Codex CLI**, and **Kimi Code** (Kimi K3; TS/npm, so the lowest-friction adapter). With
+  **per-step harness + model routing** you could run a cheap/open model on light steps
+  (`triage`, `plan`, `reproduce`) and a stronger one on `fix`/`review`. This turns
+  ticketloop into a harness-agnostic orchestrator and removes single-vendor lock-in.
+- **Step catalog** — curate and reuse your own steps across workflows and projects.
+- **Workflow manager** — compose your own *enforced* workflows instead of only the
+  built-in pipeline. See [`docs/design-step-catalog-workflow-manager.md`](docs/design-step-catalog-workflow-manager.md).
+- **Broader triggers** — beyond Linear (e.g. GitHub Issues, Jira) to widen where tickets
+  come from.
+- **Multi-repo PR-refresh** — `locate` is single-repo for now.
 
 ---
 
