@@ -484,9 +484,15 @@ let pauseNote = ''; // transient warning shown after a ticket resume that can't 
 function renderLiveMonitor(status, activity) {
   const box = $('#liveMonitor');
   status = status || {};
-  const pausedKeys = Array.isArray(status.pausedTickets) ? status.pausedTickets : [];
+  // Failed OR paused tickets the user can act on. Merge the state-derived list
+  // with any control-file pauses not yet reflected in state.
+  const resumable = Array.isArray(status.resumableTickets) ? status.resumableTickets.slice() : [];
+  const seen = new Set(resumable.map((r) => r.key));
+  (Array.isArray(status.pausedTickets) ? status.pausedTickets : []).forEach((k) => {
+    if (!seen.has(k)) resumable.push({ key: k, outcome: 'paused', attempts: 0 });
+  });
   const live = isLive(status, activity);
-  if (!live && !pausedKeys.length && !pauseNote) {
+  if (!live && !resumable.length && !pauseNote) {
     box.hidden = true;
     box.replaceChildren();
     return;
@@ -521,15 +527,20 @@ function renderLiveMonitor(status, activity) {
     box.appendChild(row);
   });
 
-  // Ticket-paused runs (not currently running): offer resume.
-  pausedKeys.forEach((key) => {
-    const ticket = key.slice(key.indexOf(':') + 1);
+  // Failed / paused tickets (not currently running): offer Resume + Restart.
+  resumable.forEach(({ key, outcome, attempts }) => {
     const row = el('div', 'live-row live-row-paused');
-    row.appendChild(el('span', 'live-label', '⏸ Paused'));
+    const isFailed = outcome === 'failed';
+    row.appendChild(el('span', 'live-label', isFailed ? '✕ Failed' + (attempts ? ' ' + attempts + '×' : '') : '⏸ Paused'));
     row.appendChild(el('span', 'live-ticket', key.replace(':', ' · ')));
-    const btn = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
-    btn.addEventListener('click', () => doTicketPause(key, false));
-    row.appendChild(btn);
+    const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
+    resume.title = 'Continue from the checkpoint (already-done stages are reused)';
+    resume.addEventListener('click', () => doRetry(key, false));
+    row.appendChild(resume);
+    const fresh = el('button', 'btn btn-ghost btn-sm', '↻ Restart fresh');
+    fresh.title = 'Discard the checkpoint and re-run the whole ticket under the current workflow';
+    fresh.addEventListener('click', () => doRetry(key, true));
+    row.appendChild(fresh);
     box.appendChild(row);
   });
 
@@ -541,6 +552,17 @@ async function doTicketPause(ticketKey, paused) {
   try {
     const r = await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused, ticketKey }) });
     pauseNote = r && r.warning ? r.warning : '';
+    await poll();
+  } catch (e) {
+    setConn(false);
+  }
+}
+
+// Resume (fresh=false) or restart-fresh (fresh=true) a failed/paused ticket now.
+async function doRetry(ticketKey, fresh) {
+  try {
+    await api('/api/retry', { method: 'POST', body: JSON.stringify({ ticketKey, fresh }) });
+    pauseNote = '';
     await poll();
   } catch (e) {
     setConn(false);

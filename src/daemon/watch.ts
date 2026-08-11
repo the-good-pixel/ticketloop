@@ -10,7 +10,7 @@ import { assertAuthSafe } from '../runner/claude.js'
 import { sweepOrphans, killAllChildren } from '../runner/children.js'
 import { latestHumanActivity } from '../loop/context.js'
 import { deleteCheckpoint } from '../loop/checkpoint.js'
-import { isPaused, pausedTickets } from './control.js'
+import { isPaused, pausedTickets, setTicketPaused } from './control.js'
 import { log } from '../logger.js'
 import { renameSync } from 'node:fs'
 
@@ -255,6 +255,31 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     return { processed: launched }
   }
 
+  // Manually re-run a failed/paused ticket now. `fresh` discards the resume
+  // checkpoint so it re-runs from scratch under the CURRENT workflow (use this
+  // after changing an already-completed stage); otherwise it resumes from the
+  // checkpoint. Either way it clears any ticket-pause, makes the ticket eligible
+  // again (attempts reset — even past the give-up cap), and kicks a scan.
+  function retryTicket(ticketKey: string, fresh: boolean): { ok: true } {
+    setTicketPaused(ticketKey, false)
+    if (fresh) deleteCheckpoint(ticketKey)
+    const prev = state.get(ticketKey)
+    if (prev) {
+      state.set(ticketKey, { ...prev, attempts: 0 })
+      saveState(state)
+    }
+    log.info(`↻ ${fresh ? 'restart (fresh)' : 'resume'} requested for ${ticketKey}`)
+    void scanNow()
+    return { ok: true }
+  }
+
+  // Failed or paused tickets the user can resume/restart from the dashboard.
+  function resumableTickets(): { key: string; outcome: string; attempts: number }[] {
+    return [...state.entries()]
+      .filter(([, v]) => v.lastOutcome === 'failed' || v.lastOutcome === 'paused')
+      .map(([key, v]) => ({ key, outcome: v.lastOutcome, attempts: v.attempts }))
+  }
+
   // Persist UI edits: mutate the LIVE cfg (so the next scan sees them) + write YAML.
   function persist(): { ok: true } | { error: string } {
     try {
@@ -278,6 +303,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       // parallel runs — one per project; the UI lists them all
       activeRuns: [...activeRuns.entries()].map(([project, ticket]) => ({ project, ticket })),
       pausedTickets: pausedTickets(),
+      resumableTickets: resumableTickets(),
       // first active kept for the legacy single-run widgets
       activeTicket: activeRuns.values().next().value,
       activeProject: activeRuns.keys().next().value,
@@ -307,6 +333,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       log.info(`stored key for "${project}"`)
       return { ok: true }
     },
+    retryTicket,
   })
 
   if (opts.once) {

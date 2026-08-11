@@ -37,11 +37,14 @@ export interface ServerHooks {
     activeProject?: string
     activeRuns?: { project: string; ticket: string }[]
     pausedTickets?: string[]
+    resumableTickets?: { key: string; outcome: string; attempts: number }[]
   }
   // project setup (UI-driven); these persist config / credentials on disk
   saveProject: (p: ProjectConfig) => { ok: true } | { error: string }
   removeProject: (name: string) => { ok: true } | { error: string }
   setKey: (project: string, key: string) => { ok: true } | { error: string }
+  // Re-run a failed/paused ticket now; `fresh` discards its resume checkpoint.
+  retryTicket: (ticketKey: string, fresh: boolean) => { ok: true } | { error: string }
 }
 
 // Selectable models for the per-step dropdown. Aliases (opus/sonnet/haiku)
@@ -208,6 +211,15 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
         hooks.scanNow().then((r) => json(res, r)).catch((e) => serverError(res, e))
         return
       }
+      // ---- Resume / restart a failed or paused ticket now ----
+      if (path === '/api/retry' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const b = body as { ticketKey?: string; fresh?: boolean }
+          if (!b.ticketKey) return json(res, { error: 'ticketKey required' })
+          json(res, hooks.retryTicket(b.ticketKey, !!b.fresh))
+        }).catch((e) => serverError(res, e))
+        return
+      }
       // ---- Pause / resume — system-level (no ticketKey) or per-ticket ----
       if (path === '/api/pause' && req.method === 'POST') {
         readBody(req).then((body) => {
@@ -299,6 +311,7 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
     activeProject: s.activeProject,
     activeRuns: s.activeRuns ?? [],
     pausedTickets: s.pausedTickets ?? [],
+    resumableTickets: s.resumableTickets ?? [],
     authMode: cfg.auth.mode,
     plan: cfg.quota.plan,
     tracker: cfg.tracker.type,

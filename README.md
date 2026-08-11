@@ -212,6 +212,12 @@ instead of starting over:
 - A checkpoint is **kept** only for `failed` / `blocked` / `paused` outcomes; success or
   give-up deletes it. It's also **invalidated by new human activity** — if the client
   comments again, the ask changed, so the run starts fresh rather than resuming stale work.
+- **Resume vs. Restart fresh** (dashboard buttons on a failed/paused run): *Resume* continues
+  from the checkpoint — already-completed stages replay their cached output (so a changed
+  instruction on a *done* stage is NOT re-applied), while the stopped stage onward runs under
+  the **current** workflow (including newly-enabled stages like `deploy-dev`). *Restart fresh*
+  discards the checkpoint and re-runs the whole ticket under the current workflow — use it when
+  you changed an earlier stage and want it applied.
 
 ### Isolation & the git base
 
