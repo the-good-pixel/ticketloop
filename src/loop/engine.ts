@@ -20,8 +20,38 @@ import { buildStagePrompt, CHECK_STAGES, POST_STAGES, type PriorOutputs, type St
 import { extractImageUrls, downloadImages, latestHumanActivity } from './context.js'
 import { DATA_DIR } from '../paths.js'
 import { join, isAbsolute } from 'node:path'
-import { mkdirSync } from 'node:fs'
+import { mkdirSync, existsSync } from 'node:fs'
 import { log } from '../logger.js'
+import {
+  type Checkpoint,
+  type WorkspaceCk,
+  loadCheckpoint,
+  saveCheckpoint,
+  deleteCheckpoint,
+} from './checkpoint.js'
+
+// Thrown by a stage when a pause was requested at its boundary. It carries the
+// run up to the outer handler, which marks the run 'paused' (not failed), keeps
+// the worktree + checkpoint, and returns — a later `resume` continues from here.
+export class PausedError extends Error {
+  constructor(public stage: StageName) {
+    super(`paused before "${stage}"`)
+    this.name = 'PausedError'
+  }
+}
+
+// Outcomes whose checkpoint we KEEP so the ticket can resume where it stopped.
+// Everything else (success, skipped) deletes the checkpoint — the work is done.
+const RESUMABLE_OUTCOMES = new Set(['failed', 'blocked', 'paused'])
+
+// Per-run mutable context: the run record, its resume checkpoint, and the live
+// pause predicate. Threaded into every stage() so stages can replay from cache
+// and honor a pause request at their boundary.
+interface Session {
+  rec: RunRecord
+  ck: Checkpoint
+  paused: () => boolean
+}
 
 // A CHECK step's verdict. Every check step (see CHECK_STAGES) must end its
 // output with a line `VERDICT: pass` or `VERDICT: fail — <reason>`; the harness
@@ -73,12 +103,19 @@ function parseReuse(text: string): string | undefined {
 // export file to the ticket with the project's Linear key.
 async function runDataPath(
   ctx: EngineCtx,
-  rec: RunRecord,
+  s: Session,
   ticket: Ticket,
   project: ProjectConfig,
   priors: PriorOutputs,
   extras: StageExtras,
 ): Promise<RunRecord> {
+  const rec = s.rec
+  // The data path runs in a THROWAWAY worktree that is removed on every exit
+  // (below), so a resumed data run can't reattach a prior worktree — its export
+  // file would be gone. Run it fresh each time (pause still works going forward);
+  // read-only data pulls are cheap enough that this is the safe tradeoff.
+  s.ck.stageOutputs = {}
+  s.ck.workspace = undefined
   // Isolate in a throwaway worktree so a mis-following stage can't touch the real
   // checkout. It's read-only work — the export file is written here; no push/PR.
   const ws = setupWorkspace(ctx, project, ticket.identifier)
@@ -86,8 +123,8 @@ async function runDataPath(
   extras.dataMode = true // shared stages (prepare/verify) run read-only, data-aware
   if (ws.multi) extras.workspace = ws.repos.map((r) => ({ name: r.name, base: r.base, readOnly: r.shipDisabled }))
   try {
-    priors.plan = (await stage(ctx, rec, 'plan', project, ticket, priors, workdir, extras)).text
-    await stage(ctx, rec, 'prepare', project, ticket, priors, workdir, extras)
+    priors.plan = (await stage(ctx, s, 'plan', 'plan', project, ticket, priors, workdir, extras)).text
+    await stage(ctx, s, 'prepare', 'prepare', project, ticket, priors, workdir, extras)
 
     const loopEnabled = ctx.cfg.loop?.enabled !== false
     const maxIters = Math.max(1, ctx.cfg.loop?.maxFixIterations ?? 1)
@@ -95,8 +132,8 @@ async function runDataPath(
     let lastSig = ''
     let exhausted = false
     while (true) {
-      priors.export = (await stage(ctx, rec, 'export', project, ticket, priors, workdir, extras)).text
-      const v = (await stage(ctx, rec, 'verify', project, ticket, priors, workdir, extras)).text
+      priors.export = (await stage(ctx, s, 'export', `export#${iteration}`, project, ticket, priors, workdir, extras)).text
+      const v = (await stage(ctx, s, 'verify', `verify#${iteration}`, project, ticket, priors, workdir, extras)).text
       priors.verify = v
       if (parseVerdict(v).pass) break // data verified correct → deliver
 
@@ -111,7 +148,7 @@ async function runDataPath(
       log.info(`  ↻ export attempt ${iteration}/${maxIters} — ${ticket.identifier}`)
     }
 
-    const c = await stage(ctx, rec, 'comment', project, ticket, priors, workdir, extras)
+    const c = await stage(ctx, s, 'comment', 'comment', project, ticket, priors, workdir, extras)
     rec.commentUrl = extractCommentUrl(c.text)
     finish(rec, 'exported', exhausted ? 'Exported, but verify had unresolved concerns.' : 'Data export posted to the ticket.')
     return rec
@@ -165,6 +202,12 @@ const MOCK_KIND: Record<StageName, any> = {
 export interface ProcessOpts {
   reprocess?: boolean
   trackerKey?: string
+  // latest-human-activity marker; a checkpoint from a DIFFERENT marker is stale
+  // (the human changed the ask) and is discarded so the run starts fresh.
+  marker?: string
+  // live pause predicate (the daemon supplies one backed by the control file);
+  // checked at every stage boundary. Absent → never pauses (one-shot `run`).
+  isPaused?: () => boolean
 }
 
 export async function processTicket(
@@ -190,6 +233,21 @@ export async function processTicket(
   appendRun(rec)
   const priors: PriorOutputs = {}
 
+  // ---- Resume checkpoint ---------------------------------------------------
+  // Reload a prior attempt's checkpoint if it's for the SAME ask (marker). A
+  // checkpoint from different human activity is stale → discard and start fresh.
+  const ticketKey = `${project.name}:${ticket.identifier}`
+  const marker = opts.marker || ''
+  let ck = loadCheckpoint(ticketKey)
+  if (ck && ck.marker !== marker) {
+    deleteCheckpoint(ticketKey)
+    ck = null
+  }
+  const resuming = !!ck && Object.keys(ck.stageOutputs).length > 0
+  if (!ck) ck = { runId: rec.id, ticketKey, marker, imagePaths: [], stageOutputs: {}, updatedAt: 0 }
+  const session: Session = { rec, ck, paused: opts.isPaused || (() => false) }
+  if (resuming) log.info(`  ⤿ resuming ${ticket.identifier} from checkpoint (${Object.keys(ck.stageOutputs).length} stage(s) cached)`)
+
   try {
     const gate = ctx.governor.canRun()
     if (!gate.ok) {
@@ -197,14 +255,16 @@ export async function processTicket(
       return rec
     }
 
-    // Download any ticket images so the model can actually see them.
-    let imagePaths: string[] = []
-    if (!ctx.mock) {
+    // Download any ticket images so the model can actually see them. On resume,
+    // reuse the previously-downloaded paths instead of re-fetching.
+    let imagePaths: string[] = ck.imagePaths || []
+    if (!ctx.mock && !imagePaths.length) {
       const urls = extractImageUrls(ticket)
       if (urls.length) {
         imagePaths = await downloadImages(urls, opts.trackerKey || '', join(DATA_DIR, 'images', rec.id))
         if (imagePaths.length) log.info(`  ⤓ downloaded ${imagePaths.length} image(s) for ${ticket.identifier}`)
       }
+      ck.imagePaths = imagePaths
     }
     const extras: StageExtras = { imagePaths, isReprocess: !!opts.reprocess, trackerKey: opts.trackerKey }
 
@@ -212,7 +272,7 @@ export async function processTicket(
     const repoPath = project.repoPath
 
     // --- Triage (model decides eligibility + kind) --------------------------
-    const triage = await stage(ctx, rec, 'triage', project, ticket, priors, repoPath, extras)
+    const triage = await stage(ctx, session, 'triage', 'triage', project, ticket, priors, repoPath, extras)
     // Only skip when triage EXPLICITLY says ineligible. A missing/oddly-formatted
     // decision defaults to eligible (real safety is the exclude guardrail + PR
     // review, not this soft filter) — so a stray answer never wrongly skips.
@@ -226,14 +286,14 @@ export async function processTicket(
 
     // --- Data path: read-only export in an isolated throwaway worktree ------
     if (kind === 'data') {
-      return await runDataPath(ctx, rec, ticket, project, priors, extras)
+      return await runDataPath(ctx, session, ticket, project, priors, extras)
     }
     skip(rec, 'export', 'not a data request')
 
     // --- Question path ------------------------------------------------------
     if (kind === 'question' || project.autonomy === 'clarify') {
       // The clarify step posts its own answer with the project's Linear key.
-      const ans = await stage(ctx, rec, 'clarify', project, ticket, priors, repoPath, extras)
+      const ans = await stage(ctx, session, 'clarify', 'clarify', project, ticket, priors, repoPath, extras)
       skip(rec, 'comment', 'answer posted by the clarify step')
       rec.commentUrl = extractCommentUrl(ans.text)
       finish(rec, 'answered', 'Posted an answer comment.')
@@ -245,22 +305,39 @@ export async function processTicket(
     // LOCATE: find an existing OPEN PR to refresh (single-repo only for now).
     let reuseBranch: string | undefined
     if (!project.repos?.length) {
-      const loc = await stage(ctx, rec, 'locate', project, ticket, priors, repoPath, extras)
+      const loc = await stage(ctx, session, 'locate', 'locate', project, ticket, priors, repoPath, extras)
       reuseBranch = parseReuse(loc.text)
       if (reuseBranch) log.info(`  ↩ refreshing existing PR on branch ${reuseBranch} — ${ticket.identifier}`)
     } else {
       skip(rec, 'locate', 'multi-repo: PR refresh not supported yet')
     }
-    const ws = setupWorkspace(ctx, project, ticket.identifier, reuseBranch)
+    // If the checkpoint's worktree vanished (user cleaned up), the cached
+    // change-path work (plan/fix edits) is unusable — replaying it into a fresh
+    // empty worktree would look like "no changes". Discard the whole checkpoint
+    // and start clean. (triage/locate already ran this attempt; harmless.)
+    if (ck.workspace && !reattachWorkspace(ck.workspace, ctx.mock)) {
+      log.warn(`  checkpoint worktree gone — discarding cached work, starting fresh`)
+      ck.stageOutputs = {}
+      ck.workspace = undefined
+      saveCheckpoint(ck)
+    }
+    // On resume, reattach the SAME worktree/branch from the checkpoint (rebuilds
+    // the workspace without cutting a new branch). Fresh runs create it and
+    // persist the descriptor so a later resume can reattach.
+    const ws = setupWorkspace(ctx, project, ticket.identifier, reuseBranch, ck.workspace)
+    if (!ck.workspace) {
+      ck.workspace = toWorkspaceCk(ws)
+      saveCheckpoint(ck)
+    }
     const workdir = ws.cwd // plan→verify run here (workspace root for multi-repo)
     if (ws.multi) extras.workspace = ws.repos.map((r) => ({ name: r.name, base: r.base, readOnly: r.shipDisabled }))
     let dirty: WorkRepo[] = []
 
     try {
-      priors.plan = (await stage(ctx, rec, 'plan', project, ticket, priors, workdir, extras)).text
-      await stage(ctx, rec, 'prepare', project, ticket, priors, workdir, extras)
+      priors.plan = (await stage(ctx, session, 'plan', 'plan', project, ticket, priors, workdir, extras)).text
+      await stage(ctx, session, 'prepare', 'prepare', project, ticket, priors, workdir, extras)
       priors.iteration = 1
-      priors.fix = (await stage(ctx, rec, 'fix', project, ticket, priors, workdir, extras)).text
+      priors.fix = (await stage(ctx, session, 'fix', 'fix#1', project, ticket, priors, workdir, extras)).text
 
       // ---- Bounded fix-loop: fix → checks → (verify/review) → repeat while ----
       // not clean, up to maxFixIterations, with no-progress + quota backstops.
@@ -291,7 +368,7 @@ export async function processTicket(
         // deno task check" lives inside a step's own instruction.
         const failures: { stage: StageName; detail: string }[] = []
         for (const cs of CHECK_STAGES) {
-          const out = (await stage(ctx, rec, cs, project, ticket, priors, workdir, extras)).text
+          const out = (await stage(ctx, session, cs, `${cs}#${iteration}`, project, ticket, priors, workdir, extras)).text
           setPrior(priors, cs, out) // feed each check's output into the next step's context
           if (!parseVerdict(out).pass) {
             failures.push({ stage: cs, detail: out })
@@ -306,7 +383,7 @@ export async function processTicket(
           prs = []
           for (const r of dirty) {
             const shipExtras: StageExtras = { ...extras, shipRepo: ws.multi ? r.name : undefined }
-            const shipRes = await stage(ctx, rec, 'ship', project, ticket, priors, r.workdir, shipExtras)
+            const shipRes = await stage(ctx, session, 'ship', `ship:${r.name}#${iteration}`, project, ticket, priors, r.workdir, shipExtras)
             const prUrl = extractPrUrl(shipRes.text) || undefined
             const shipOk = parseVerdict(shipRes.text).pass && !!prUrl
             prs.push({
@@ -347,7 +424,7 @@ export async function processTicket(
         iteration++
         priors.iteration = iteration
         log.info(`  ↻ fix attempt ${iteration}/${maxIters} — ${ticket.identifier}`)
-        priors.fix = (await stage(ctx, rec, 'fix', project, ticket, priors, workdir, extras)).text
+        priors.fix = (await stage(ctx, session, 'fix', `fix#${iteration}`, project, ticket, priors, workdir, extras)).text
       }
 
       // ---- Record PRs · comment · outcome · cleanup ----------------------
@@ -367,7 +444,7 @@ export async function processTicket(
       } else {
         // The comment step posts to Linear itself, with the project's key (right
         // workspace). The harness never posts — it just records where it landed.
-        const commentText = await stage(ctx, rec, 'comment', project, ticket, priors, workdir, extras)
+        const commentText = await stage(ctx, session, 'comment', 'comment', project, ticket, priors, workdir, extras)
         rec.commentUrl = extractCommentUrl(commentText.text)
 
         if (ws.multi && opened.length && failedRepos.length) {
@@ -402,6 +479,12 @@ export async function processTicket(
       throw e
     }
   } catch (e) {
+    if (e instanceof PausedError) {
+      // Not a failure — the loop was asked to pause. Keep the worktree +
+      // checkpoint; `resume` continues from this exact stage.
+      finish(rec, 'paused', `Paused before "${e.stage}". Resume to continue.`)
+      return rec
+    }
     const msg = String(e)
     // A rate limit is not a failure — block so the ticket retries after reset.
     const outcome = msg.includes('RATE_LIMIT') ? 'blocked' : 'failed'
@@ -409,6 +492,11 @@ export async function processTicket(
     rec.error = msg
     appendRun(rec)
     return rec
+  } finally {
+    // Keep the checkpoint only for outcomes that resume; otherwise the work is
+    // done (or abandoned) — remove it so a fresh ask starts clean.
+    if (RESUMABLE_OUTCOMES.has(rec.outcome)) saveCheckpoint(ck)
+    else deleteCheckpoint(ticketKey)
   }
 }
 
@@ -453,11 +541,50 @@ interface Workspace {
   useWorktree: boolean
 }
 
+// Serialize a live Workspace into the checkpoint so a resumed run can reattach.
+function toWorkspaceCk(ws: Workspace): WorkspaceCk {
+  return { repos: ws.repos.map((r) => ({ ...r })), cwd: ws.cwd, multi: ws.multi, useWorktree: ws.useWorktree }
+}
+
+// Rebuild the Workspace from a checkpoint WITHOUT touching git — the worktrees
+// and branches from the interrupted attempt are still on disk. Returns null if
+// they're gone (user cleaned up), so the caller starts fresh instead.
+function reattachWorkspace(resumeWs: WorkspaceCk, skipDiskCheck = false): Workspace | null {
+  if (resumeWs.useWorktree && !skipDiskCheck) {
+    for (const r of resumeWs.repos) {
+      // A git worktree has a `.git` file (not dir) pointing at the main repo.
+      if (!existsSync(join(r.workdir, '.git'))) return null
+    }
+  }
+  return {
+    repos: resumeWs.repos.map((r) => ({ ...r })),
+    cwd: resumeWs.cwd,
+    multi: resumeWs.multi,
+    useWorktree: resumeWs.useWorktree,
+  }
+}
+
 // Create the worktrees/branches and return the workspace. Throws on a dirty
 // in-place repo (caught by the outer handler → 'failed').
-function setupWorkspace(ctx: EngineCtx, project: ProjectConfig, ticketId: string, reuseBranch?: string): Workspace {
+function setupWorkspace(
+  ctx: EngineCtx,
+  project: ProjectConfig,
+  ticketId: string,
+  reuseBranch?: string,
+  resumeWs?: WorkspaceCk,
+): Workspace {
   const useWorktree = project.useWorktree !== false
   const multi = !!(project.repos && project.repos.length)
+
+  // RESUME: reattach the interrupted attempt's worktree/branch as-is.
+  if (resumeWs) {
+    const re = reattachWorkspace(resumeWs, ctx.mock)
+    if (re) {
+      log.info(`  ⤿ reattached workspace at ${re.cwd} (${re.repos.map((r) => r.branch).join(', ')})`)
+      return re
+    }
+    log.warn(`  checkpoint workspace missing on disk — starting fresh`)
+  }
 
   // Single-repo PR refresh: `locate` found an open PR → check out its branch and
   // guard only the model's new delta (base = the branch tip at checkout).
@@ -549,20 +676,43 @@ function scanRepos(
 
 async function stage(
   ctx: EngineCtx,
-  rec: RunRecord,
+  s: Session,
   name: StageName,
+  ckKey: string,
   project: ProjectConfig,
   ticket: Ticket,
   priors: PriorOutputs,
   workdir: string,
   extras: StageExtras,
 ): Promise<ClaudeResult> {
+  const rec = s.rec
   const sc = resolveStage(ctx.cfg, name, project.stages)
-  const sr = beginStage(rec, name, sc.model)
+
+  // REPLAY: a stage already completed in a prior attempt returns its cached
+  // output with NO model call. This is what fast-forwards a resumed run to the
+  // exact stage that failed/paused — priors, kind, reuse-branch and loop
+  // counters all rebuild as the surrounding code re-executes on instant replays.
+  const cached = s.ck.stageOutputs[ckKey]
+  if (cached !== undefined) {
+    const sr0 = beginStage(rec, name, sc.model)
+    endStage(rec, sr0, 'ok', `⤿ resumed (cached) — ${firstLine(cached)}`, cached)
+    return { ...emptyResult(sc.model || ctx.cfg.runner.defaultModel), text: cached }
+  }
+
   if (sc.enabled === false) {
-    endStage(rec, sr, 'skipped', 'stage disabled in config')
+    const sr0 = beginStage(rec, name, sc.model)
+    endStage(rec, sr0, 'skipped', 'stage disabled in config')
     return emptyResult(sc.model || ctx.cfg.runner.defaultModel)
   }
+
+  // PAUSE boundary: before spending a model call, honor a pause request. Persist
+  // the checkpoint and unwind — `resume` re-enters and replays up to here.
+  if (s.paused()) {
+    saveCheckpoint(s.ck)
+    throw new PausedError(name)
+  }
+
+  const sr = beginStage(rec, name, sc.model)
   const instruction = resolveInstruction(name, sc)
   const prompt = buildStagePrompt(name, ticket, project, instruction, priors, workdir, extras)
   log.info(`  ▸ ${name} (${sc.model})${sc.skill ? ` +skill:${sc.skill}` : ''} — ${rec.ticket}`)
@@ -615,6 +765,13 @@ async function stage(
   // the ticket retries after reset, regardless of the token estimate.
   if (res.rateLimited) throw new Error(`RATE_LIMIT: Claude usage limit reached during "${name}"`)
   if (res.isError) throw new Error(`stage "${name}" failed: ${firstLine(res.text)}`)
+
+  // CACHE the successful output (reached only when the stage did NOT throw) so a
+  // later resume replays it instead of re-running the model. A verdict-fail
+  // still returns normally and is cached — the loop reconstructs its state on
+  // replay; only a THROWN stage (error / rate-limit) stays uncached and re-runs.
+  s.ck.stageOutputs[ckKey] = res.text
+  saveCheckpoint(s.ck)
   return res
 }
 

@@ -8,6 +8,7 @@ import { watch } from './daemon/watch.js'
 import { makeEngineCtx, processTicket } from './loop/engine.js'
 import { makeTracker } from './adapters/tracker/tracker.js'
 import { resolveTrackerKey } from './credentials.js'
+import { isPaused, setPaused } from './daemon/control.js'
 
 interface Flags {
   config?: string
@@ -41,6 +42,8 @@ Usage:
   ticketloop demo                 Run the loop on built-in demo tickets + dashboard (no creds)
   ticketloop watch                Start the daemon: poll tracker + run loop + dashboard
   ticketloop run [--ticket ID]    Scan once (or one ticket) then exit
+  ticketloop pause                Pause the running daemon at the next stage boundary (checkpoints)
+  ticketloop resume               Resume a paused daemon (in-flight runs continue where they stopped)
   ticketloop status               Print quota meters + recent runs
 
 Flags:
@@ -59,6 +62,18 @@ async function main() {
     return
   }
   if (cmd === 'init') return initCmd()
+  // Pause/resume just flip the cross-process control file — no config needed.
+  // The running daemon reads it before its next scan / stage boundary.
+  if (cmd === 'pause') {
+    setPaused(true)
+    log.info('⏸ paused — the daemon will stop at the next stage boundary (in-flight work is checkpointed). Run `ticketloop resume` to continue.')
+    return
+  }
+  if (cmd === 'resume') {
+    setPaused(false)
+    log.info('▶ resumed — paused runs continue from their checkpoint on the next scan.')
+    return
+  }
 
   const { config, path } = loadConfig(flags.config)
   if (cmd === 'set-key')

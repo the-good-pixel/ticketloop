@@ -2,6 +2,7 @@ import type { Config } from '../types.js'
 import { Governor } from '../governor/governor.js'
 import { readRuns } from '../store.js'
 import { readRealUsage } from '../realUsage.js'
+import { isPaused } from '../daemon/control.js'
 
 function bar(pct: number, width = 24): string {
   const filled = Math.round((pct / 100) * width)
@@ -14,7 +15,7 @@ export function statusCmd(cfg: Config): void {
   const gov = new Governor(cfg)
   const s = gov.summary()
   const real = readRealUsage()
-  console.log(`\nticketloop — plan ${s.plan}, auth ${s.authMode}\n`)
+  console.log(`\nticketloop — plan ${s.plan}, auth ${s.authMode}${isPaused() ? '  \x1b[33m⏸ PAUSED\x1b[0m' : ''}\n`)
   const line = (label: string, realPct: number | undefined, loopUsed: number, cost: number) => {
     const pct = Math.round(realPct ?? 0)
     const src = realPct != null ? 'real' : 'no data'

@@ -112,7 +112,14 @@ function setConn(ok) {
 // ---- rendering: header/status ----
 function renderStatus(s) {
   $('#statusDot').classList.toggle('running', !!s.running);
-  $('#statusDot').title = s.running ? 'loop running' : 'loop idle';
+  $('#statusDot').classList.toggle('paused', !!s.paused);
+  $('#statusDot').title = s.paused ? 'loop paused' : s.running ? 'loop running' : 'loop idle';
+  const pauseBtn = $('#pauseBtn');
+  if (pauseBtn) {
+    pauseBtn.textContent = s.paused ? '▶ Resume' : '⏸ Pause';
+    pauseBtn.classList.toggle('is-paused', !!s.paused);
+    pauseBtn.dataset.paused = s.paused ? '1' : '';
+  }
   const plan = s.plan || '—';
   const mode = s.authMode === 'api' ? 'API' : 'subscription';
   $('#planBadge').textContent = plan + ' · ' + mode;
@@ -563,6 +570,22 @@ async function doScan() {
     setConn(false);
   } finally {
     btn.textContent = prev;
+    btn.disabled = false;
+  }
+}
+
+// ---- pause / resume button ----
+async function doPauseToggle() {
+  const btn = $('#pauseBtn');
+  if (!btn) return;
+  const paused = btn.dataset.paused === '1';
+  btn.disabled = true;
+  try {
+    await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused: !paused }) });
+    await poll();
+  } catch (e) {
+    setConn(false);
+  } finally {
     btn.disabled = false;
   }
 }
@@ -1978,6 +2001,7 @@ async function onFormSubmit(e) {
 
 // ---- boot ----
 $('#scanBtn').addEventListener('click', doScan);
+$('#pauseBtn')?.addEventListener('click', doPauseToggle);
 $('#navActivity').addEventListener('click', () => setView('activity'));
 $('#navHistory').addEventListener('click', () => setView('history'));
 $('#navSetup').addEventListener('click', () => setView('setup'));

@@ -12,6 +12,7 @@ import { assertAuthSafe } from '../runner/claude.js'
 import { resolveTracker, DEFAULT_INSTRUCTIONS } from '../config.js'
 import { hasCredential, resolveTrackerKey } from '../credentials.js'
 import { readRealUsage } from '../realUsage.js'
+import { isPaused, setPaused } from './control.js'
 import { log } from '../logger.js'
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web')
@@ -104,7 +105,7 @@ function usageSeries(windowHours: number) {
   return { buckets, days }
 }
 
-const OUTCOMES = ['answered', 'pr-opened', 'pr-opened-with-findings', 'partial', 'merged', 'skipped', 'blocked', 'failed', 'running']
+const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'partial', 'merged', 'skipped', 'blocked', 'paused', 'failed', 'running']
 
 function parseDate(v: string | null, endOfDay = false): number | null {
   if (!v) return null
@@ -205,6 +206,16 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
         hooks.scanNow().then((r) => json(res, r)).catch((e) => serverError(res, e))
         return
       }
+      // ---- Pause / resume the loop ----
+      if (path === '/api/pause' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const paused = !!(body as { paused?: boolean }).paused
+          setPaused(paused)
+          log.info(paused ? '⏸ paused via dashboard' : '▶ resumed via dashboard')
+          json(res, { paused })
+        }).catch((e) => serverError(res, e))
+        return
+      }
       // ---- Filesystem browser for the repo-path picker ----
       if (path === '/api/fs' && req.method === 'GET') {
         return json(res, listDir(url.searchParams.get('path')))
@@ -261,6 +272,7 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
   const s = hooks.status()
   return {
     running: s.running,
+    paused: isPaused(),
     lastScan: s.lastScan,
     nextScan: s.nextScan,
     scanning: !!s.scanning,

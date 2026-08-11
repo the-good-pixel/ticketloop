@@ -245,6 +245,7 @@ export type RunOutcome =
   | 'merged'
   | 'skipped' // did not qualify
   | 'blocked' // hit quota or guardrail
+  | 'paused' // pause requested mid-run; checkpointed, resume to continue
   | 'failed'
   | 'running'
 

@@ -106,13 +106,17 @@ fully commented template. Full walkthrough (incl. running as a background servic
 | `ticketloop set-key <project>` | store a project's Linear API key |
 | `ticketloop watch` | start the daemon: poll tracker → run loop → serve dashboard |
 | `ticketloop run [--ticket ID]` | scan once (or one ticket by id, any state) then exit |
-| `ticketloop status` | print quota meters + recent runs |
+| `ticketloop pause` | pause the running daemon at the next stage boundary (in-flight work is checkpointed) |
+| `ticketloop resume` | resume — paused/failed runs continue **from where they stopped**, not from scratch |
+| `ticketloop status` | print quota meters + recent runs (shows ⏸ when paused) |
 
 Flags: `--config <path>`, `--mock`/`--demo`, `--ticket <ID>`, `--port <n>`, `--debug`.
 
 ---
 
 ## Architecture
+
+> 📊 **Visual overview:** open [`docs/architecture.html`](docs/architecture.html) in a browser — a one-page diagram of the loop, the three kinds, the fix loop, multi-repo, and who drives each step.
 
 ### The three triage kinds
 
@@ -147,6 +151,26 @@ it finds one, the harness checks out that branch and the loop **refreshes the sa
 (pushing to it) instead of opening a new one; the guardrail then polices only the
 **model's new delta**, not the PR's already-made (possibly approved) changes. No open PR
 → a fresh branch off `origin/main`.
+
+### Resume & pause
+
+A run **checkpoints after every completed stage** (`~/.ticketloop/checkpoints/`),
+recording each stage's output plus the worktree/branch it's using. So when a run stops
+part-way — a dropped connection at `ship`, a rate limit, a daemon restart, or an explicit
+`ticketloop pause` — the next attempt **resumes from the exact stage that stopped**
+instead of starting over:
+
+- **On resume**, completed stages *replay from cache* (no model call, 0 tokens) and the
+  engine reattaches the **same worktree + branch** (the fix's edits are still there). The
+  run fast-forwards to the first stage that didn't finish and continues from there.
+  A ship that dropped its connection after 45 min of `plan`/`prepare`/`fix`/`verify`/`review`
+  simply re-runs `ship` — the rest is reused.
+- **`ticketloop pause`** stops the loop at the next stage boundary: the in-flight run
+  checkpoints and ends `paused`, and no new tickets are picked up. **`ticketloop resume`**
+  (or the dashboard's ⏸/▶ button) continues each paused run from its checkpoint.
+- A checkpoint is **kept** only for `failed` / `blocked` / `paused` outcomes; success or
+  give-up deletes it. It's also **invalidated by new human activity** — if the client
+  comments again, the ask changed, so the run starts fresh rather than resuming stale work.
 
 ### Isolation & the git base
 

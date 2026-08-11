@@ -8,6 +8,11 @@ export const DATA_DIR =
 export const USAGE_LOG = join(DATA_DIR, 'usage.jsonl')
 export const RUNS_LOG = join(DATA_DIR, 'runs.jsonl')
 export const DAEMON_STATE = join(DATA_DIR, 'daemon.json')
+// Per-ticket resume checkpoints (one file per in-flight ticket).
+export const CHECKPOINTS_DIR = join(DATA_DIR, 'checkpoints')
+// Cross-process pause switch: the `pause`/`resume` CLI commands (and the
+// dashboard) write it; the running daemon reads it before each stage.
+export const CONTROL_FILE = join(DATA_DIR, 'control.json')
 
 const CONFIG_NAMES = ['ticketloop.config.yml', 'ticketloop.config.yaml']
 

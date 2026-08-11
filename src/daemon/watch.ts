@@ -9,6 +9,8 @@ import { DAEMON_STATE } from '../paths.js'
 import { assertAuthSafe } from '../runner/claude.js'
 import { sweepOrphans, killAllChildren } from '../runner/children.js'
 import { latestHumanActivity } from '../loop/context.js'
+import { deleteCheckpoint } from '../loop/checkpoint.js'
+import { isPaused, setPaused } from './control.js'
 import { log } from '../logger.js'
 import { renameSync } from 'node:fs'
 
@@ -99,6 +101,9 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
 
   async function scanNow(): Promise<{ processed: number }> {
     if (scanning) return { processed: 0 }
+    // Paused: don't pick up new work OR resume anything until `resume`. In-flight
+    // runs pause themselves at their next stage boundary (checkpointed).
+    if (isPaused()) return { processed: 0 }
     scanning = true
     let count = 0
     try {
@@ -148,7 +153,9 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
             !!prev &&
             prev.attempts < MAX_ATTEMPTS &&
             (prev.lastOutcome === 'failed' || prev.lastOutcome === 'running')
-          if (!newActivity && !needsRetry) continue
+          // A run paused mid-flight resumes on the next (unpaused) scan.
+          const needsResume = !!prev && prev.lastOutcome === 'paused'
+          if (!newActivity && !needsRetry && !needsResume) continue
           jobs.push({ project, tracker, ticket: t, key, marker, reprocess: !!prev })
         }
       }
@@ -163,6 +170,12 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
 
       // Phase 2: process sequentially, updating live progress.
       for (const job of jobs) {
+        // A pause between jobs stops the scan here; in-flight jobs pause at their
+        // own stage boundary (below).
+        if (isPaused()) {
+          saveState(state)
+          return { processed: count }
+        }
         const gate = ctx.governor.canRun()
         if (!gate.ok) {
           log.warn(`pausing scan — ${gate.reason}`)
@@ -184,9 +197,14 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         const rec = await processTicket(ctx, job.ticket, job.project, job.tracker, {
           reprocess: job.reprocess,
           trackerKey: job.key,
+          marker: job.marker,
+          isPaused, // checked at every stage boundary → checkpoint + pause
         })
         // Update per-ticket state based on outcome.
-        if (rec.outcome === 'blocked') {
+        if (rec.outcome === 'paused') {
+          // Not an attempt — the run checkpointed and will resume when unpaused.
+          state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: 'paused' })
+        } else if (rec.outcome === 'blocked') {
           // quota/guardrail — not an attempt; restore prior state so it retries.
           if (prev) state.set(sKey, prev)
           else state.delete(sKey)
@@ -194,6 +212,8 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
           state.set(sKey, { marker: job.marker, attempts, lastOutcome: 'failed' })
           if (attempts >= MAX_ATTEMPTS) {
             log.warn(`${job.ticket.identifier}: failed ${attempts}× — giving up, flagging for a human`)
+            // Give up cleanly: drop the resume checkpoint so a human starts fresh.
+            deleteCheckpoint(sKey)
             try {
               await job.tracker.comment(
                 job.ticket.id,

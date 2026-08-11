@@ -107,6 +107,17 @@ body {
   animation: pulse 2s infinite;
 }
 
+/* paused wins over running: amber, steady (no pulse) */
+.dot.paused {
+  background: var(--amber, #b45309);
+  animation: none;
+}
+
+.btn.is-paused {
+  color: var(--amber, #b45309);
+  border-color: color-mix(in srgb, var(--amber, #b45309) 45%, transparent);
+}
+
 @keyframes pulse {
   0% {
     box-shadow: 0 0 0 0 color-mix(in srgb, var(--green) 55%, transparent);

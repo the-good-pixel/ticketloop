@@ -275,6 +275,10 @@ const MOCK_TEXTS: Record<string, string> = {
 let mockVerifyFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFIES) || 0
 let mockReviewFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_REVIEWS) || 0
 let mockShipFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_SHIPS) || 0
+// TICKETLOOP_MOCK_ERROR_SHIP=N: the first N ship calls THROW (isError) like a
+// dropped connection — used to test resume-after-crash (the run fails, then a
+// later attempt resumes from the checkpoint and re-runs only ship).
+let mockShipErrorsLeft = Number(process.env.TICKETLOOP_MOCK_ERROR_SHIP) || 0
 
 async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
   // Per-stage delay; override with TICKETLOOP_MOCK_DELAY_MS to slow the demo down
@@ -296,6 +300,15 @@ async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
     const repo = o.cwd.split('/').pop() || 'demo-app'
     const n = 100 + (repo.length % 90)
     const url = `https://github.com/demo/${repo}/pull/${n}`
+    // Hard crash (connection drop) — thrown, never cached, so resume re-runs it.
+    if (mockShipErrorsLeft > 0) {
+      mockShipErrorsLeft--
+      return {
+        text: 'API Error: Unable to connect to API (ENOTFOUND)',
+        inputTokens: inp, outputTokens: 0, cacheReadTokens: cacheRead, cacheCreationTokens: 0,
+        totalTokens: inp + cacheRead, costUsd: 0, model, isError: true,
+      }
+    }
     // TICKETLOOP_MOCK_FAIL_SHIPS=N: first N ships open the PR but report red CI,
     // so you can watch ship route back to fix.
     if (mockShipFailsLeft > 0) {
