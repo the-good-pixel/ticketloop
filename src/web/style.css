@@ -431,7 +431,6 @@ body {
 }
 
 .live-step-chip {
-  margin-left: auto;
   font-family: var(--mono);
   font-size: 11px;
   font-weight: 600;
@@ -552,8 +551,9 @@ body {
 
 .run-side {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
   justify-self: end;
 }
 
@@ -1936,6 +1936,8 @@ select.input {
   }
   .run-side {
     justify-self: start;
+    flex-direction: row;
+    align-items: center;
     flex-wrap: wrap;
   }
   .topbar {
