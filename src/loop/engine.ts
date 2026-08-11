@@ -14,7 +14,7 @@ import { runClaude } from '../runner/claude.js'
 import type { ClaudeResult } from '../runner/claude.js'
 import type { Tracker } from '../adapters/tracker/tracker.js'
 import { makeRepo, type Repo } from '../adapters/repo/github.js'
-import { appendRun, appendUsage } from '../store.js'
+import { appendRun, appendUsage, getRun } from '../store.js'
 import { classifyKind } from './classify.js'
 import { matchesAny } from './glob.js'
 import { buildStagePrompt, CHECK_STAGES, POST_STAGES, type PriorOutputs, type StageExtras } from './prompts.js'
@@ -222,22 +222,6 @@ export async function processTicket(
   tracker: Tracker,
   opts: ProcessOpts = {},
 ): Promise<RunRecord> {
-  const rec: RunRecord = {
-    id: newRunId(ticket.identifier),
-    ticket: ticket.identifier,
-    ticketTitle: ticket.title,
-    ticketUrl: ticket.url,
-    project: project.name,
-    autonomy: project.autonomy,
-    startedAt: Date.now(),
-    outcome: 'running',
-    stages: [],
-    totalTokens: 0,
-    costUsd: 0,
-  }
-  appendRun(rec)
-  const priors: PriorOutputs = {}
-
   // ---- Resume checkpoint ---------------------------------------------------
   // Reload a prior attempt's checkpoint if it's for the SAME ask (marker). A
   // checkpoint from different human activity is stale → discard and start fresh.
@@ -249,9 +233,48 @@ export async function processTicket(
     ck = null
   }
   const resuming = !!ck && Object.keys(ck.stageOutputs).length > 0
+
+  // CONTINUE THE SAME RUN when resuming: an interruption isn't a new attempt, so
+  // reuse the checkpoint's record instead of minting another one (no duplicate
+  // card, and tokens/cost accumulate into the true total for this work).
+  // `stages` is rebuilt as the replay re-walks them, so nothing duplicates.
+  const prior = resuming && ck!.runId ? getRun(ck!.runId) : undefined
+  let rec: RunRecord
+  if (prior) {
+    rec = prior
+    rec.stages = []
+    rec.outcome = 'running'
+    rec.endedAt = undefined
+    rec.error = undefined
+    rec.resumes = (rec.resumes || 0) + 1
+    rec.ticketTitle = ticket.title // keep in sync if it was renamed
+    rec.ticketUrl = ticket.url
+  } else {
+    rec = {
+      id: newRunId(ticket.identifier),
+      ticket: ticket.identifier,
+      ticketTitle: ticket.title,
+      ticketUrl: ticket.url,
+      project: project.name,
+      marker,
+      autonomy: project.autonomy,
+      startedAt: Date.now(),
+      outcome: 'running',
+      stages: [],
+      totalTokens: 0,
+      costUsd: 0,
+    }
+  }
+  appendRun(rec)
+  const priors: PriorOutputs = {}
+
   if (!ck) ck = { runId: rec.id, ticketKey, marker, imagePaths: [], stageOutputs: {}, updatedAt: 0 }
+  ck.runId = rec.id // a fresh record adopts the checkpoint (and vice versa)
   const session: Session = { rec, ck, paused: opts.isPaused || (() => false) }
-  if (resuming) log.info(`  ⤿ resuming ${ticket.identifier} from checkpoint (${Object.keys(ck.stageOutputs).length} stage(s) cached)`)
+  if (resuming)
+    log.info(
+      `  ⤿ resuming ${ticket.identifier}${prior ? ` (run ${rec.id}, continue #${rec.resumes})` : ''} — ${Object.keys(ck.stageOutputs).length} stage(s) cached`,
+    )
 
   try {
     const gate = ctx.governor.canRun()

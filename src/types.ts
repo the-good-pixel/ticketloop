@@ -277,12 +277,20 @@ export interface PrRecord {
   error?: string
 }
 
+// One RUN = one continuous piece of work on one "ask" (a ticket at a given
+// latest-human-activity marker). Being interrupted (rate limit, pause, crash)
+// and RESUMED does NOT fork a new run — the same record is continued in place,
+// so its tokens/cost reflect the true total spent getting that work done.
+// A new record is only minted for a genuinely new attempt: "restart fresh"
+// (checkpoint discarded) or a new ask (the client posted new activity).
 export interface RunRecord {
   id: string
   ticket: string // identifier
   ticketTitle: string
   ticketUrl: string
   project: string
+  marker?: string // latest-human-activity this run is servicing (the "ask")
+  resumes?: number // times this run was continued after an interruption
   autonomy: Autonomy
   startedAt: number
   endedAt?: number

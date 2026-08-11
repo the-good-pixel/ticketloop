@@ -100,7 +100,8 @@ async function mutate(path, opts) {
 
 // ---- state ----
 const state = {
-  expanded: new Set(), // run ids currently expanded
+  expanded: new Set(), // run ids currently expanded (stage detail)
+  expandedTickets: new Set(), // ticket keys currently expanded (their run list)
   detailCache: new Map(), // id -> RunRecord (full)
   runsById: new Map(),
 };
@@ -241,7 +242,81 @@ function renderStageTracker(stages) {
   return wrap;
 }
 
-// ---- rendering: one run row ----
+// ---- rendering: a TICKET card (the feed's unit) ----
+// Runs are grouped under the ticket they serviced, so you track tickets — not a
+// scatter of attempt cards — and see how many runs each one took.
+function renderTicketGroup(g) {
+  const latest = g.runs[0];
+  const li = el('li', 'ticket');
+  li.dataset.key = g.key;
+
+  const head = el('div', 'run-head');
+
+  const main = el('div', 'run-main');
+  const titleLine = el('div', 'run-titleline');
+  const ticket = el('a', 'run-ticket', g.ticket || '');
+  if (g.ticketUrl) {
+    ticket.href = g.ticketUrl;
+    ticket.target = '_blank';
+    ticket.rel = 'noopener';
+    ticket.addEventListener('click', (e) => e.stopPropagation());
+  }
+  titleLine.appendChild(ticket);
+  titleLine.appendChild(el('span', 'run-title', g.ticketTitle || '(untitled)'));
+  main.appendChild(titleLine);
+
+  const sub = el('div', 'run-sub');
+  if (g.project) sub.appendChild(el('span', null, g.project));
+  if (g.autonomy) sub.appendChild(el('span', null, g.autonomy));
+  sub.appendChild(el('span', 'run-count', g.runs.length + (g.runs.length === 1 ? ' run' : ' runs')));
+  if (latest.resumes) sub.appendChild(el('span', null, '↻ resumed ' + latest.resumes + '×'));
+  main.appendChild(sub);
+
+  // At-a-glance: the latest run's progress.
+  main.appendChild(renderStageTracker(latest.stages));
+  if (latest.error) main.appendChild(el('div', 'run-error', latest.error));
+
+  // Resume / Restart act on the TICKET (they continue its latest work).
+  if (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked') {
+    const actions = el('div', 'run-actions');
+    const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
+    resume.title = 'Continue this run from its checkpoint (already-done steps are reused)';
+    resume.addEventListener('click', (e) => { e.stopPropagation(); doRetry(g.key, false); });
+    const fresh = el('button', 'btn btn-ghost btn-sm', '↻ Restart fresh');
+    fresh.title = 'Discard the checkpoint and start a NEW run under the current workflow';
+    fresh.addEventListener('click', (e) => { e.stopPropagation(); doRetry(g.key, true); });
+    actions.appendChild(resume);
+    actions.appendChild(fresh);
+    main.appendChild(actions);
+  }
+  head.appendChild(main);
+
+  const side = el('div', 'run-side');
+  side.appendChild(el('span', 'badge badge-' + (latest.outcome || 'skipped'), latest.outcome || '—'));
+  const metrics = el('div', 'run-metrics');
+  metrics.appendChild(el('span', null, fmtTokens(g.totalTokens) + ' tok'));
+  metrics.appendChild(el('span', null, fmtMoney(g.costUsd)));
+  side.appendChild(metrics);
+  const running = latest.outcome === 'running' || !latest.endedAt;
+  const timeStr = running ? fmtDuration(latest.startedAt, latest.endedAt) : fmtRelative(latest.endedAt || latest.startedAt);
+  const time = el('span', 'run-time', timeStr);
+  time.title = 'started ' + fmtClock(latest.startedAt) + (latest.endedAt ? '\nended ' + fmtClock(latest.endedAt) : '');
+  side.appendChild(time);
+  head.appendChild(side);
+
+  head.addEventListener('click', () => toggleTicket(g.key));
+  li.appendChild(head);
+
+  // Expanded: every run for this ticket, newest first.
+  if (state.expandedTickets.has(g.key)) {
+    const runs = el('ul', 'ticket-runs');
+    g.runs.forEach((r) => runs.appendChild(renderRun(r)));
+    li.appendChild(runs);
+  }
+  return li;
+}
+
+// ---- rendering: one run row (inside a ticket card) ----
 function renderRun(r) {
   const li = el('li', 'run');
   li.dataset.id = r.id;
@@ -250,41 +325,12 @@ function renderRun(r) {
 
   // main column
   const main = el('div', 'run-main');
-  const titleLine = el('div', 'run-titleline');
-  const ticket = el('a', 'run-ticket', r.ticket || '');
-  if (r.ticketUrl) {
-    ticket.href = r.ticketUrl;
-    ticket.target = '_blank';
-    ticket.rel = 'noopener';
-    ticket.addEventListener('click', (e) => e.stopPropagation());
-  }
-  titleLine.appendChild(ticket);
-  titleLine.appendChild(el('span', 'run-title', r.ticketTitle || '(untitled)'));
-  main.appendChild(titleLine);
-
   const sub = el('div', 'run-sub');
-  if (r.project) sub.appendChild(el('span', null, r.project));
-  if (r.autonomy) sub.appendChild(el('span', null, r.autonomy));
+  sub.appendChild(el('span', null, fmtClock(r.startedAt)));
+  if (r.resumes) sub.appendChild(el('span', null, '↻ resumed ' + r.resumes + '×'));
   main.appendChild(sub);
   main.appendChild(renderStageTracker(r.stages));
   if (r.error) main.appendChild(el('div', 'run-error', r.error));
-  // Resume / Restart on any stopped run card (failed / paused / blocked) of a
-  // ticket that is still stopped — so a blocked card gets buttons too, while a
-  // ticket that later succeeded shows none.
-  const rkey = (r.project || '') + ':' + (r.ticket || '');
-  if ((r.outcome === 'failed' || r.outcome === 'paused' || r.outcome === 'blocked') && resumableTicketKeys.has(rkey)) {
-    const key = rkey;
-    const actions = el('div', 'run-actions');
-    const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
-    resume.title = 'Continue from the checkpoint (already-done stages are reused)';
-    resume.addEventListener('click', (e) => { e.stopPropagation(); doRetry(key, false); });
-    const fresh = el('button', 'btn btn-ghost btn-sm', '↻ Restart fresh');
-    fresh.title = 'Discard the checkpoint and re-run the whole ticket under the current workflow';
-    fresh.addEventListener('click', (e) => { e.stopPropagation(); doRetry(key, true); });
-    actions.appendChild(resume);
-    actions.appendChild(fresh);
-    main.appendChild(actions);
-  }
   head.appendChild(main);
 
   // side column
@@ -301,7 +347,7 @@ function renderRun(r) {
   side.appendChild(time);
   head.appendChild(side);
 
-  head.addEventListener('click', () => toggleExpand(r.id));
+  head.addEventListener('click', (e) => { e.stopPropagation(); toggleExpand(r.id); });
   li.appendChild(head);
 
   if (state.expanded.has(r.id)) {
@@ -422,6 +468,34 @@ function cssEsc(v) {
 // ---- feed ----
 let lastRuns = [];
 
+// Group runs (newest-first) under their ticket, preserving that order both for
+// the groups and for the runs inside each group.
+function groupByTicket(runs) {
+  const groups = new Map();
+  for (const r of runs) {
+    const key = (r.project || '') + ':' + (r.ticket || '');
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        key,
+        project: r.project,
+        ticket: r.ticket,
+        ticketTitle: r.ticketTitle,
+        ticketUrl: r.ticketUrl,
+        autonomy: r.autonomy,
+        totalTokens: 0,
+        costUsd: 0,
+        runs: [],
+      };
+      groups.set(key, g);
+    }
+    g.runs.push(r);
+    g.totalTokens += r.totalTokens || 0;
+    g.costUsd += r.costUsd || 0;
+  }
+  return [...groups.values()];
+}
+
 function renderFeedFromState() {
   const feed = $('#feed');
   const empty = $('#emptyState');
@@ -435,49 +509,47 @@ function renderFeedFromState() {
   }
   empty.hidden = true;
   const frag = document.createDocumentFragment();
-  lastRuns.forEach((r) => frag.appendChild(renderRun(r)));
+  groupByTicket(lastRuns).forEach((g) => frag.appendChild(renderTicketGroup(g)));
   feed.replaceChildren(frag);
   window.scrollTo({ top: y });
+}
+
+function toggleTicket(key) {
+  if (state.expandedTickets.has(key)) state.expandedTickets.delete(key);
+  else state.expandedTickets.add(key);
+  state.feedSig = '';
+  renderFeedFromState();
 }
 
 // A cheap signature of what the feed actually displays; if unchanged between
 // polls we skip re-rendering entirely (no DOM churn, no scroll disturbance).
 function feedSignature(runs, expanded) {
-  return runs
-    .map(
-      (r) =>
-        r.id +
-        ':' +
-        r.outcome +
-        ':' +
-        (r.totalTokens || 0) +
-        ':' +
-        (expanded.has(r.id) ? 'x' : '') +
-        ':' +
-        (r.stages || []).map((s) => s.stage + s.status).join(','),
-    )
-    .join('|');
+  return (
+    [...state.expandedTickets].sort().join(',') +
+    '#' +
+    runs
+      .map(
+        (r) =>
+          r.id +
+          ':' +
+          r.outcome +
+          ':' +
+          (r.totalTokens || 0) +
+          ':' +
+          (r.resumes || 0) +
+          ':' +
+          (expanded.has(r.id) ? 'x' : '') +
+          ':' +
+          (r.stages || []).map((s) => s.stage + s.status).join(','),
+      )
+      .join('|')
+  );
 }
-
-// Tickets whose LATEST run is still stopped (failed/blocked/paused) → all their
-// stopped run cards offer Resume/Restart. A ticket that later succeeded/ran is
-// NOT in the set, so stale older attempts never offer them.
-let resumableTicketKeys = new Set();
 
 function renderActivity(runs) {
   lastRuns = Array.isArray(runs) ? runs : [];
   state.runsById.clear();
   lastRuns.forEach((r) => state.runsById.set(r.id, r));
-  resumableTicketKeys = new Set();
-  const seenTickets = new Set();
-  for (const r of lastRuns) {
-    // lastRuns is newest-first → first time we see a ticket is its latest run.
-    const key = (r.project || '') + ':' + (r.ticket || '');
-    if (!seenTickets.has(key)) {
-      seenTickets.add(key);
-      if (r.outcome === 'failed' || r.outcome === 'blocked' || r.outcome === 'paused') resumableTicketKeys.add(key);
-    }
-  }
   // Drop expanded ids that no longer exist.
   for (const id of [...state.expanded]) {
     if (!state.runsById.has(id)) state.expanded.delete(id);

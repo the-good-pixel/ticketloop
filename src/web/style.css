@@ -488,6 +488,39 @@ body {
   gap: 8px;
 }
 
+/* A ticket card — the feed's unit; its runs nest inside when expanded. */
+.ticket {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow);
+}
+
+.run-count {
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.ticket-runs {
+  list-style: none;
+  margin: 0;
+  padding: 0 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-elev-2);
+}
+.ticket-runs .run {
+  border-radius: 8px;
+  box-shadow: none;
+  background: var(--bg-elev);
+}
+.ticket-runs .run-head {
+  padding: 8px 12px;
+}
+
 .run {
   background: var(--bg-elev);
   border: 1px solid var(--border);
