@@ -281,7 +281,15 @@ export async function processTicket(
     // decision defaults to eligible (real safety is the exclude guardrail + PR
     // review, not this soft filter) — so a stray answer never wrongly skips.
     const eligible = ctx.mock || !/DECISION:\s*ineligible/i.test(triage.text)
-    const kind = parseKind(triage.text) || classifyKind(ticket) // question | data | change
+    const kind = parseKind(triage.text) || classifyKind(ticket) // question | data | change | bug
+
+    // No action needed: the latest activity is a sign-off / approval / ack, or an
+    // ask the loop can't do (deploy to prod). Skip WITHOUT running any pipeline —
+    // this is what stops sign-offs re-triggering a doomed "no file changes" run.
+    if (/DECISION:\s*no[-\s]?action/i.test(triage.text)) {
+      finish(rec, 'skipped', 'No action required (triage: latest activity is a sign-off / approval / not a request).')
+      return rec
+    }
 
     if (!eligible) {
       finish(rec, 'skipped', `Triage: ineligible. ${firstLine(triage.text)}`)

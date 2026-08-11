@@ -303,6 +303,8 @@ async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
   // Ship text carries a per-repo PR URL (workdir basename) so multi-repo demos
   // produce distinct PRs the engine can parse into rec.prs.
   let text = MOCK_TEXTS[kind] || 'ok'
+  // Test hook: make triage classify the ticket as "no action needed".
+  if (kind === 'triage' && process.env.TICKETLOOP_MOCK_TRIAGE_NOACTION) text = 'DECISION: no-action'
   if (kind === 'ship') {
     const repo = o.cwd.split('/').pop() || 'demo-app'
     const n = 100 + (repo.length % 90)

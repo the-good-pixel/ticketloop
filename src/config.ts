@@ -76,9 +76,18 @@ export const DEFAULT_INSTRUCTIONS: Record<StageName, string> = {
   triage:
     'You are ONLY classifying this ticket. Do NOT answer, explain, or make changes. Output ' +
     'EXACTLY these two lines and nothing else:\n' +
-    'DECISION: eligible        (or: DECISION: ineligible)\n' +
+    'DECISION: eligible        (or: DECISION: ineligible, or: DECISION: no-action)\n' +
     'KIND: question            (or: KIND: data, or: KIND: change, or: KIND: bug)\n\n' +
-    'Decide KIND from what the client most recently wants — READ THE LATEST COMMENTS, not ' +
+    'FIRST decide whether ANY action is needed at all:\n' +
+    '- DECISION=no-action — nothing to do right now. Use this when the LATEST activity is a ' +
+    'sign-off / approval / acknowledgement / status update rather than a request: e.g. "UAT ' +
+    'passed", "can deploy to PROD", "looks good", "all good, thanks", "verified", "closing this", ' +
+    'a thumbs-up, or a comment that only confirms success or says thanks with NO new ask. Also ' +
+    'use no-action when the ONLY ask is something this automated loop cannot do (deploy to ' +
+    'production, a manual/ops task). Guard: only pick no-action if the newest comment clearly ' +
+    'requests NOTHING — if it reports a problem, a defect, or asks for any change/fix/revision, ' +
+    'it is NOT no-action.\n\n' +
+    'If action IS needed, decide KIND from what the client most recently wants — READ THE LATEST COMMENTS, not ' +
     'just the original description (a ticket is often re-opened because of a new comment):\n' +
     '- KIND=bug — they report something BROKEN / not working as expected: an error, a crash, ' +
     'wrong output, a regression, "X is broken", "this stopped working", a reproducible defect. ' +
