@@ -258,6 +258,8 @@ export function validateProject(p: ProjectConfig): void {
   if (!p.repoPath) throw new Error('repoPath is required')
   if (!['clarify', 'propose', 'gated-merge'].includes(p.autonomy))
     throw new Error('autonomy must be clarify, propose, or gated-merge')
+  if (p.maxParallel !== undefined && (!Number.isInteger(p.maxParallel) || p.maxParallel < 1))
+    throw new Error('maxParallel must be a whole number ≥ 1')
   validateRepos(p)
 }
 

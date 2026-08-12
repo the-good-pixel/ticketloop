@@ -80,10 +80,13 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
   let running = true
   let lastScan: number | undefined
   let scanning = false // guards the SELECTION pass only (not the runs)
-  // Parallelism: one run per project at a time (avoids two worktrees/dev-servers
-  // colliding in the same repo). `activeRuns` maps a busy project → its ticket;
-  // a project already in the map is skipped until its run finishes.
-  const activeRuns = new Map<string, string>() // project name → ticket identifier
+  // Parallelism: projects always run concurrently with each other. WITHIN a
+  // project the default is one run at a time (two runs share one repo, so a
+  // fixed-port dev server or concurrent git would collide) — a project can opt
+  // into more via `maxParallel`. `activeRuns` is keyed by "<project>:<ticket>".
+  const activeRuns = new Map<string, { project: string; ticket: string }>()
+  const slotsFree = (p: (typeof cfg.projects)[number]) =>
+    Math.max(1, p.maxParallel || 1) - [...activeRuns.values()].filter((a) => a.project === p.name).length
   const inflight = new Set<Promise<void>>() // launched runs (awaited on once/shutdown)
 
   for (const w of assertAuthSafe(cfg.auth.mode).warnings) log.warn(w)
@@ -109,9 +112,11 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     reprocess: boolean
   }
 
-  // Pick the FIRST ticket this project should work on now (or null). One ticket
-  // per project keeps the per-project single-run invariant simple.
-  async function selectJob(project: (typeof cfg.projects)[number]): Promise<Job | null> {
+  // Pick up to `limit` tickets this project should work on now. `limit` is the
+  // project's free parallel slots (1 unless it opted into maxParallel).
+  async function selectJobs(project: (typeof cfg.projects)[number], limit: number): Promise<Job[]> {
+    const picked: Job[] = []
+    if (limit <= 0) return picked
     const tc = resolveTracker(cfg, project)
     if (tc.type === 'linear' && !tc.simpleLabel) {
       log.warn(
@@ -126,7 +131,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       tickets = await tracker.listCandidates()
     } catch (e) {
       log.error(`scan ${project.name}: tracker error — ${String(e)}`)
-      return null
+      return picked
     }
     for (const t of tickets) {
       const sKey = `${project.name}:${t.identifier}`
@@ -150,9 +155,11 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       if (!newActivity && !needsRetry && !needsResume) continue
       // Individually paused → leave it (a global pause already stopped the scan).
       if (isPaused(sKey)) continue
-      return { project, tracker, ticket: t, key, marker, reprocess: !!prev }
+      if (activeRuns.has(sKey)) continue // already running (parallel projects)
+      picked.push({ project, tracker, ticket: t, key, marker, reprocess: !!prev })
+      if (picked.length >= limit) break
     }
-    return null
+    return picked
   }
 
   // Run one job to completion and fold its outcome back into per-ticket state.
@@ -208,10 +215,9 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     saveState(state)
   }
 
-  // A scan LAUNCHES at most one run per free project (fire-and-forget) and
-  // returns — it does NOT await the runs. Projects run concurrently; a project
-  // with a run in flight is skipped until it finishes. This is what lets several
-  // tickets progress at once while a single project is never doubly-worked.
+  // A scan LAUNCHES runs into each project's free slots (fire-and-forget) and
+  // returns — it does NOT await them. Projects run concurrently; within a
+  // project, `maxParallel` (default 1) caps how many of its tickets run at once.
   async function scanNow(): Promise<{ processed: number }> {
     if (scanning) return { processed: 0 }
     // Paused: don't pick up new work OR resume anything until `resume`. In-flight
@@ -227,31 +233,32 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     scanning = true
     let launched = 0
     try {
-      for (const project of cfg.projects) {
-        if (activeRuns.has(project.name)) continue // one run per project
-        const job = await selectJob(project)
-        if (!job) continue
-        const gate = ctx.governor.canRun()
-        if (!gate.ok) {
-          log.warn(`holding new runs — ${gate.reason}`)
-          break
+      outer: for (const project of cfg.projects) {
+        const jobs = await selectJobs(project, slotsFree(project))
+        for (const job of jobs) {
+          const gate = ctx.governor.canRun()
+          if (!gate.ok) {
+            log.warn(`holding new runs — ${gate.reason}`)
+            break outer
+          }
+          const sKey = `${project.name}:${job.ticket.identifier}`
+          activeRuns.set(sKey, { project: project.name, ticket: job.ticket.identifier })
+          launched++
+          const p = runJob(job)
+            .catch((e) => log.error(`runJob ${job.ticket.identifier}: ${String(e)}`))
+            .finally(() => {
+              activeRuns.delete(sKey)
+              inflight.delete(p)
+            })
+          inflight.add(p)
         }
-        activeRuns.set(project.name, job.ticket.identifier)
-        launched++
-        const p = runJob(job)
-          .catch((e) => log.error(`runJob ${job.ticket.identifier}: ${String(e)}`))
-          .finally(() => {
-            activeRuns.delete(project.name)
-            inflight.delete(p)
-          })
-        inflight.add(p)
       }
       if (adoptMode) {
         adoptMode = false
         saveState(state)
         log.warn(`adopted ${state.size} existing ticket(s) after state recovery — none re-run`)
       }
-      if (launched) log.info(`scan: launched ${launched} run(s) — active: ${[...activeRuns.entries()].map(([p, t]) => `${p}:${t}`).join(', ')}`)
+      if (launched) log.info(`scan: launched ${launched} run(s) — active: ${[...activeRuns.keys()].join(', ')}`)
     } catch (e) {
       log.error(`scan failed: ${String(e)}`)
     } finally {
@@ -276,8 +283,13 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     const identifier = ticketKey.slice(idx + 1)
     const project = cfg.projects.find((p) => p.name === projectName)
     if (!project) return { error: `unknown project "${projectName}"` }
-    if (activeRuns.has(project.name)) {
-      return { error: `Project "${project.name}" is busy with ${activeRuns.get(project.name)} — one run per project. Try again once it finishes.` }
+    if (activeRuns.has(ticketKey)) return { error: `${identifier} is already running.` }
+    if (slotsFree(project) <= 0) {
+      const busy = [...activeRuns.values()].filter((a) => a.project === project.name).map((a) => a.ticket)
+      const cap = Math.max(1, project.maxParallel || 1)
+      return {
+        error: `Project "${project.name}" is at its parallel limit (${cap}) — running ${busy.join(', ')}. Try again once one finishes${cap === 1 ? ', or raise "max parallel tickets" for this project' : ''}.`,
+      }
     }
     setTicketPaused(ticketKey, false)
     if (fresh) deleteCheckpoint(ticketKey)
@@ -288,7 +300,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     }
     log.info(`↻ ${fresh ? 'restart (fresh)' : 'resume'} requested for ${ticketKey}`)
     // Fetch + launch out of band (works regardless of the ticket's current state).
-    activeRuns.set(project.name, identifier) // reserve the slot immediately
+    activeRuns.set(ticketKey, { project: project.name, ticket: identifier }) // reserve the slot
     const tc = resolveTracker(cfg, project)
     const key = resolveTrackerKey(project, tc)
     const tracker = makeTracker(tc, key)
@@ -302,7 +314,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     })()
       .catch((e) => log.error(`retry ${ticketKey}: ${String(e)}`))
       .finally(() => {
-        activeRuns.delete(project.name)
+        activeRuns.delete(ticketKey)
         inflight.delete(p)
       })
     inflight.add(p)
@@ -336,13 +348,13 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       lastScan,
       nextScan: lastScan ? lastScan + cfg.tracker.pollIntervalSec * 1000 : undefined,
       scanning,
-      // parallel runs — one per project; the UI lists them all
-      activeRuns: [...activeRuns.entries()].map(([project, ticket]) => ({ project, ticket })),
+      // every in-flight run (across projects, and within a parallel project)
+      activeRuns: [...activeRuns.values()].map((a) => ({ project: a.project, ticket: a.ticket })),
       pausedTickets: pausedTickets(),
       resumableTickets: resumableTickets(),
       // first active kept for the legacy single-run widgets
-      activeTicket: activeRuns.values().next().value,
-      activeProject: activeRuns.keys().next().value,
+      activeTicket: activeRuns.values().next().value?.ticket,
+      activeProject: activeRuns.values().next().value?.project,
       scanTotal: activeRuns.size,
       scanDone: 0,
     }),

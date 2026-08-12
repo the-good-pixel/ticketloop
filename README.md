@@ -182,13 +182,25 @@ it finds one, the harness checks out that branch and the loop **refreshes the sa
 **model's new delta**, not the PR's already-made (possibly approved) changes. No open PR
 → a fresh branch off `origin/main`.
 
-### Parallel runs — one per project
+### Parallel runs
 
-The daemon works **multiple tickets at once, but at most one per project**. Each scan
-launches a run for every *free* project concurrently; a project with a run already in
-flight is skipped until it finishes. This keeps several clients moving in parallel while
-never letting two runs fight over the same repo's worktree, branches, or dev server.
-Quota is shared — the global governor gates all of them.
+**Projects always run in parallel** — each scan launches work for every project that has
+a free slot, so several clients progress at once. Quota is shared: the global governor
+gates every launch.
+
+**Within** a project the default is **one ticket at a time** (two runs share one repo, so
+a fixed-port dev server or heavy concurrent git would collide). A project can opt into
+more:
+
+```yaml
+projects:
+  - name: my-app
+    maxParallel: 3     # work up to 3 of this project's tickets concurrently
+```
+
+or set **“Max parallel tickets”** in the dashboard's project form. Each ticket still gets
+its own worktree; only raise it if the project's steps don't contend for shared
+resources (ports, a single dev database, etc.).
 
 ### Resume & pause
 

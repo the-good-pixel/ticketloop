@@ -151,6 +151,13 @@ export interface ProjectConfig {
   // serves several projects; with per-project trackers this is optional)
   match: { linearTeam?: string; label?: string; projectName?: string }
   exclude: string[] // glob patterns that must never be auto-edited
+  // How many of THIS project's tickets may run at once (default 1). Projects
+  // always run in parallel with each other; this opts a single project into
+  // working several of its own tickets concurrently. Each ticket still gets its
+  // own worktree, but they share one repo — so only raise this if the project's
+  // steps don't contend (e.g. a `verify` that binds a fixed dev-server port, or
+  // heavy concurrent git on the same repo, will collide).
+  maxParallel?: number
   // Isolate each change in a git worktree off this repo (default true) so the
   // loop never disturbs your working tree. Set false to work in-place on a
   // branch in repoPath instead.

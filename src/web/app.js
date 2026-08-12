@@ -1751,6 +1751,15 @@ function openForm(name) {
   wtField.appendChild(wtWrap);
   form.appendChild(wtField);
 
+  // maxParallel — opt this project into working several tickets at once
+  const mpIn = mkInput('f_maxparallel', 'number', p && p.maxParallel ? String(p.maxParallel) : '1', '1');
+  mpIn.min = '1';
+  form.appendChild(inputRow(
+    'Max parallel tickets',
+    mpIn,
+    'How many of THIS project\'s tickets may run at once (default 1). Different projects always run in parallel; raise this to also work several tickets of this project concurrently. Each ticket gets its own worktree, but they share one repo — keep it at 1 if your steps contend (e.g. a verify step that binds a fixed dev-server port).',
+  ));
+
   // devUrl
   const devIn = mkInput('f_devurl', 'text', p ? p.devUrl : '', 'http://localhost:3000');
   form.appendChild(inputRow('Dev URL (optional)', devIn));
@@ -2054,6 +2063,10 @@ function buildProjectFromForm() {
   };
   const devUrl = val('f_devurl');
   if (devUrl) proj.devUrl = devUrl;
+
+  // Only persist maxParallel when it opts into more than the default of 1.
+  const mp = parseInt(val('f_maxparallel'), 10);
+  if (Number.isFinite(mp) && mp > 1) proj.maxParallel = mp;
 
   const exclude = document.getElementById('f_exclude').value
     .split('\n')
