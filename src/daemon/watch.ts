@@ -381,6 +381,44 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       log.info(`stored key for "${project}"`)
       return { ok: true }
     },
+    // Global settings from the dashboard. Mutates the LIVE cfg (so the next run
+    // picks it up) and persists the YAML. Only these groups are accepted —
+    // auth/server are deliberately not editable here.
+    saveSettings: (patch) => {
+      try {
+        const num = (v: unknown, min: number, max: number) => {
+          const n = Number(v)
+          if (!Number.isFinite(n) || n < min || n > max) throw new Error(`value out of range (${min}–${max})`)
+          return Math.round(n)
+        }
+        const p = patch as any
+        if (p.loop) {
+          if (p.loop.enabled !== undefined) cfg.loop.enabled = !!p.loop.enabled
+          if (p.loop.maxFixIterations !== undefined) cfg.loop.maxFixIterations = num(p.loop.maxFixIterations, 1, 20)
+        }
+        if (p.runner) {
+          if (p.runner.defaultModel) cfg.runner.defaultModel = String(p.runner.defaultModel)
+          if (p.runner.defaultEffort) cfg.runner.defaultEffort = p.runner.defaultEffort
+          if (p.runner.permissionMode) cfg.runner.permissionMode = p.runner.permissionMode
+          if (p.runner.maxTurns !== undefined) cfg.runner.maxTurns = num(p.runner.maxTurns, 1, 1000)
+          if (p.runner.stageTimeoutSec !== undefined) cfg.runner.stageTimeoutSec = num(p.runner.stageTimeoutSec, 0, 86400)
+        }
+        if (p.quota) {
+          if (p.quota.plan !== undefined) cfg.quota.plan = String(p.quota.plan)
+          if (p.quota.windowHours !== undefined) cfg.quota.windowHours = num(p.quota.windowHours, 1, 168)
+          if (p.quota.sessionTokenBudget !== undefined) cfg.quota.sessionTokenBudget = num(p.quota.sessionTokenBudget, 1000, 1e12)
+          if (p.quota.weeklyTokenBudget !== undefined) cfg.quota.weeklyTokenBudget = num(p.quota.weeklyTokenBudget, 1000, 1e12)
+        }
+        if (p.tracker) {
+          if (p.tracker.simpleLabel !== undefined) cfg.tracker.simpleLabel = String(p.tracker.simpleLabel)
+          if (Array.isArray(p.tracker.states) && p.tracker.states.length) cfg.tracker.states = p.tracker.states.map(String)
+          if (p.tracker.pollIntervalSec !== undefined) cfg.tracker.pollIntervalSec = num(p.tracker.pollIntervalSec, 10, 86400)
+        }
+        return persist()
+      } catch (e) {
+        return { error: String(e instanceof Error ? e.message : e) }
+      }
+    },
     retryTicket,
   })
 

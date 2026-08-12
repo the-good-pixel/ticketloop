@@ -43,6 +43,8 @@ export interface ServerHooks {
   saveProject: (p: ProjectConfig) => { ok: true } | { error: string }
   removeProject: (name: string) => { ok: true } | { error: string }
   setKey: (project: string, key: string) => { ok: true } | { error: string }
+  // Edit the global (non-project) settings from the dashboard.
+  saveSettings: (patch: Record<string, unknown>) => { ok: true } | { error: string }
   // Re-run a failed/paused ticket now; `fresh` discards its resume checkpoint.
   retryTicket: (ticketKey: string, fresh: boolean) => { ok: true } | { error: string }
 }
@@ -264,6 +266,12 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
         const name = decodeURIComponent(path.slice('/api/projects/'.length))
         return json(res, hooks.removeProject(name))
       }
+      if (path === '/api/settings' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          json(res, hooks.saveSettings(body as Record<string, unknown>))
+        }).catch((e) => serverError(res, e))
+        return
+      }
       if (path === '/api/keys' && req.method === 'POST') {
         readBody(req).then((body) => {
           const { project, key } = body as { project: string; key: string }
@@ -327,9 +335,12 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
 /** Sanitized config for the UI: globals read-only, projects editable, NO keys. */
 function buildConfigView(cfg: Config) {
   return {
-    // one-off globals — shown read-only in the UI (edit via config file / CLI)
+    // globals — editable from the dashboard's Settings card (except auth/server,
+    // which stay read-only: they change billing / need a restart).
     globals: {
       auth: cfg.auth,
+      loop: cfg.loop,
+      runner: cfg.runner,
       quota: cfg.quota,
       server: cfg.server,
       trackerDefaults: {

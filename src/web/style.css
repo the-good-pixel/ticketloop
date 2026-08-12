@@ -1993,3 +1993,49 @@ select.input {
     justify-content: center;
   }
 }
+
+/* ---- global Settings card (Setup view) ---- */
+.settings-section {
+  margin-bottom: 22px;
+}
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.settings-group-title {
+  font-size: 12px;
+  font-family: var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 14px;
+}
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.settings-label {
+  font-size: 13px;
+  font-weight: 600;
+}
+.settings-help {
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.settings-field input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+}
+.settings-note {
+  margin: -4px 0 16px;
+  font-size: 13px;
+  max-width: 70ch;
+}

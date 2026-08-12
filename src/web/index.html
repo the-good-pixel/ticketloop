@@ -12,7 +12,8 @@
   <nav class="nav" role="tablist" aria-label="Views">
     <button id="navActivity" class="nav-btn is-active" role="tab" aria-selected="true">Activity</button>
     <button id="navHistory" class="nav-btn" role="tab" aria-selected="false">History</button>
-    <button id="navSetup" class="nav-btn" role="tab" aria-selected="false">Setup</button>
+    <button id="navSetup" class="nav-btn" role="tab" aria-selected="false">Projects</button>
+    <button id="navSettings" class="nav-btn" role="tab" aria-selected="false">Settings</button>
   </nav>
   <div class="topbar-right">
     <span id="connState" class="conn-state" hidden>reconnecting…</span>
@@ -149,7 +150,6 @@
     <section class="env-strip">
       <div id="envChips" class="env-chips"></div>
       <div id="envMeta" class="env-meta muted"></div>
-      <p class="env-note muted">Global settings are edited in ticketloop.config.yml / CLI.</p>
     </section>
 
     <section class="projects">
@@ -159,6 +159,23 @@
       </div>
       <div id="projectList" class="project-list"></div>
       <div id="projectEmpty" class="empty" hidden>No projects yet — click <b>Add project</b>.</div>
+    </section>
+  </div>
+
+  <!-- ===== Settings view (global, not per-project) ===== -->
+  <div id="viewSettings" class="view" hidden>
+    <div id="settingsError" class="warnings setup-error" hidden></div>
+
+    <section class="projects settings-section">
+      <div class="section-head">
+        <h2>Global settings</h2>
+        <button id="settingsSave" class="btn">Save settings</button>
+      </div>
+      <p class="settings-note muted">
+        Defaults for every project. Anything a project sets itself wins over these —
+        per-project options live under <b>Projects</b>.
+      </p>
+      <div id="settingsForm" class="settings-form"></div>
     </section>
   </div>
 </main>

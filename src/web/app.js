@@ -1342,7 +1342,7 @@ const setup = {
 };
 
 // ---- view switching ----
-const VIEWS = ['activity', 'history', 'setup'];
+const VIEWS = ['activity', 'history', 'setup', 'settings'];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // `#view` fragment drives the tab so links are shareable; History appends its
@@ -1375,8 +1375,9 @@ function setView(view, opts) {
   if (view === 'activity') {
     if (!opts.silent) history.replaceState(null, '', '#activity');
     poll(); // resume immediately
-  } else if (view === 'setup') {
-    if (!opts.silent) history.replaceState(null, '', '#setup');
+  } else if (view === 'setup' || view === 'settings') {
+    // Both read the same config payload; each renders only its own section.
+    if (!opts.silent) history.replaceState(null, '', '#' + view);
     loadConfig();
   } else {
     openHistory();
@@ -1398,7 +1399,15 @@ function toast(msg) {
 }
 
 function setSetupError(msg) {
-  const box = $('#setupError');
+  showError($('#setupError'), msg);
+}
+
+function setSettingsError(msg) {
+  showError($('#settingsError'), msg);
+}
+
+function showError(box, msg) {
+  if (!box) return;
   if (!msg) {
     box.hidden = true;
     return;
@@ -1424,7 +1433,149 @@ async function loadConfig() {
 
 function renderSetup() {
   renderEnvStrip();
+  renderSettings();
   renderProjects();
+}
+
+// ---- global settings (everything not tied to one project) ----
+// auth mode and the server port stay out on purpose: one changes billing, the
+// other needs a restart to take effect.
+function renderSettings() {
+  const box = $('#settingsForm');
+  if (!box) return;
+  const cfg = setup.config || {};
+  const g = cfg.globals || {};
+  const loop = g.loop || {};
+  const runner = g.runner || {};
+  const quota = g.quota || {};
+  const td = g.trackerDefaults || {};
+  box.replaceChildren();
+
+  const group = (title, fields) => {
+    const sec = el('div', 'settings-group');
+    sec.appendChild(el('div', 'settings-group-title', title));
+    const grid = el('div', 'settings-grid');
+    fields.forEach((f) => grid.appendChild(f));
+    sec.appendChild(grid);
+    box.appendChild(sec);
+  };
+  const field = (label, node, help) => {
+    const wrap = el('label', 'settings-field');
+    wrap.appendChild(el('span', 'settings-label', label));
+    wrap.appendChild(node);
+    if (help) wrap.appendChild(el('span', 'settings-help muted', help));
+    return wrap;
+  };
+  const numIn = (id, value, min, max, step) => {
+    const i = el('input', 'input');
+    i.type = 'number';
+    i.id = id;
+    i.value = value == null ? '' : String(value);
+    if (min != null) i.min = String(min);
+    if (max != null) i.max = String(max);
+    if (step != null) i.step = String(step);
+    return i;
+  };
+  const textIn = (id, value, placeholder) => {
+    const i = el('input', 'input');
+    i.type = 'text';
+    i.id = id;
+    i.value = value == null ? '' : String(value);
+    if (placeholder) i.placeholder = placeholder;
+    return i;
+  };
+  const selectIn = (id, value, options) => {
+    const s = el('select', 'input');
+    s.id = id;
+    options.forEach((o) => {
+      const label = typeof o === 'string' ? o : o.label;
+      const v = typeof o === 'string' ? o : o.value;
+      const opt = el('option', null, label);
+      opt.value = v;
+      if (String(value) === String(v)) opt.selected = true;
+      s.appendChild(opt);
+    });
+    return s;
+  };
+  const checkIn = (id, checked) => {
+    const i = el('input');
+    i.type = 'checkbox';
+    i.id = id;
+    i.checked = !!checked;
+    return i;
+  };
+
+  group('Loop', [
+    field('Fix-loop enabled', checkIn('s_loop_enabled', loop.enabled !== false), 'Off = a single fix pass, no repair loop.'),
+    field('Max fix iterations', numIn('s_loop_iters', loop.maxFixIterations, 1, 20), 'How many times a failed gate may send work back to fix.'),
+  ]);
+
+  group('Runner', [
+    field('Default model', selectIn('s_run_model', runner.defaultModel, (cfg.models || []).map((m) => ({ label: m.label, value: m.value }))), 'Used by any step that does not set its own.'),
+    field('Default effort', selectIn('s_run_effort', runner.defaultEffort, cfg.efforts || ['low', 'medium', 'high']), null),
+    field('Permission mode', selectIn('s_run_perm', runner.permissionMode, ['bypass', 'acceptEdits', 'default']), 'bypass lets steps use any tool — safety comes from worktrees + guardrails.'),
+    field('Max turns per step', numIn('s_run_turns', runner.maxTurns, 1, 1000), null),
+    field('Step timeout (seconds)', numIn('s_run_timeout', runner.stageTimeoutSec, 0, 86400), '0 = no timeout (long coding steps can run as long as they need).'),
+  ]);
+
+  group('Tracker defaults', [
+    field('Poll interval (seconds)', numIn('s_trk_poll', td.pollIntervalSec, 10, 86400), 'Applies after a restart.'),
+    field('Opt-in label', textIn('s_trk_label', td.simpleLabel, '(none — all tickets in the states below)'), 'Only tickets with this label are considered.'),
+    field('States', textIn('s_trk_states', (td.states || []).join(', '), 'Todo, In Review'), 'Comma-separated. Projects can override both.'),
+  ]);
+
+  group('Quota', [
+    field('Plan label', textIn('s_q_plan', quota.plan, 'max20x'), 'Display only.'),
+    field('Window (hours)', numIn('s_q_window', quota.windowHours, 1, 168), null),
+    field('Session token budget', numIn('s_q_session', quota.sessionTokenBudget, 1000, null, 100000), 'A tunable gauge, not a real quota.'),
+    field('Weekly token budget', numIn('s_q_weekly', quota.weeklyTokenBudget, 1000, null, 100000), null),
+  ]);
+}
+
+async function saveSettings() {
+  const btn = $('#settingsSave');
+  const num = (id) => {
+    const n = document.getElementById(id);
+    if (!n || n.value === '') return undefined;
+    const v = Number(n.value);
+    return Number.isFinite(v) ? v : undefined;
+  };
+  const str = (id) => {
+    const n = document.getElementById(id);
+    return n ? n.value.trim() : undefined;
+  };
+  const patch = {
+    loop: { enabled: document.getElementById('s_loop_enabled').checked, maxFixIterations: num('s_loop_iters') },
+    runner: {
+      defaultModel: str('s_run_model'),
+      defaultEffort: str('s_run_effort'),
+      permissionMode: str('s_run_perm'),
+      maxTurns: num('s_run_turns'),
+      stageTimeoutSec: num('s_run_timeout'),
+    },
+    quota: {
+      plan: str('s_q_plan'),
+      windowHours: num('s_q_window'),
+      sessionTokenBudget: num('s_q_session'),
+      weeklyTokenBudget: num('s_q_weekly'),
+    },
+    tracker: {
+      simpleLabel: str('s_trk_label'),
+      states: (str('s_trk_states') || '').split(',').map((s) => s.trim()).filter(Boolean),
+      pollIntervalSec: num('s_trk_poll'),
+    },
+  };
+  btn.disabled = true;
+  try {
+    await mutate('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch) });
+    setSettingsError('');
+    await loadConfig();
+    toast('settings saved');
+  } catch (e) {
+    setSettingsError(e.message || 'Could not save settings.');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function renderEnvStrip() {
@@ -2178,7 +2329,9 @@ $('#pauseBtn')?.addEventListener('click', doPauseToggle);
 $('#navActivity').addEventListener('click', () => setView('activity'));
 $('#navHistory').addEventListener('click', () => setView('history'));
 $('#navSetup').addEventListener('click', () => setView('setup'));
+$('#navSettings').addEventListener('click', () => setView('settings'));
 $('#addProjectBtn').addEventListener('click', () => openForm(null));
+$('#settingsSave')?.addEventListener('click', saveSettings);
 $('#formClose').addEventListener('click', closeForm);
 $('#formCancel').addEventListener('click', closeForm);
 $('#formOverlay').addEventListener('click', (e) => {
