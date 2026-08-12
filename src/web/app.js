@@ -1451,18 +1451,41 @@ function renderSettings() {
   const td = g.trackerDefaults || {};
   box.replaceChildren();
 
-  const group = (title, fields) => {
-    const sec = el('div', 'settings-group');
-    sec.appendChild(el('div', 'settings-group-title', title));
+  // Each group is a card: title + one-line purpose, then an even field grid.
+  const group = (title, desc, fields) => {
+    const card = el('section', 'settings-card');
+    const head = el('div', 'settings-card-head');
+    head.appendChild(el('h3', 'settings-card-title', title));
+    if (desc) head.appendChild(el('p', 'settings-card-desc muted', desc));
+    card.appendChild(head);
     const grid = el('div', 'settings-grid');
     fields.forEach((f) => grid.appendChild(f));
-    sec.appendChild(grid);
-    box.appendChild(sec);
+    card.appendChild(grid);
+    box.appendChild(card);
   };
   const field = (label, node, help) => {
     const wrap = el('label', 'settings-field');
     wrap.appendChild(el('span', 'settings-label', label));
     wrap.appendChild(node);
+    if (help) wrap.appendChild(el('span', 'settings-help muted', help));
+    return wrap;
+  };
+  // A switch reads better than a lone checkbox floating under a label.
+  const toggleField = (label, id, checked, help) => {
+    const wrap = el('label', 'settings-field');
+    wrap.appendChild(el('span', 'settings-label', label));
+    // Same label → control → help rhythm as the other fields, so a toggle lines
+    // up with its neighbours in the grid instead of floating.
+    const row = el('span', 'settings-toggle-row');
+    const i = el('input', 'switch');
+    i.type = 'checkbox';
+    i.id = id;
+    i.checked = !!checked;
+    const stateText = el('span', 'settings-toggle-state muted', i.checked ? 'On' : 'Off');
+    i.addEventListener('change', () => { stateText.textContent = i.checked ? 'On' : 'Off'; });
+    row.appendChild(i);
+    row.appendChild(stateText);
+    wrap.appendChild(row);
     if (help) wrap.appendChild(el('span', 'settings-help muted', help));
     return wrap;
   };
@@ -1497,38 +1520,30 @@ function renderSettings() {
     });
     return s;
   };
-  const checkIn = (id, checked) => {
-    const i = el('input');
-    i.type = 'checkbox';
-    i.id = id;
-    i.checked = !!checked;
-    return i;
-  };
-
-  group('Loop', [
-    field('Fix-loop enabled', checkIn('s_loop_enabled', loop.enabled !== false), 'Off = a single fix pass, no repair loop.'),
+  group('Loop', 'How persistently a run retries when a gate fails.', [
+    toggleField('Fix-loop enabled', 's_loop_enabled', loop.enabled !== false, 'Off = a single fix pass, no repair loop.'),
     field('Max fix iterations', numIn('s_loop_iters', loop.maxFixIterations, 1, 20), 'How many times a failed gate may send work back to fix.'),
   ]);
 
-  group('Runner', [
+  group('Runner', 'Defaults for the model behind every step. Any step can override them.', [
     field('Default model', selectIn('s_run_model', runner.defaultModel, (cfg.models || []).map((m) => ({ label: m.label, value: m.value }))), 'Used by any step that does not set its own.'),
-    field('Default effort', selectIn('s_run_effort', runner.defaultEffort, cfg.efforts || ['low', 'medium', 'high']), null),
+    field('Default effort', selectIn('s_run_effort', runner.defaultEffort, cfg.efforts || ['low', 'medium', 'high']), 'Higher effort = more thinking, more tokens.'),
     field('Permission mode', selectIn('s_run_perm', runner.permissionMode, ['bypass', 'acceptEdits', 'default']), 'bypass lets steps use any tool — safety comes from worktrees + guardrails.'),
-    field('Max turns per step', numIn('s_run_turns', runner.maxTurns, 1, 1000), null),
-    field('Step timeout (seconds)', numIn('s_run_timeout', runner.stageTimeoutSec, 0, 86400), '0 = no timeout (long coding steps can run as long as they need).'),
+    field('Max turns per step', numIn('s_run_turns', runner.maxTurns, 1, 1000), 'Hard ceiling on tool calls in one step.'),
+    field('Step timeout (seconds)', numIn('s_run_timeout', runner.stageTimeoutSec, 0, 86400), '0 = no timeout (long coding steps run as long as they need).'),
   ]);
 
-  group('Tracker defaults', [
+  group('Tracker defaults', 'Which tickets the loop picks up. Each project can override these.', [
     field('Poll interval (seconds)', numIn('s_trk_poll', td.pollIntervalSec, 10, 86400), 'Applies after a restart.'),
-    field('Opt-in label', textIn('s_trk_label', td.simpleLabel, '(none — all tickets in the states below)'), 'Only tickets with this label are considered.'),
-    field('States', textIn('s_trk_states', (td.states || []).join(', '), 'Todo, In Review'), 'Comma-separated. Projects can override both.'),
+    field('Opt-in label', textIn('s_trk_label', td.simpleLabel, '(none — all tickets in the states)'), 'Only tickets with this label are considered.'),
+    field('States', textIn('s_trk_states', (td.states || []).join(', '), 'Todo, In Review'), 'Comma-separated.'),
   ]);
 
-  group('Quota', [
+  group('Quota', 'The usage gauge on Activity. Estimates only — Anthropic does not publish real quotas.', [
     field('Plan label', textIn('s_q_plan', quota.plan, 'max20x'), 'Display only.'),
-    field('Window (hours)', numIn('s_q_window', quota.windowHours, 1, 168), null),
+    field('Window (hours)', numIn('s_q_window', quota.windowHours, 1, 168), 'The rolling window the meter covers.'),
     field('Session token budget', numIn('s_q_session', quota.sessionTokenBudget, 1000, null, 100000), 'A tunable gauge, not a real quota.'),
-    field('Weekly token budget', numIn('s_q_weekly', quota.weeklyTokenBudget, 1000, null, 100000), null),
+    field('Weekly token budget', numIn('s_q_weekly', quota.weeklyTokenBudget, 1000, null, 100000), 'Same, for the weekly meter.'),
   ]);
 }
 
@@ -2355,8 +2370,8 @@ const boot = parseHash();
 if (boot.view === 'history') {
   readFiltersFromParams(boot.params);
   setView('history', { silent: true });
-} else if (boot.view === 'setup') {
-  setView('setup', { silent: true });
+} else if (boot.view === 'setup' || boot.view === 'settings') {
+  setView(boot.view, { silent: true });
 } else {
   poll(); // self-schedules its next tick (fast while live, normal otherwise)
 }

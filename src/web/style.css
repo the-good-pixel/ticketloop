@@ -1994,48 +1994,130 @@ select.input {
   }
 }
 
-/* ---- global Settings card (Setup view) ---- */
-.settings-section {
-  margin-bottom: 22px;
+/* ---- Global settings page ---- */
+.settings-section .section-head {
+  margin-bottom: 4px;
 }
+
+.settings-note {
+  margin: 0 0 18px;
+  font-size: 13px;
+  max-width: 72ch;
+}
+
 .settings-form {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
-.settings-group-title {
-  font-size: 12px;
-  font-family: var(--mono);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  margin-bottom: 10px;
+
+.settings-card {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 18px 20px 20px;
 }
+
+.settings-card-head {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-card-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.settings-card-desc {
+  margin: 3px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  max-width: 72ch;
+}
+
+/* Even columns keep the fields aligned instead of sprawling to odd widths. */
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-  gap: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px 20px;
+  align-items: start;
 }
+
 .settings-field {
   display: flex;
   flex-direction: column;
-  gap: 5px;
+  gap: 6px;
   min-width: 0;
 }
+
 .settings-label {
   font-size: 13px;
   font-weight: 600;
 }
+
+.settings-field .input {
+  width: 100%;
+}
+
 .settings-help {
   font-size: 11.5px;
   line-height: 1.45;
 }
-.settings-field input[type='checkbox'] {
+
+/* control row for a toggle — matches an input's height so the field lines up */
+.settings-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+}
+
+.settings-toggle-state {
+  font-size: 12.5px;
+}
+
+.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 40px;
+  height: 22px;
+  flex: none;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  cursor: pointer;
+  transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
   width: 16px;
   height: 16px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transition: transform 0.18s ease, background 0.18s ease;
 }
-.settings-note {
-  margin: -4px 0 16px;
-  font-size: 13px;
-  max-width: 70ch;
+
+.switch:checked {
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  border-color: var(--accent);
+}
+
+.switch:checked::after {
+  transform: translateX(18px);
+  background: var(--accent);
+}
+
+.switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
