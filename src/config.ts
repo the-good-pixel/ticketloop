@@ -284,6 +284,12 @@ function migrateConfig(raw: any): any {
     for (const project of raw.projects || []) pinClaudeModels(project.stages)
     version = 2
   }
+  if (version < 3) {
+    // Provider token-to-quota mappings are not reliable. Quota decisions now
+    // use only percentages and reset times reported by each provider.
+    delete raw.quota
+    version = 3
+  }
   if (version < 4) {
     // The workflow manager makes authority explicit. Today "the deploy-dev
     // stage is enabled" IS the grant, so carry that intent forward rather than
@@ -294,12 +300,6 @@ function migrateConfig(raw: any): any {
       if (deployEnabled(project.stages)) project.permissions = { ...(project.permissions || {}), deployDev: true }
     }
     version = 4
-  }
-  if (version < 3) {
-    // Provider token-to-quota mappings are not reliable. Quota decisions now
-    // use only percentages and reset times reported by each provider.
-    delete raw.quota
-    version = 3
   }
   raw.version = version
   return raw
