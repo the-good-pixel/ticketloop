@@ -1,54 +1,85 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { COOLDOWN_FILE } from '../paths.js'
 import { atomicWrite, removeFile } from '../store.js'
-import { readRealUsage } from '../realUsage.js'
+import type { AgentProvider } from '../types.js'
 
-// When Claude returns a real usage limit it tells us WHEN it resets. We remember
-// that reset time and simply don't run anything until it passes. (The usage
-// gauge can read far below 100% while Claude is actually limiting the daemon's
-// runs, so the reset time from the limit itself is the only thing to trust.)
+const UNKNOWN_LIMIT_PROBE_MS = 15 * 60_000
 
-interface RL {
-  until: number // epoch ms the limit resets; no runs before this
+export interface ProviderLimitState {
+  detectedAt: number
+  retryAt?: number
+  nextProbeAt: number
+  message?: string
+  scope?: string
 }
 
-function read(): RL {
+interface LimitFile {
+  version: 2
+  providers: Partial<Record<AgentProvider, ProviderLimitState>>
+}
+
+function read(): LimitFile {
   try {
-    if (!existsSync(COOLDOWN_FILE)) return { until: 0 }
-    return JSON.parse(readFileSync(COOLDOWN_FILE, 'utf8')) as RL
-  } catch {
-    return { until: 0 }
-  }
-}
-
-/** The reset deadline if we're still inside a rate-limit window, else 0. */
-export function resetUntil(now = Date.now()): number {
-  const u = read().until
-  return u > now ? u : 0
-}
-
-/**
- * Record a rate-limit's reset time. Prefer what Claude reported; fall back to
- * the status line's window reset; last resort, an hour out.
- */
-export function setRateLimited(resetAt?: number, now = Date.now()): number {
-  let until = resetAt && resetAt > now ? resetAt : 0
-  if (!until) {
-    const real = readRealUsage()
-    const g = real?.fiveHour?.resetsAt
-    until = g && g > now ? g : now + 60 * 60 * 1000
-  }
-  atomicWrite(COOLDOWN_FILE, JSON.stringify({ until } satisfies RL))
-  return until
-}
-
-/** A clean run means we're not limited — drop the reset window. */
-export function clearRateLimited(): void {
-  if (existsSync(COOLDOWN_FILE)) {
-    try {
-      removeFile(COOLDOWN_FILE)
-    } catch {
-      /* best effort */
+    if (!existsSync(COOLDOWN_FILE)) return { version: 2, providers: {} }
+    const raw = JSON.parse(readFileSync(COOLDOWN_FILE, 'utf8')) as any
+    if (raw.version === 2 && raw.providers) return raw
+    // Version 1 stored provider reset timestamps directly.
+    const providers: LimitFile['providers'] = {}
+    for (const provider of ['claude', 'codex'] as AgentProvider[]) {
+      const retryAt = Number(raw[provider] || (provider === 'claude' ? raw.until : 0))
+      if (retryAt > Date.now()) providers[provider] = { detectedAt: Date.now(), retryAt, nextProbeAt: retryAt }
     }
+    return { version: 2, providers }
+  } catch {
+    return { version: 2, providers: {} }
   }
+}
+
+function write(file: LimitFile): void {
+  if (Object.keys(file.providers).length) atomicWrite(COOLDOWN_FILE, JSON.stringify(file))
+  else if (existsSync(COOLDOWN_FILE)) removeFile(COOLDOWN_FILE)
+}
+
+/** A confirmed provider limit that should still hold work, or null when a probe is due. */
+export function activeProviderLimit(provider: AgentProvider, now = Date.now()): ProviderLimitState | null {
+  const state = read().providers[provider]
+  if (!state) return null
+  if (state.retryAt && state.retryAt <= now) return null
+  if (!state.retryAt && state.nextProbeAt <= now) return null
+  return state
+}
+
+/** Record only provider-reported reset data. nextProbeAt is a retry timer, not a made-up reset. */
+export function setRateLimited(
+  provider: AgentProvider,
+  resetAt?: number,
+  message?: string,
+  scope?: string,
+  now = Date.now(),
+): ProviderLimitState {
+  const file = read()
+  const retryAt = resetAt && resetAt > now ? resetAt : undefined
+  const state: ProviderLimitState = {
+    detectedAt: now,
+    retryAt,
+    nextProbeAt: retryAt || now + UNKNOWN_LIMIT_PROBE_MS,
+    message,
+    scope,
+  }
+  file.providers[provider] = state
+  write(file)
+  return state
+}
+
+/** Clear a limit after an authoritative status refresh or a newer successful request. */
+export function clearRateLimited(provider: AgentProvider, requestStartedAt?: number): void {
+  const file = read()
+  const state = file.providers[provider]
+  if (!state) {
+    write(file)
+    return
+  }
+  if (requestStartedAt !== undefined && requestStartedAt < state.detectedAt) return
+  delete file.providers[provider]
+  write(file)
 }

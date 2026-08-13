@@ -123,9 +123,8 @@ function renderStatus(s) {
     pauseBtn.classList.toggle('is-paused', !!s.paused);
     pauseBtn.dataset.paused = s.paused ? '1' : '';
   }
-  const plan = s.plan || '—';
   const mode = s.authMode === 'api' ? 'API' : 'subscription';
-  $('#planBadge').textContent = plan + ' · ' + mode;
+  $('#planBadge').textContent = (s.provider || 'claude') + ' · ' + mode;
 
   const warnBox = $('#warnings');
   const warnings = Array.isArray(s.warnings) ? s.warnings.filter(Boolean) : [];
@@ -142,78 +141,43 @@ function renderStatus(s) {
 }
 
 // ---- rendering: quota meter card ----
-function renderMeterCard(node, title, m, buckets, bucketLabel, realWin, realAsOf) {
+function renderProviderQuota(snapshot) {
+  const node = el('div', 'meter-card');
   node.replaceChildren();
-  m = m || {};
-  // Real Claude subscription % only — no estimate fallback.
-  const hasReal = realWin && typeof realWin.pct === 'number';
-  const pct = hasReal ? Math.max(0, Math.min(100, Math.round(realWin.pct))) : 0;
-
   const head = el('div', 'meter-head');
   const tw = el('span', 'meter-title');
-  tw.appendChild(document.createTextNode(title));
-  tw.appendChild(el('span', 'meter-src ' + (hasReal ? 'src-real' : 'src-est'), hasReal ? 'real' : 'no data'));
+  tw.appendChild(document.createTextNode((snapshot.provider || 'provider').toUpperCase()));
+  tw.appendChild(el('span', 'meter-src src-real', snapshot.plan || snapshot.authMode || 'provider'));
   head.appendChild(tw);
-  head.appendChild(el('span', 'meter-pct mono', hasReal ? pct + '%' : '—'));
+  head.appendChild(el('span', 'meter-pct mono', snapshot.limitReached ? 'LIMIT' : ''));
   node.appendChild(head);
-
-  const bar = el('div', 'meter-bar');
-  const fill = el('div', 'meter-fill ' + fillClass(pct));
-  fill.style.width = (hasReal ? pct : 0) + '%';
-  bar.appendChild(fill);
-  node.appendChild(bar);
-
-  // Secondary: the loop's OWN consumption this window (always real loop data).
-  const stats = el('div', 'meter-stats');
-  const tok = el('span');
-  tok.appendChild(el('span', 'mono', fmtTokens(m.used)));
-  tok.appendChild(document.createTextNode(' '));
-  tok.appendChild(el('span', 'label', 'loop tokens'));
-  stats.appendChild(tok);
-  const cost = el('span');
-  cost.appendChild(el('span', 'mono', fmtMoney(m.costUsd)));
-  cost.appendChild(document.createTextNode(' '));
-  cost.appendChild(el('span', 'label', 'loop cost'));
-  stats.appendChild(cost);
-  node.appendChild(stats);
-
-  if (hasReal) {
-    const resetLine = fmtResetsLine(realWin.resetsAt) + (realAsOf ? '  ·  as of ' + fmtRelative(realAsOf) : '');
-    const resets = el('div', 'meter-resets', resetLine);
-    resets.title = fmtClock(realWin.resetsAt);
-    node.appendChild(resets);
-  } else {
-    node.appendChild(el('div', 'meter-resets', 'waiting for Claude Code usage data…'));
-  }
-
-  node.appendChild(renderChart(buckets || [], bucketLabel));
-}
-
-function renderChart(buckets, label) {
-  const wrap = el('div');
-  const chart = el('div', 'chart');
-  const max = buckets.reduce((mx, b) => Math.max(mx, b.tokens || 0), 0) || 1;
-  if (!buckets.length) {
-    chart.appendChild(el('div', 'chart-label', 'no data'));
-  } else {
-    buckets.forEach((b) => {
-      const col = el('div', 'col');
-      const h = Math.max(2, Math.round(((b.tokens || 0) / max) * 100));
-      col.style.height = h + '%';
-      col.title = fmtClock(b.t) + ' · ' + fmtTokens(b.tokens) + ' tokens';
-      chart.appendChild(col);
-    });
-  }
-  wrap.appendChild(chart);
-  if (label) wrap.appendChild(el('div', 'chart-label', label));
-  return wrap;
+  const windows = Array.isArray(snapshot.windows) ? snapshot.windows : [];
+  if (!windows.length) node.appendChild(el('div', 'meter-resets', 'Usage unknown — no percentage reported'));
+  windows.forEach((window) => {
+    const pct = Math.max(0, Math.min(100, Math.round(window.usedPercent || 0)));
+    const row = el('div', 'meter-window');
+    const labels = el('div', 'meter-stats');
+    labels.appendChild(el('span', 'label', window.name));
+    labels.appendChild(el('span', 'mono', pct + '%'));
+    row.appendChild(labels);
+    const bar = el('div', 'meter-bar');
+    const fill = el('div', 'meter-fill ' + fillClass(pct));
+    fill.style.width = pct + '%';
+    bar.appendChild(fill);
+    row.appendChild(bar);
+    const reset = el('div', 'meter-resets', window.resetsAt ? fmtResetsLine(window.resetsAt) : 'Reset time not reported');
+    if (window.resetsAt) reset.title = fmtClock(window.resetsAt);
+    row.appendChild(reset);
+    node.appendChild(row);
+  });
+  if (snapshot.fetchedAt) node.appendChild(el('div', 'meter-resets', 'Provider status · as of ' + fmtRelative(snapshot.fetchedAt)));
+  return node;
 }
 
 function renderUsage(u) {
-  const series = u.series || {};
-  const real = u.real || null;
-  renderMeterCard($('#windowCard'), '5-hour window', u.window, series.buckets, 'tokens / 15-min bucket · last 5h', real && real.fiveHour, real && real.asOf);
-  renderMeterCard($('#weeklyCard'), 'Weekly', u.weekly, series.days, 'tokens / day · last 7d', real && real.sevenDay, real && real.asOf);
+  const grid = $('#quotaGrid');
+  grid.replaceChildren();
+  (u.providers || []).forEach((snapshot) => grid.appendChild(renderProviderQuota(snapshot)));
 }
 
 // ---- rendering: stage tracker (compact pills) ----
@@ -277,7 +241,7 @@ function renderTicketGroup(g) {
   if (latest.error) main.appendChild(el('div', 'run-error', latest.error));
 
   // Resume / Restart act on the TICKET (they continue its latest work).
-  if (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked') {
+  if (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked' || latest.outcome === 'waiting-provider') {
     const actions = el('div', 'run-actions');
     const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
     resume.title = 'Continue this run from its checkpoint (already-done steps are reused)';
@@ -405,7 +369,7 @@ function renderStageDetail(s) {
   h.appendChild(el('span', 'stage-pill ' + cls, s.status || '—'));
 
   const meta = [];
-  if (s.model) meta.push(s.model);
+  if (s.provider || s.model) meta.push([s.provider, s.model].filter(Boolean).join('/'));
   if (s.totalTokens != null) meta.push(fmtTokens(s.totalTokens) + ' tok');
   if (s.costUsd != null) meta.push(fmtMoney(s.costUsd));
   const dur = fmtDuration(s.startedAt, s.endedAt);
@@ -1447,7 +1411,8 @@ function renderSettings() {
   const g = cfg.globals || {};
   const loop = g.loop || {};
   const runner = g.runner || {};
-  const quota = g.quota || {};
+  const defaultProvider = runner.defaultProvider || 'claude';
+  const providerCfg = (runner.providers && runner.providers[defaultProvider]) || {};
   const td = g.trackerDefaults || {};
   box.replaceChildren();
 
@@ -1525,11 +1490,41 @@ function renderSettings() {
     field('Max fix iterations', numIn('s_loop_iters', loop.maxFixIterations, 1, 20), 'How many times a failed gate may send work back to fix.'),
   ]);
 
-  group('Runner', 'Defaults for the model behind every step. Any step can override them.', [
-    field('Default model', selectIn('s_run_model', runner.defaultModel, (cfg.models || []).map((m) => ({ label: m.label, value: m.value }))), 'Used by any step that does not set its own.'),
-    field('Default effort', selectIn('s_run_effort', runner.defaultEffort, cfg.efforts || ['low', 'medium', 'high']), 'Higher effort = more thinking, more tokens.'),
+  const providerInput = selectIn('s_run_provider', defaultProvider, ['claude', 'codex']);
+  const modelChoices = (cfg.models && cfg.models[defaultProvider]) || [];
+  const modelInput = selectIn('s_run_model', providerCfg.defaultModel, modelChoices);
+  if (providerCfg.defaultModel && ![...modelInput.options].some((o) => o.value === providerCfg.defaultModel)) {
+    const custom = el('option', null, providerCfg.defaultModel);
+    custom.value = providerCfg.defaultModel;
+    custom.selected = true;
+    modelInput.appendChild(custom);
+  }
+  const effortInput = selectIn('s_run_effort', providerCfg.defaultEffort, cfg.efforts || ['low', 'medium', 'high']);
+  providerInput.addEventListener('change', () => {
+    const choices = (cfg.models && cfg.models[providerInput.value]) || [];
+    modelInput.replaceChildren();
+    choices.forEach((m) => {
+      const o = el('option', null, m.label);
+      o.value = m.value;
+      modelInput.appendChild(o);
+    });
+    const nextCfg = runner.providers && runner.providers[providerInput.value];
+    if (nextCfg) {
+      if (![...modelInput.options].some((o) => o.value === nextCfg.defaultModel)) {
+        const custom = el('option', null, nextCfg.defaultModel);
+        custom.value = nextCfg.defaultModel;
+        modelInput.appendChild(custom);
+      }
+      modelInput.value = nextCfg.defaultModel;
+      effortInput.value = nextCfg.defaultEffort;
+    }
+  });
+  group('Runner', 'Defaults for the coding agent behind every step. Any step can override them.', [
+    field('Default provider', providerInput, 'Choose Claude Code or Codex CLI.'),
+    field('Default model', modelInput, 'Used by any step that does not set its own.'),
+    field('Default effort', effortInput, 'Higher effort = more thinking, more tokens.'),
     field('Permission mode', selectIn('s_run_perm', runner.permissionMode, ['bypass', 'acceptEdits', 'default']), 'bypass lets steps use any tool — safety comes from worktrees + guardrails.'),
-    field('Max turns per step', numIn('s_run_turns', runner.maxTurns, 1, 1000), 'Hard ceiling on tool calls in one step.'),
+    field('Max turns per step', numIn('s_run_turns', runner.maxTurns, 1, 1000), 'Claude-only ceiling; Codex CLI does not expose the same limit.'),
     field('Step timeout (seconds)', numIn('s_run_timeout', runner.stageTimeoutSec, 0, 86400), '0 = no timeout (long coding steps run as long as they need).'),
   ]);
 
@@ -1539,12 +1534,6 @@ function renderSettings() {
     field('States', textIn('s_trk_states', (td.states || []).join(', '), 'Todo, In Review'), 'Comma-separated.'),
   ]);
 
-  group('Quota', 'The usage gauge on Activity. Estimates only — Anthropic does not publish real quotas.', [
-    field('Plan label', textIn('s_q_plan', quota.plan, 'max20x'), 'Display only.'),
-    field('Window (hours)', numIn('s_q_window', quota.windowHours, 1, 168), 'The rolling window the meter covers.'),
-    field('Session token budget', numIn('s_q_session', quota.sessionTokenBudget, 1000, null, 100000), 'A tunable gauge, not a real quota.'),
-    field('Weekly token budget', numIn('s_q_weekly', quota.weeklyTokenBudget, 1000, null, 100000), 'Same, for the weekly meter.'),
-  ]);
 }
 
 async function saveSettings() {
@@ -1562,17 +1551,12 @@ async function saveSettings() {
   const patch = {
     loop: { enabled: document.getElementById('s_loop_enabled').checked, maxFixIterations: num('s_loop_iters') },
     runner: {
+      defaultProvider: str('s_run_provider'),
       defaultModel: str('s_run_model'),
       defaultEffort: str('s_run_effort'),
       permissionMode: str('s_run_perm'),
       maxTurns: num('s_run_turns'),
       stageTimeoutSec: num('s_run_timeout'),
-    },
-    quota: {
-      plan: str('s_q_plan'),
-      windowHours: num('s_q_window'),
-      sessionTokenBudget: num('s_q_session'),
-      weeklyTokenBudget: num('s_q_weekly'),
     },
     tracker: {
       simpleLabel: str('s_trk_label'),
@@ -1599,7 +1583,7 @@ function renderEnvStrip() {
   const g = cfg.globals || {};
   const chips = $('#envChips');
   chips.replaceChildren();
-  [['claude', 'claude'], ['gh', 'gh'], ['git', 'git']].forEach(([key, label]) => {
+  [['claude', 'claude'], ['codex', 'codex'], ['gh', 'gh'], ['git', 'git']].forEach(([key, label]) => {
     const ok = !!tooling[key];
     const chip = el('span', 'chip ' + (ok ? 'chip-ok' : 'chip-bad'));
     chip.appendChild(el('span', 'chip-mark', ok ? '✓' : '✕'));
@@ -1607,10 +1591,10 @@ function renderEnvStrip() {
     chips.appendChild(chip);
   });
 
-  const auth = (g.auth && g.auth.mode) || '—';
-  const plan = (g.quota && g.quota.plan) || '—';
+  const provider = (g.runner && g.runner.defaultProvider) || 'claude';
+  const auth = (g.runner && g.runner.providers && g.runner.providers[provider] && g.runner.providers[provider].authMode) || '—';
   const pollSec = (g.trackerDefaults && g.trackerDefaults.pollIntervalSec) || '—';
-  $('#envMeta').textContent = 'auth mode = ' + auth + ' · plan = ' + plan + ' · poll every ' + pollSec + 's';
+  $('#envMeta').textContent = 'provider = ' + provider + ' · auth = ' + auth + ' · poll every ' + pollSec + 's';
 }
 
 function renderProjects() {
@@ -2009,30 +1993,50 @@ function openForm(name) {
     // model + effort dropdowns on their own row (above the override textarea)
     const pickRow = el('div', 'stage-pick-row');
 
+    const providerSel = el('select', 'input stage-provider');
+    providerSel.id = 'f_stage_provider_' + stage;
+    const providerInherit = el('option', null, '(inherit default)');
+    providerInherit.value = '';
+    providerSel.appendChild(providerInherit);
+    ['claude', 'codex'].forEach((provider) => {
+      const o = el('option', null, provider);
+      o.value = provider;
+      if (cur.provider === provider) o.selected = true;
+      providerSel.appendChild(o);
+    });
+    const providerLbl = el('label', 'stage-pick');
+    providerLbl.appendChild(el('span', 'stage-pick-label muted', 'Provider'));
+    providerLbl.appendChild(providerSel);
+    pickRow.appendChild(providerLbl);
+
     const modelSel = el('select', 'input stage-model');
     modelSel.id = 'f_stage_model_' + stage;
     modelSel.dataset.stage = stage;
     const modelInherit = el('option', null, '(inherit default)');
     modelInherit.value = '';
     modelSel.appendChild(modelInherit);
-    const models = Array.isArray(cfg.models) ? cfg.models : [];
-    let modelMatched = false;
-    models.forEach((m) => {
-      const o = el('option', null, m.label);
-      o.value = m.value;
-      if (cur.model && cur.model === m.value) {
+    const fillModels = (provider, selected) => {
+      modelSel.replaceChildren();
+      const inherit = el('option', null, '(inherit default)');
+      inherit.value = '';
+      modelSel.appendChild(inherit);
+      const models = (cfg.models && cfg.models[provider]) || [];
+      let matched = false;
+      models.forEach((m) => {
+        const o = el('option', null, m.label);
+        o.value = m.value;
+        if (selected && selected === m.value) { o.selected = true; matched = true; }
+        modelSel.appendChild(o);
+      });
+      if (selected && !matched) {
+        const o = el('option', null, selected);
+        o.value = selected;
         o.selected = true;
-        modelMatched = true;
+        modelSel.appendChild(o);
       }
-      modelSel.appendChild(o);
-    });
-    // preserve a stored custom/unknown model id not present in the list
-    if (cur.model && !modelMatched) {
-      const o = el('option', null, cur.model);
-      o.value = cur.model;
-      o.selected = true;
-      modelSel.appendChild(o);
-    }
+    };
+    fillModels(cur.provider || (g.runner && g.runner.defaultProvider) || 'claude', cur.model);
+    providerSel.addEventListener('change', () => fillModels(providerSel.value || (g.runner && g.runner.defaultProvider) || 'claude', ''));
     const modelLbl = el('label', 'stage-pick');
     modelLbl.appendChild(el('span', 'stage-pick-label muted', 'Model'));
     modelLbl.appendChild(modelSel);
@@ -2274,11 +2278,13 @@ function buildProjectFromForm() {
   const gStages = (setup.config && setup.config.globals && setup.config.globals.stages) || {};
   const stages = {};
   stageOrder.forEach((stage) => {
+    const provider = val('f_stage_provider_' + stage);
     const model = val('f_stage_model_' + stage);
     const effort = val('f_stage_effort_' + stage);
     const instrEl = document.getElementById('f_stage_instr_' + stage);
     const instruction = instrEl ? instrEl.value.trim() : '';
     const ov = {};
+    if (provider) ov.provider = provider;
     if (model) ov.model = model;
     if (effort) ov.effort = effort;
     if (instruction) {

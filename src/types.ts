@@ -1,6 +1,7 @@
 // Shared types — the contract between the engine, the store, and the dashboard.
 
 export type AuthMode = 'subscription' | 'api'
+export type AgentProvider = 'claude' | 'codex'
 export type Autonomy = 'clarify' | 'propose' | 'gated-merge'
 
 // The generic framework. Every stage is a MODEL invocation driven by an
@@ -45,7 +46,7 @@ export type InstructionMode = 'replace' | 'append'
 
 // ---- Config ----------------------------------------------------------------
 
-// How the headless claude run handles tool permissions:
+// How a headless coding-agent run handles tool permissions:
 //  - bypass:      --dangerously-skip-permissions (model may use ANY tool/bash/MCP).
 //                 Required for the loop to actually act autonomously. Safety comes
 //                 from worktree isolation + exclude guardrail + PR review, NOT prompts.
@@ -56,10 +57,11 @@ export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface StageConfig {
   enabled?: boolean
-  model?: string // e.g. "sonnet" | "opus" | "claude-opus-4-8"
+  provider?: AgentProvider
+  model?: string // provider-specific model id
   effort?: Effort
   permissionMode?: PermissionMode // inherits runner.permissionMode if unset
-  skill?: string | null // a Claude Code skill to invoke, e.g. "code-review"
+  skill?: string | null // a provider skill to invoke, e.g. "code-review"
   // The user's instruction for this step. This is the primary knob: tell the
   // model exactly how YOU want the step done (use a skill, an MCP, a CLI, a
   // test flow…). Combined with the built-in default per `instructionMode`.
@@ -70,28 +72,21 @@ export interface StageConfig {
 
 export type StagesConfig = Partial<Record<StageName, StageConfig>>
 
-export interface QuotaConfig {
-  plan?: string // informational label, e.g. "max20x"
-  windowHours: number // rolling window length (Anthropic: 5)
-  // Anthropic does not publish token quotas, so these are user-tunable
-  // estimates the governor uses to compute a % of the window.
-  sessionTokenBudget: number
-  weeklyTokenBudget: number
-}
-
-export interface AuthConfig {
-  mode: AuthMode
+export interface AgentProviderConfig {
+  bin: string
+  authMode: AuthMode
+  defaultModel: string
+  defaultEffort: Effort
 }
 
 export interface RunnerConfig {
-  claudeBin: string
-  defaultModel: string
-  defaultEffort: Effort
+  defaultProvider: AgentProvider
+  providers: Record<AgentProvider, AgentProviderConfig>
   // default permission mode for stages (overridable per stage)
   permissionMode: PermissionMode
   // hard ceiling per stage invocation (safety); null = no cap
   maxTurns?: number | null
-  // kill a stage's claude subprocess after this many seconds (prevents hangs
+  // kill a stage's coding-agent subprocess after this many seconds (prevents hangs
   // from freezing the loop). Default 900 (15 min).
   stageTimeoutSec?: number
 }
@@ -165,7 +160,7 @@ export interface ProjectConfig {
   worktreeBase?: string | null // where to put worktrees (default ~/.ticketloop/worktrees)
   // per-stage overrides for this project
   stages?: StagesConfig
-  // MCP servers to expose to Claude during runs on this project
+  // MCP servers to expose to the selected coding agent during runs
   mcp?: Record<string, McpServerConfig>
 }
 
@@ -179,8 +174,6 @@ export interface LoopConfig {
 export interface Config {
   version: number
   loop: LoopConfig
-  quota: QuotaConfig
-  auth: AuthConfig
   runner: RunnerConfig
   server: ServerConfig
   tracker: TrackerConfig
@@ -222,6 +215,7 @@ export interface UsageEvent {
   runId: string
   ticket: string // identifier
   stage: StageName
+  provider?: AgentProvider // absent on records written before multi-provider support
   model: string
   inputTokens: number
   outputTokens: number
@@ -232,19 +226,38 @@ export interface UsageEvent {
   authMode: AuthMode
 }
 
-export interface WindowUsage {
-  used: number
-  budget: number
-  pct: number
-  resetAt: number // epoch ms when the rolling window frees the oldest tokens
-  costUsd: number
+export interface ProviderQuotaWindow {
+  name: string
+  usedPercent: number
+  windowDurationMins?: number
+  resetsAt?: number
 }
 
-export interface UsageSummary {
-  window: WindowUsage // rolling 5h
-  weekly: WindowUsage
+export interface ProviderQuotaSnapshot {
+  provider: AgentProvider
   authMode: AuthMode
   plan?: string
+  fetchedAt: number
+  windows: ProviderQuotaWindow[]
+  limitReached: boolean
+  reachedType?: string | null
+  source: 'provider-status' | 'provider-error'
+}
+
+export type ProviderFailureKind =
+  | 'quota-exhausted'
+  | 'throttled'
+  | 'auth'
+  | 'model-unavailable'
+  | 'timeout'
+  | 'execution'
+
+export interface ProviderFailure {
+  kind: ProviderFailureKind
+  provider: AgentProvider
+  message: string
+  retryAt?: number
+  scope?: string
 }
 
 // ---- Activity / run history ------------------------------------------------
@@ -258,7 +271,8 @@ export type RunOutcome =
   | 'partial' // multi-repo: ≥1 PR opened AND ≥1 repo failed to ship
   | 'merged'
   | 'skipped' // did not qualify
-  | 'blocked' // hit quota or guardrail
+  | 'blocked' // hit a safety guardrail
+  | 'waiting-provider' // provider reported exhausted quota; resume when available
   | 'paused' // pause requested mid-run; checkpointed, resume to continue
   | 'failed'
   | 'running'
@@ -268,11 +282,12 @@ export interface StageRecord {
   status: 'ok' | 'skipped' | 'failed' | 'running'
   startedAt: number
   endedAt?: number
+  provider?: AgentProvider
   model?: string
   totalTokens?: number
   costUsd?: number
   summary?: string // short human-readable result
-  detail?: string // longer text (claude result / error)
+  detail?: string // longer agent result / error text
 }
 
 // One repo's ship result in a multi-repo run.
@@ -307,6 +322,8 @@ export interface RunRecord {
   prs?: PrRecord[] // populated on multi-repo runs
   commentUrl?: string
   error?: string
+  waitingProvider?: AgentProvider
+  resumeAt?: number
   totalTokens: number
   costUsd: number
 }

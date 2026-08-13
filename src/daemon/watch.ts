@@ -6,14 +6,15 @@ import { resolveTrackerKey, setCredential } from '../credentials.js'
 import { startServer } from './server.js'
 import { readJson, writeJson, abortStaleRuns, pruneUsage, CorruptStateError } from '../store.js'
 import { DAEMON_STATE } from '../paths.js'
-import { assertAuthSafe } from '../runner/claude.js'
+import { assertAuthSafe } from '../runner/index.js'
 import { sweepOrphans, killAllChildren } from '../runner/children.js'
 import { latestHumanActivity } from '../loop/context.js'
 import { deleteCheckpoint } from '../loop/checkpoint.js'
 import { isPaused, pausedTickets, setTicketPaused } from './control.js'
-import { resetUntil } from '../governor/cooldown.js'
 import { log } from '../logger.js'
 import { renameSync } from 'node:fs'
+import { refreshProviderQuotaSnapshots } from '../providerQuota.js'
+import type { AgentProvider } from '../types.js'
 
 const MAX_ATTEMPTS = 3 // stop retrying a failing ticket after this many tries
 
@@ -23,6 +24,8 @@ interface TicketState {
   marker: string
   attempts: number
   lastOutcome: string
+  waitingProvider?: AgentProvider
+  resumeAt?: number
 }
 interface DaemonState {
   tickets: Record<string, TicketState>
@@ -71,7 +74,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
   const isDaemon = !opts.once && !opts.mock
   if (isDaemon) {
     const reaped = sweepOrphans()
-    if (reaped) log.warn(`reaped ${reaped} orphaned claude process group(s) from a previous crash`)
+    if (reaped) log.warn(`reaped ${reaped} orphaned coding-agent process group(s) from a previous crash`)
     const pruned = pruneUsage()
     if (pruned) log.info(`pruned ${pruned} usage event(s) older than 8 days`)
     const aborted = abortStaleRuns()
@@ -89,7 +92,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     Math.max(1, p.maxParallel || 1) - [...activeRuns.values()].filter((a) => a.project === p.name).length
   const inflight = new Set<Promise<void>>() // launched runs (awaited on once/shutdown)
 
-  for (const w of assertAuthSafe(cfg.auth.mode).warnings) log.warn(w)
+  for (const w of assertAuthSafe(cfg).warnings) log.warn(w)
   if (cfg.runner.permissionMode === 'bypass') {
     log.warn(
       'permissionMode=bypass — steps run with --dangerously-skip-permissions. ' +
@@ -98,7 +101,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     )
   }
   log.info(
-    `ticketloop watching (${cfg.tracker.type}) — auth=${cfg.auth.mode}, ` +
+    `ticketloop watching (${cfg.tracker.type}) — provider=${cfg.runner.defaultProvider}, ` +
       `${cfg.projects.length} project(s), poll every ${cfg.tracker.pollIntervalSec}s` +
       (opts.mock ? '  [DEMO/MOCK MODE]' : ''),
   )
@@ -151,8 +154,14 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         !!prev &&
         prev.attempts < MAX_ATTEMPTS &&
         (prev.lastOutcome === 'failed' || prev.lastOutcome === 'running')
-      const needsResume = !!prev && prev.lastOutcome === 'paused'
+      const needsResume = !!prev && (prev.lastOutcome === 'paused' || prev.lastOutcome === 'waiting-provider')
       if (!newActivity && !needsRetry && !needsResume) continue
+      if (
+        prev?.lastOutcome === 'waiting-provider' &&
+        prev.resumeAt &&
+        prev.resumeAt > Date.now() &&
+        (!prev.waitingProvider || !ctx.governor.canRun(prev.waitingProvider).ok)
+      ) continue
       // Individually paused → leave it (a global pause already stopped the scan).
       if (isPaused(sKey)) continue
       if (activeRuns.has(sKey)) continue // already running (parallel projects)
@@ -192,10 +201,17 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     if (rec.outcome === 'paused') {
       // Not an attempt — the run checkpointed and will resume when unpaused.
       state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: 'paused' })
+    } else if (rec.outcome === 'waiting-provider') {
+      state.set(sKey, {
+        marker: job.marker,
+        attempts: prev?.attempts || 0,
+        lastOutcome: 'waiting-provider',
+        waitingProvider: rec.waitingProvider,
+        resumeAt: rec.resumeAt,
+      })
     } else if (rec.outcome === 'blocked') {
-      // quota/guardrail — not an attempt; restore prior state so it retries.
-      if (prev) state.set(sKey, prev)
-      else state.delete(sKey)
+      // A safety guardrail needs a human or new ticket activity, not retries.
+      state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: 'blocked' })
     } else if (rec.outcome === 'failed') {
       state.set(sKey, { marker: job.marker, attempts, lastOutcome: 'failed' })
       if (attempts >= MAX_ATTEMPTS) {
@@ -223,24 +239,13 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     // Paused: don't pick up new work OR resume anything until `resume`. In-flight
     // runs pause themselves at their next stage boundary (checkpointed).
     if (isPaused()) return { processed: 0 }
-    // Rate-limited: Claude returned a usage limit — don't scan/run until its
-    // reset time passes, so we never retry into the wall and burn tokens.
-    const rl = resetUntil()
-    if (rl > Date.now()) {
-      log.info(`rate-limited — waiting for Claude's reset at ${new Date(rl).toLocaleTimeString()} before scanning again`)
-      return { processed: 0 }
-    }
     scanning = true
     let launched = 0
     try {
-      outer: for (const project of cfg.projects) {
+      if (!opts.mock) await refreshProviderQuotaSnapshots(cfg)
+      for (const project of cfg.projects) {
         const jobs = await selectJobs(project, slotsFree(project))
         for (const job of jobs) {
-          const gate = ctx.governor.canRun()
-          if (!gate.ok) {
-            log.warn(`holding new runs — ${gate.reason}`)
-            break outer
-          }
           const sKey = `${project.name}:${job.ticket.identifier}`
           activeRuns.set(sKey, { project: project.name, ticket: job.ticket.identifier })
           launched++
@@ -305,6 +310,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     const key = resolveTrackerKey(project, tc)
     const tracker = makeTracker(tc, key)
     const p = (async () => {
+      if (!opts.mock) await refreshProviderQuotaSnapshots(cfg)
       const t = await tracker.getTicket(identifier).catch(() => null)
       if (!t) {
         log.error(`retry: ticket ${identifier} not found in ${project.name}`)
@@ -324,7 +330,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
   // Failed or paused tickets the user can resume/restart from the dashboard.
   function resumableTickets(): { key: string; outcome: string; attempts: number }[] {
     return [...state.entries()]
-      .filter(([, v]) => v.lastOutcome === 'failed' || v.lastOutcome === 'paused')
+      .filter(([, v]) => v.lastOutcome === 'failed' || v.lastOutcome === 'paused' || v.lastOutcome === 'waiting-provider')
       .map(([key, v]) => ({ key, outcome: v.lastOutcome, attempts: v.attempts }))
   }
 
@@ -383,7 +389,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     },
     // Global settings from the dashboard. Mutates the LIVE cfg (so the next run
     // picks it up) and persists the YAML. Only these groups are accepted —
-    // auth/server are deliberately not editable here.
+    // Provider auth/server are deliberately not editable here.
     saveSettings: (patch) => {
       try {
         const num = (v: unknown, min: number, max: number) => {
@@ -397,17 +403,13 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
           if (p.loop.maxFixIterations !== undefined) cfg.loop.maxFixIterations = num(p.loop.maxFixIterations, 1, 20)
         }
         if (p.runner) {
-          if (p.runner.defaultModel) cfg.runner.defaultModel = String(p.runner.defaultModel)
-          if (p.runner.defaultEffort) cfg.runner.defaultEffort = p.runner.defaultEffort
+          if (p.runner.defaultProvider) cfg.runner.defaultProvider = p.runner.defaultProvider
+          const selected = cfg.runner.providers[cfg.runner.defaultProvider]
+          if (p.runner.defaultModel) selected.defaultModel = String(p.runner.defaultModel)
+          if (p.runner.defaultEffort) selected.defaultEffort = p.runner.defaultEffort
           if (p.runner.permissionMode) cfg.runner.permissionMode = p.runner.permissionMode
           if (p.runner.maxTurns !== undefined) cfg.runner.maxTurns = num(p.runner.maxTurns, 1, 1000)
           if (p.runner.stageTimeoutSec !== undefined) cfg.runner.stageTimeoutSec = num(p.runner.stageTimeoutSec, 0, 86400)
-        }
-        if (p.quota) {
-          if (p.quota.plan !== undefined) cfg.quota.plan = String(p.quota.plan)
-          if (p.quota.windowHours !== undefined) cfg.quota.windowHours = num(p.quota.windowHours, 1, 168)
-          if (p.quota.sessionTokenBudget !== undefined) cfg.quota.sessionTokenBudget = num(p.quota.sessionTokenBudget, 1000, 1e12)
-          if (p.quota.weeklyTokenBudget !== undefined) cfg.quota.weeklyTokenBudget = num(p.quota.weeklyTokenBudget, 1000, 1e12)
         }
         if (p.tracker) {
           if (p.tracker.simpleLabel !== undefined) cfg.tracker.simpleLabel = String(p.tracker.simpleLabel)
@@ -441,7 +443,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     running = false
     clearInterval(timer)
     srv?.close()
-    // Kill any in-flight claude children so nothing keeps editing/pushing after
+    // Kill any in-flight coding-agent children so nothing keeps editing/pushing after
     // we exit (they're detached process groups and won't get our signal).
     const killed = killAllChildren('SIGTERM')
     if (killed) log.info(`stopping ${killed} in-flight stage(s)…`)

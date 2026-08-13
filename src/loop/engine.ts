@@ -1,4 +1,5 @@
 import type {
+  AgentProvider,
   Config,
   ProjectConfig,
   PrRecord,
@@ -9,9 +10,9 @@ import type {
 } from '../types.js'
 import { resolveStage, resolveInstruction } from '../config.js'
 import { Governor } from '../governor/governor.js'
-import { resetUntil, setRateLimited, clearRateLimited } from '../governor/cooldown.js'
-import { runClaude } from '../runner/claude.js'
-import type { ClaudeResult } from '../runner/claude.js'
+import { setRateLimited, clearRateLimited } from '../governor/cooldown.js'
+import { runAgent } from '../runner/index.js'
+import type { AgentResult } from '../runner/index.js'
 import type { Tracker } from '../adapters/tracker/tracker.js'
 import { makeRepo, type Repo } from '../adapters/repo/github.js'
 import { appendRun, appendUsage, getRun } from '../store.js'
@@ -41,9 +42,20 @@ export class PausedError extends Error {
   }
 }
 
+export class ProviderUnavailableError extends Error {
+  constructor(
+    public provider: AgentProvider,
+    public stage: StageName,
+    public resumeAt?: number,
+  ) {
+    super(`${provider} usage limit reached before "${stage}"`)
+    this.name = 'ProviderUnavailableError'
+  }
+}
+
 // Outcomes whose checkpoint we KEEP so the ticket can resume where it stopped.
 // Everything else (success, skipped) deletes the checkpoint — the work is done.
-const RESUMABLE_OUTCOMES = new Set(['failed', 'blocked', 'paused'])
+const RESUMABLE_OUTCOMES = new Set(['failed', 'blocked', 'paused', 'waiting-provider'])
 
 // Per-run mutable context: the run record, its resume checkpoint, and the live
 // pause predicate. Threaded into every stage() so stages can replay from cache
@@ -140,7 +152,6 @@ async function runDataPath(
       if (parseVerdict(v).pass) break // data verified correct → deliver
 
       if (!loopEnabled || iteration >= maxIters) { exhausted = true; break }
-      if (!ctx.governor.canRun().ok) { exhausted = true; break }
       const sig = djb2(v)
       if (sig === lastSig) { exhausted = true; break }
       lastSig = sig
@@ -183,7 +194,7 @@ export function makeEngineCtx(cfg: Config, mock: boolean): EngineCtx {
     cfg,
     mock,
     repo: makeRepo(mock),
-    governor: new Governor(cfg),
+    governor: new Governor(cfg, mock),
   }
 }
 
@@ -277,12 +288,6 @@ export async function processTicket(
     )
 
   try {
-    const gate = ctx.governor.canRun()
-    if (!gate.ok) {
-      finish(rec, 'blocked', `Quota: ${gate.reason}. Resets ~${fmt(gate.resetAt)}.`)
-      return rec
-    }
-
     // Download any ticket images so the model can actually see them. On resume,
     // reuse the previously-downloaded paths instead of re-fetching.
     let imagePaths: string[] = ck.imagePaths || []
@@ -382,7 +387,8 @@ export async function processTicket(
       priors.fix = (await stage(ctx, session, 'fix', 'fix#1', project, ticket, priors, workdir, extras)).text
 
       // ---- Bounded fix-loop: fix → checks → (verify/review) → repeat while ----
-      // not clean, up to maxFixIterations, with no-progress + quota backstops.
+      // not clean, up to maxFixIterations, with a no-progress backstop. Quota
+      // waiting happens at every stage boundary and keeps the checkpoint.
       const loopEnabled = ctx.cfg.loop?.enabled !== false
       const maxIters = Math.max(1, ctx.cfg.loop?.maxFixIterations ?? 1)
       // Dev steps are opt-in per project; when on they gate after ship.
@@ -460,11 +466,6 @@ export async function processTicket(
 
         if (!loopEnabled || iteration >= maxIters) {
           exhausted = true
-          break
-        }
-        if (!ctx.governor.canRun().ok) {
-          exhausted = true
-          log.warn(`${ticket.identifier}: quota reached mid-loop — shipping with unresolved findings`)
           break
         }
         // no-progress: identical findings twice ⇒ the model is stuck.
@@ -546,10 +547,14 @@ export async function processTicket(
       finish(rec, 'paused', `Paused before "${e.stage}". Resume to continue.`)
       return rec
     }
+    if (e instanceof ProviderUnavailableError) {
+      rec.waitingProvider = e.provider
+      rec.resumeAt = e.resumeAt
+      finish(rec, 'waiting-provider', `${e.provider} quota is unavailable; resume from "${e.stage}" when the provider allows it.`)
+      return rec
+    }
     const msg = String(e)
-    // A rate limit is not a failure — block so the ticket retries after reset.
-    const outcome = msg.includes('RATE_LIMIT') ? 'blocked' : 'failed'
-    finish(rec, outcome, msg)
+    finish(rec, 'failed', msg)
     rec.error = msg
     appendRun(rec)
     return rec
@@ -745,7 +750,7 @@ async function stage(
   priors: PriorOutputs,
   workdir: string,
   extras: StageExtras,
-): Promise<ClaudeResult> {
+): Promise<AgentResult> {
   const rec = s.rec
   const sc = resolveStage(ctx.cfg, name, project.stages)
 
@@ -755,15 +760,15 @@ async function stage(
   // counters all rebuild as the surrounding code re-executes on instant replays.
   const cached = s.ck.stageOutputs[ckKey]
   if (cached !== undefined) {
-    const sr0 = beginStage(rec, name, sc.model)
+    const sr0 = beginStage(rec, name, sc.provider, sc.model)
     endStage(rec, sr0, 'ok', `⤿ resumed (cached) — ${firstLine(cached)}`, cached)
-    return { ...emptyResult(sc.model || ctx.cfg.runner.defaultModel), text: cached }
+    return { ...emptyResult(sc.provider!, sc.model!), text: cached }
   }
 
   if (sc.enabled === false) {
-    const sr0 = beginStage(rec, name, sc.model)
+    const sr0 = beginStage(rec, name, sc.provider, sc.model)
     endStage(rec, sr0, 'skipped', 'stage disabled in config')
-    return emptyResult(sc.model || ctx.cfg.runner.defaultModel)
+    return emptyResult(sc.provider!, sc.model!)
   }
 
   // PAUSE boundary: before spending a model call, honor a pause request. Persist
@@ -773,19 +778,19 @@ async function stage(
     throw new PausedError(name)
   }
 
-  // QUOTA check before spending a model call: if we're still inside Claude's
+  // QUOTA check before spending a model call: if this provider is still inside
   // usage-limit window, don't run — end the run (blocked); it resumes here once
   // the reset passes. (Guards mid-run steps + parallel runs after one hits it.)
-  const rl = resetUntil()
-  if (rl > Date.now()) {
+  const gate = ctx.mock ? { ok: true } : ctx.governor.canRun(sc.provider)
+  if (!gate.ok) {
     saveCheckpoint(s.ck)
-    throw new Error(`RATE_LIMIT: Claude usage limit — waiting for reset at ${new Date(rl).toLocaleTimeString()}`)
+    throw new ProviderUnavailableError(sc.provider!, name, gate.resetAt)
   }
 
-  const sr = beginStage(rec, name, sc.model)
+  const sr = beginStage(rec, name, sc.provider, sc.model)
   const instruction = resolveInstruction(name, sc)
   const prompt = buildStagePrompt(name, ticket, project, instruction, priors, workdir, extras)
-  log.info(`  ▸ ${name} (${sc.model})${sc.skill ? ` +skill:${sc.skill}` : ''} — ${rec.ticket}`)
+  log.info(`  ▸ ${name} (${sc.provider}/${sc.model})${sc.skill ? ` +skill:${sc.skill}` : ''} — ${rec.ticket}`)
 
   // Post steps get the project's Linear key in the env so they hit the RIGHT
   // workspace via the API (not the global MCP). The key stays out of the prompt.
@@ -793,12 +798,13 @@ async function stage(
     POST_STAGES.includes(name) && extras.trackerKey && ctx.cfg.tracker.type === 'linear'
       ? { LINEAR_API_KEY: extras.trackerKey }
       : undefined
-  const res = await runClaude({
+  const requestStartedAt = Date.now()
+  const res = await runAgent({
     prompt,
     cwd: workdir,
     stage: sc,
     runner: ctx.cfg.runner,
-    authMode: ctx.cfg.auth.mode,
+    authMode: ctx.cfg.runner.providers[sc.provider!].authMode,
     mcp: project.mcp || ctx.cfg.mcp,
     mock: ctx.mock,
     mockKind: MOCK_KIND[name],
@@ -817,6 +823,7 @@ async function stage(
     runId: rec.id,
     ticket: rec.ticket,
     stage: name,
+    provider: res.provider,
     model: res.model,
     inputTokens: res.inputTokens,
     outputTokens: res.outputTokens,
@@ -824,24 +831,21 @@ async function stage(
     cacheCreationTokens: res.cacheCreationTokens,
     totalTokens: res.totalTokens,
     costUsd: res.costUsd,
-    authMode: ctx.cfg.auth.mode,
+    authMode: ctx.cfg.runner.providers[res.provider].authMode,
   })
   rec.totalTokens += res.totalTokens
   rec.costUsd += res.costUsd
   sr.totalTokens = res.totalTokens
   sr.costUsd = res.costUsd
-  endStage(rec, sr, res.isError || res.rateLimited ? 'failed' : 'ok', firstLine(res.text), res.text)
-  // Claude's actual usage/rate limit — the reliable backstop. Pause (block) so
-  // the ticket retries after reset, regardless of the token estimate.
-  if (res.rateLimited) {
-    // Real usage limit — record its reset time; nothing runs until it passes.
-    setRateLimited(res.rateLimitResetAt)
-    throw new Error(`RATE_LIMIT: Claude usage limit reached during "${name}"`)
+  endStage(rec, sr, res.isError || res.failure ? 'failed' : 'ok', firstLine(res.text), res.text)
+  if (res.failure?.kind === 'quota-exhausted') {
+    const limit = setRateLimited(res.provider, res.failure.retryAt, res.failure.message, res.failure.scope)
+    throw new ProviderUnavailableError(res.provider, name, limit.retryAt || limit.nextProbeAt)
   }
   if (res.isError) throw new Error(`stage "${name}" failed: ${firstLine(res.text)}`)
 
   // A clean stage means we're not limited — drop any reset window.
-  clearRateLimited()
+  clearRateLimited(res.provider, requestStartedAt)
   // CACHE the successful output (reached only when the stage did NOT throw) so a
   // later resume replays it instead of re-running the model. A verdict-fail
   // still returns normally and is cached — the loop reconstructs its state on
@@ -882,8 +886,8 @@ export function extractCommentUrl(text: string): string | undefined {
   return bare ? bare[0].replace(/[).,]+$/, '') : undefined
 }
 
-function beginStage(rec: RunRecord, name: StageName, model?: string): StageRecord {
-  const sr: StageRecord = { stage: name, status: 'running', startedAt: Date.now(), model }
+function beginStage(rec: RunRecord, name: StageName, provider?: StageRecord['provider'], model?: string): StageRecord {
+  const sr: StageRecord = { stage: name, status: 'running', startedAt: Date.now(), provider, model }
   rec.stages.push(sr)
   appendRun(rec)
   return sr
@@ -906,12 +910,12 @@ function finish(rec: RunRecord, outcome: RunRecord['outcome'], note: string) {
   rec.endedAt = Date.now()
   const last = rec.stages[rec.stages.length - 1]
   if (last && last.status === 'running') endStage(rec, last, 'ok')
-  rec.error = outcome === 'failed' || outcome === 'blocked' ? note : rec.error
+  rec.error = outcome === 'failed' || outcome === 'blocked' || outcome === 'waiting-provider' ? note : rec.error
   log.info(`  = ${rec.ticket}: ${outcome} — ${note}`)
   appendRun(rec)
 }
 
-function emptyResult(model: string): ClaudeResult {
+function emptyResult(provider: NonNullable<StageRecord['provider']>, model: string): AgentResult {
   return {
     text: '',
     inputTokens: 0,
@@ -920,6 +924,7 @@ function emptyResult(model: string): ClaudeResult {
     cacheCreationTokens: 0,
     totalTokens: 0,
     costUsd: 0,
+    provider,
     model,
     isError: false,
   }

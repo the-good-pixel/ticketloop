@@ -2,40 +2,37 @@
 # Copy to `ticketloop.config.yml` (in your working dir or ~/.ticketloop/config.yml)
 # and edit. Run `ticketloop doctor` to sanity-check it.
 
-version: 1
+version: 3
 
 # ---- Bounded fix-loop ------------------------------------------------------
 # After `fix`, the engine runs your check command + verify + review; if it isn't
 # clean it feeds the findings back into another fix, up to maxFixIterations
-# (with no-progress + quota backstops). Set maxFixIterations: 1 for the old
+# (with no-progress and provider-quota backstops). Set maxFixIterations: 1 for the old
 # single-pass behavior.
 loop:
   enabled: true
   maxFixIterations: 3
 
-# ---- Quota / governor ------------------------------------------------------
-# Anthropic does NOT publish real subscription token quotas, so these are
-# tunable ESTIMATES the dashboard uses to show a % of your 5-hour / weekly
-# budget. Adjust to match your plan and how full the meters feel in practice.
-quota:
-  plan: max20x # informational label only
-  windowHours: 5
-  sessionTokenBudget: 220000 # est. tokens per rolling 5h window
-  weeklyTokenBudget: 5000000 # est. tokens per 7 days
-
-# ---- Auth ------------------------------------------------------------------
-# subscription = use your logged-in `claude` CLI (Pro/Max). ticketloop will
-#   refuse --bare and will UNSET ANTHROPIC_API_KEY for the child so you are
-#   billed against your subscription, not the metered API.
-# api = use ANTHROPIC_API_KEY (metered). Choose this for unattended/heavy use.
-auth:
-  mode: subscription
-
+# ---- Coding-agent providers ------------------------------------------------
+# subscription uses the CLI's saved login (`claude` login or `codex login`).
+# ticketloop removes provider API-key variables from subscription child processes.
+# api uses ANTHROPIC_API_KEY for Claude or CODEX_API_KEY for Codex.
 runner:
-  claudeBin: claude
-  defaultModel: sonnet # keep the cheap/large pool for routine work
-  defaultEffort: medium
-  maxTurns: 40
+  defaultProvider: claude # claude | codex
+  providers:
+    claude:
+      bin: claude
+      authMode: subscription
+      defaultModel: sonnet
+      defaultEffort: medium
+    codex:
+      bin: codex
+      authMode: subscription
+      defaultModel: gpt-5.6-terra
+      defaultEffort: medium
+  permissionMode: bypass
+  maxTurns: 40 # Claude only; Codex CLI has no matching flag
+  stageTimeoutSec: 900
 
 server:
   host: 127.0.0.1
@@ -61,9 +58,8 @@ repo:
   type: github
   tokenEnv: GITHUB_TOKEN # optional; `gh` CLI auth is used if already logged in
 
-# ---- MCP servers exposed to Claude during runs (optional) ------------------
-# These are passed to `claude -p --mcp-config`. Use them so Claude can act on
-# Linear / GitHub directly. Credentials come from env vars you set.
+# ---- MCP servers exposed to the selected coding agent (optional) -----------
+# ticketloop translates this shared shape to the selected CLI's MCP config.
 mcp:
   linear:
     command: npx
@@ -83,8 +79,9 @@ mcp:
 #   (question tickets take triage → clarify → comment; changes take the rest)
 #
 # Each step accepts:
-#   model, effort, skill        model tier / thinking effort / a skill to invoke
-#   allowedTools                which tools the model may use this step
+#   provider, model, effort     CLI, provider model id, and thinking effort
+#   skill                       a skill to invoke
+#   allowedTools                Claude-only tool allowlist; Codex uses permissionMode
 #   instruction                 YOUR instruction for this step (see below)
 #   instructionMode             replace (default) | append  — vs the built-in default
 #   enabled: false              skip this step entirely
@@ -96,6 +93,8 @@ mcp:
 stages:
   # examples — delete/keep as you like; omitting a step uses its built-in default
   verify:
+    # provider: codex
+    # model: gpt-5.6-terra
     instructionMode: append
     instruction: "Run `deno task check` (and `npm run test` if relevant); use the `test-plan` skill to sanity-check UI changes and run the app in the browser to confirm. Fail the verdict if any of these fail."
   review:

@@ -277,7 +277,7 @@
   </header>
 
   <div class="legend">
-    <span class="lg"><span class="dot model"></span>Model · <span style="color:var(--muted)">claude&nbsp;-p</span></span>
+    <span class="lg"><span class="dot model"></span>Model · <span style="color:var(--muted)">claude&nbsp;-p / codex&nbsp;exec</span></span>
     <span class="lg"><span class="dot api"></span>External API / CLI · <span style="color:var(--muted)">Linear · gh · git</span></span>
     <span class="lg"><span class="dot local"></span>Local harness logic</span>
     <span class="lg"><span class="dot warn"></span>Gate / guardrail</span>
@@ -302,7 +302,7 @@
 
     <div class="node" data-d="warn">
       <div class="glyph">⛽</div>
-      <div class="node-body"><div class="t">Governor quota gate</div><div class="s">5h + weekly meters · pause near cap</div></div>
+      <div class="node-body"><div class="t">Provider quota gate</div><div class="s">provider-reported % · checked at every stage</div></div>
       <span class="chip warn">local · gate</span>
     </div>
     <div class="link"></div>
@@ -317,7 +317,7 @@
     <div class="node" data-d="model">
       <div class="glyph">◆</div>
       <div class="node-body"><div class="t">Triage</div><div class="s">model decides: no-action? · question · data · change · bug</div></div>
-      <span class="chip model">claude -p</span>
+      <span class="chip model">Claude / Codex</span>
     </div>
     <div class="link dash"></div>
     <div class="decision">◆ &nbsp;branch on triage — <b style="color:var(--local)">no-action → skip</b> · question · data · change · bug</div>
@@ -460,7 +460,7 @@
   <!-- ============ THE FIX LOOP ============ -->
   <section class="detail">
     <h2>The fix loop, in detail</h2>
-    <p class="note">The first <b style="color:var(--text)">fix</b> runs once. Then the gates run <b style="color:var(--text)">in sequence — verify → review → ship — and each must pass before the next runs</b>: the moment one fails, its findings go straight back to fix (no point reviewing or shipping a change verify already rejected). Bounded by <span style="font-family:var(--mono)">maxFixIterations</span>, with no-progress and quota backstops. <b style="color:var(--text)">Ship</b> is the last gate: its instruction opens/updates the PR, watches the PR's CI, and fixes until green (no CI → mergeable → pass). The harness never reads CI — how to watch and wait is the ship instruction's business.</p>
+    <p class="note">The first <b style="color:var(--text)">fix</b> runs once. Then the gates run <b style="color:var(--text)">in sequence — verify → review → ship — and each must pass before the next runs</b>: the moment one fails, its findings go straight back to fix (no point reviewing or shipping a change verify already rejected). Bounded by <span style="font-family:var(--mono)">maxFixIterations</span>, with a no-progress backstop. Provider quota is checked at every stage; an exhausted provider checkpoints the run and waits instead of ending the fix loop. <b style="color:var(--text)">Ship</b> is the last gate: its instruction opens/updates the PR, watches the PR's CI, and fixes until green (no CI → mergeable → pass). The harness never reads CI — how to watch and wait is the ship instruction's business.</p>
     <div class="cyclewrap">
       <div class="flow">
         <div class="node sm" data-d="model">
@@ -504,7 +504,8 @@ VERDICT: <span class="r">fail</span> — &lt;reason&gt;</div>
         <h3>How it exits — the PR exists only past ship</h3>
         <div class="exit"><span class="oc ok">deployed</span><div class="ex-b">shipped <b>and</b> deploy-dev (+ verify-dev) passed <span>→ live on dev</span></div></div>
         <div class="exit"><span class="oc ok">pr-opened</span><div class="ex-b">every verdict passes, CI green <span>→ clean PR</span></div></div>
-        <div class="exit"><span class="oc warn">with-findings</span><div class="ex-b"><b>reached ship</b>, but checks/CI still red at the cap · no-progress · quota <span>→ flagged PR left open</span></div></div>
+        <div class="exit"><span class="oc warn">with-findings</span><div class="ex-b"><b>reached ship</b>, but checks/CI still red at the cap · no-progress <span>→ flagged PR left open</span></div></div>
+        <div class="exit"><span class="oc warn">waiting-provider</span><div class="ex-b"><b>provider quota exhausted</b> <span>→ checkpoint kept; other providers continue</span></div></div>
         <div class="exit"><span class="oc dead">failed</span><div class="ex-b"><b>failed before ship</b> — verify/review never passed <span>→ ship not reached, no PR</span></div></div>
         <div class="exit"><span class="oc dead">skipped</span><div class="ex-b"><b>no-action</b> — a sign-off / approval / ack <span>→ triage skips, no pipeline</span></div></div>
       </div>
@@ -560,7 +561,7 @@ VERDICT: <span class="r">fail</span> — &lt;reason&gt;</div>
         <tbody>
           <tr>
             <td><span class="pill model">■ Model</span></td>
-            <td class="who">claude -p (your subscription)</td>
+            <td class="who">Claude Code or Codex CLI (your subscription)</td>
             <td class="steps">Triage · Clarify · <b>Export + Verify (data)</b> · <b>Locate</b> · Plan · Prepare · Fix · <b>Verify + Review + Ship + Deploy-dev + Verify-dev (each emit VERDICT)</b> · Comment — <b>all the work</b>, each via its own instruction. Ship watches CI &amp; fixes to green; Deploy-dev/Verify-dev (opt-in) push to DEV &amp; check it there; Locate finds an existing PR to refresh; <b>posts every comment itself</b> with the project's Linear key</td>
           </tr>
           <tr>

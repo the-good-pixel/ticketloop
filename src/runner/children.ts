@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync, existsSync, readdirSync, unlinkSync, readFile
 import { join } from 'node:path'
 import { DATA_DIR } from '../paths.js'
 
-// Tracks live `claude` child process GROUPS so they can be killed on daemon
+// Tracks live coding-agent child process GROUPS so they can be killed on daemon
 // shutdown, and reaped on the next startup if the daemon died without cleaning
 // up (kill -9 / power loss). Children are spawned `detached`, so each pid is
 // its own process-group id and `process.kill(-pgid, …)` takes down the subtree.
@@ -47,7 +47,7 @@ export function killAllChildren(sig: NodeJS.Signals): number {
   return n
 }
 
-/** Startup: SIGKILL any claude process group a previous crash left running. */
+/** Startup: SIGKILL any coding-agent process group a previous crash left running. */
 export function sweepOrphans(): number {
   if (!existsSync(INFLIGHT_DIR)) return 0
   let killed = 0

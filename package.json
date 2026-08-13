@@ -1,7 +1,7 @@
 {
   "name": "ticketloop",
   "version": "0.1.0",
-  "description": "A local, subscription-powered agent that watches your tracker and runs a configurable dev-cycle loop (triage → clarify → plan → fix → verify → review → PR) on trivial tickets, with a quota + history dashboard.",
+  "description": "A local, subscription-powered Claude or Codex agent that watches your tracker and runs a configurable dev-cycle loop with a quota and history dashboard.",
   "type": "module",
   "bin": {
     "ticketloop": "./bin/ticketloop.mjs"

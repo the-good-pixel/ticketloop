@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import type { Config } from '../types.js'
-import { resolveTracker } from '../config.js'
+import { resolveStage, resolveTracker } from '../config.js'
+import { STAGE_ORDER } from '../types.js'
 import { hasCredential, resolveTrackerKey } from '../credentials.js'
 
 function has(bin: string, args: string[] = ['--version']): string | null {
@@ -21,29 +22,55 @@ export function doctorCmd(cfg: Config, configPath: string | null): void {
   else warn('no config file found — using defaults (mock tracker). Run `ticketloop init`.')
 
   console.log('\nTooling')
-  const claude = has(cfg.runner.claudeBin)
-  claude ? ok(`claude CLI: ${claude}`) : bad(`claude CLI ("${cfg.runner.claudeBin}") not found on PATH`)
+  const used = new Set([cfg.runner.defaultProvider])
+  for (const stage of STAGE_ORDER) used.add(resolveStage(cfg, stage).provider!)
+  for (const p of cfg.projects) for (const stage of STAGE_ORDER) used.add(resolveStage(cfg, stage, p.stages).provider!)
+  for (const provider of ['claude', 'codex'] as const) {
+    const bin = cfg.runner.providers[provider].bin
+    const found = has(bin)
+    found
+      ? ok(`${provider} CLI: ${found}`)
+      : used.has(provider)
+        ? bad(`${provider} CLI ("${bin}") not found on PATH`)
+        : warn(`${provider} CLI not found (provider is not configured for any stage)`)
+  }
   const gh = has('gh', ['--version'])
   gh ? ok(`gh CLI: ${gh}`) : warn('gh CLI not found — PRs cannot be opened (fine for clarify-only)')
   const git = has('git', ['--version'])
   git ? ok(`git: ${git}`) : bad('git not found')
 
   console.log('\nAuth / billing')
-  ok(`auth.mode = ${cfg.auth.mode}`)
-  if (cfg.auth.mode === 'subscription') {
-    if (process.env.ANTHROPIC_API_KEY) {
-      warn(
-        'ANTHROPIC_API_KEY is set. In subscription mode ticketloop unsets it for ' +
-          'the claude child so you are NOT billed the metered API — but consider ' +
-          'unsetting it in your shell to avoid surprises elsewhere.',
-      )
+  for (const provider of ['claude', 'codex'] as const) {
+    const pc = cfg.runner.providers[provider]
+    if (!used.has(provider)) continue
+    ok(`${provider} auth = ${pc.authMode}`)
+    if (provider === 'claude' && pc.authMode === 'subscription') {
+      if (process.env.ANTHROPIC_API_KEY) {
+        warn(
+          'ANTHROPIC_API_KEY is set. In subscription mode ticketloop unsets it for ' +
+            'the claude child so you are NOT billed the metered API — but consider ' +
+            'unsetting it in your shell to avoid surprises elsewhere.',
+        )
+      } else {
+        ok('ANTHROPIC_API_KEY not set — good; claude will use your subscription login')
+      }
+    } else if (provider === 'claude') {
+      process.env.ANTHROPIC_API_KEY
+        ? ok('ANTHROPIC_API_KEY is set (api mode)')
+        : bad('Claude api mode needs ANTHROPIC_API_KEY')
+    } else if (pc.authMode === 'subscription') {
+      const status = has(pc.bin, ['login', 'status'])
+      status && /chatgpt/i.test(status)
+        ? ok(`codex login: ${status}`)
+        : bad('Codex subscription auth needs `codex login` with ChatGPT')
+      if (process.env.OPENAI_API_KEY || process.env.CODEX_API_KEY) {
+        warn('OPENAI_API_KEY or CODEX_API_KEY is set. ticketloop unsets both for Codex subscription stages.')
+      }
     } else {
-      ok('ANTHROPIC_API_KEY not set — good; claude will use your subscription login')
+      process.env.CODEX_API_KEY
+        ? ok('CODEX_API_KEY is set (Codex api mode)')
+        : bad('Codex api mode needs CODEX_API_KEY')
     }
-  } else {
-    process.env.ANTHROPIC_API_KEY
-      ? ok('ANTHROPIC_API_KEY is set (api mode)')
-      : bad('auth.mode=api but ANTHROPIC_API_KEY is not set')
   }
 
   console.log('\nProjects (each with its own tracker + workspace key)')

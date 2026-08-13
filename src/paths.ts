@@ -13,9 +13,11 @@ export const CHECKPOINTS_DIR = join(DATA_DIR, 'checkpoints')
 // Cross-process pause switch: the `pause`/`resume` CLI commands (and the
 // dashboard) write it; the running daemon reads it before each stage.
 export const CONTROL_FILE = join(DATA_DIR, 'control.json')
-// Rate-limit backoff: set when Claude returns a real usage-limit; the governor
-// refuses to start runs until it passes (the usage gauge can't be trusted).
+// Provider-specific hold state, set only from provider status or a confirmed
+// quota-exhausted response.
 export const COOLDOWN_FILE = join(DATA_DIR, 'cooldown.json')
+// Last percentages and reset times read directly from provider status APIs.
+export const PROVIDER_QUOTA_FILE = join(DATA_DIR, 'provider-quota.json')
 
 const CONFIG_NAMES = ['ticketloop.config.yml', 'ticketloop.config.yaml']
 

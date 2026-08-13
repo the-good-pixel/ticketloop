@@ -1,41 +1,11 @@
 import { spawn } from 'node:child_process'
-import type { Config, McpServerConfig, StageConfig } from '../types.js'
 import { registerChild, unregisterChild } from './children.js'
 import { log } from '../logger.js'
-
-export interface RunClaudeOpts {
-  prompt: string
-  cwd: string
-  stage: StageConfig
-  runner: Config['runner']
-  authMode: Config['auth']['mode']
-  mcp?: Record<string, McpServerConfig>
-  mock?: boolean
-  // for mock output shaping — a MOCK_TEXTS key (matches a stage's mock kind)
-  mockKind?: string
-  // extra env vars for the subprocess (e.g. the project's Linear API key, so the
-  // posting steps hit the CORRECT workspace instead of the global MCP)
-  env?: Record<string, string>
-}
-
-export interface ClaudeResult {
-  text: string
-  inputTokens: number
-  outputTokens: number
-  cacheReadTokens: number
-  cacheCreationTokens: number
-  totalTokens: number
-  costUsd: number
-  model: string
-  isError: boolean
-  rateLimited?: boolean // Claude reported an actual usage/rate limit
-  rateLimitResetAt?: number // epoch ms Claude said the limit resets, if we could parse it
-  raw?: string
-}
+import type { AgentResult, RunAgentOpts } from './types.js'
 
 // Claude's real "you've hit your limit" signal — the reliable backstop.
 export function isRateLimitText(t: string): boolean {
-  return /rate limit|usage limit|hit your (5-hour|weekly|usage|opus).{0,20}limit|limit .{0,10}reset|429|too many requests/i.test(
+  return /rate limit|usage limit|hit your (5-hour|weekly|usage|opus).{0,20}limit|limit .{0,10}reset|too many requests|(?:status|status code|http|error|code)\D{0,12}429\b/i.test(
     t || '',
   )
 }
@@ -70,22 +40,11 @@ export function parseResetHint(t: string, now = Date.now()): number | undefined 
  *  - if ANTHROPIC_API_KEY is set, Claude Code bills the API instead of the sub.
  * In subscription mode we refuse both and scrub the env var for the child.
  */
-export function assertAuthSafe(authMode: string): { warnings: string[] } {
-  const warnings: string[] = []
-  if (authMode === 'subscription' && process.env.ANTHROPIC_API_KEY) {
-    warnings.push(
-      'ANTHROPIC_API_KEY is set but auth.mode=subscription. Claude Code would ' +
-        'bill the metered API instead of your subscription. ticketloop will ' +
-        'UNSET it for the claude child process.',
-    )
-  }
-  return { warnings }
-}
-
-function buildArgs(o: RunClaudeOpts): { args: string[]; prompt: string } {
+export function buildClaudeArgs(o: RunAgentOpts): { args: string[]; prompt: string } {
   const { stage, runner } = o
-  const model = stage.model || runner.defaultModel
-  const effort = stage.effort || runner.defaultEffort
+  const provider = runner.providers.claude
+  const model = stage.model || provider.defaultModel
+  const effort = stage.effort || provider.defaultEffort
 
   // Model & effort go through real CLI flags (--model / --effort). Do NOT inject
   // "/effort" or "/skill" as slash-prefixes into the prompt: that mechanism is
@@ -124,11 +83,12 @@ function buildArgs(o: RunClaudeOpts): { args: string[]; prompt: string } {
   return { args, prompt }
 }
 
-export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
+export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
   if (o.mock) return mockRun(o)
 
-  const { args } = buildArgs(o)
-  const model = o.stage.model || o.runner.defaultModel
+  const { args } = buildClaudeArgs(o)
+  const provider = o.runner.providers.claude
+  const model = o.stage.model || provider.defaultModel
 
   // Never use --bare in subscription mode; scrub API key so we don't get billed.
   const env = { ...process.env, ...(o.env || {}) }
@@ -137,7 +97,7 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
   return new Promise((resolve) => {
     // detached: own process group so a timeout can kill the whole subtree
     // (claude + any tools it spawned), leaving no orphans.
-    const child = spawn(o.runner.claudeBin, args, {
+    const child = spawn(provider.bin, args, {
       cwd: o.cwd,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -224,7 +184,7 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
       settled = true
       if (timer) clearTimeout(timer)
       reap()
-      resolve(errorResult(model, `failed to spawn "${o.runner.claudeBin}": ${err.message}`))
+      resolve(errorResult(model, `failed to spawn "${provider.bin}": ${err.message}`))
     })
     child.on('close', (code) => {
       if (settled) return
@@ -236,12 +196,15 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
         resolve(errorResult(model, `stage timed out after ${o.runner.stageTimeoutSec ?? 900}s and was killed`))
         return
       }
-      const limited = rateLimited || isRateLimitText(text) || isRateLimitText(stderr)
+      // A retry event followed by a successful result is not an exhausted
+      // subscription. Classify only when the final CLI result failed.
+      if (code !== 0) isError = true
+      const failed = isError
+      const limited = failed && (rateLimited || isRateLimitText(text) || isRateLimitText(stderr))
       const resetAt = limited ? resetHint ?? parseResetHint(`${text}\n${stderr}`) : undefined
       if (code !== 0 && !text) {
         const r = errorResult(model, `claude exited ${code}: ${stderr.trim().slice(0, 300)}`)
-        r.rateLimited = limited
-        r.rateLimitResetAt = resetAt
+        if (limited) r.failure = { kind: 'quota-exhausted', provider: 'claude', message: r.text, retryAt: resetAt }
         resolve(r)
         return
       }
@@ -255,16 +218,18 @@ export async function runClaude(o: RunClaudeOpts): Promise<ClaudeResult> {
         cacheCreationTokens: usage.cacheCreate,
         totalTokens: total,
         costUsd: usage.cost,
+        provider: 'claude',
         model,
         isError,
-        rateLimited: limited,
-        rateLimitResetAt: resetAt,
+        failure: limited
+          ? { kind: 'quota-exhausted', provider: 'claude', message: `${text}\n${stderr}`.trim().slice(0, 500), retryAt: resetAt }
+          : undefined,
       })
     })
   })
 }
 
-function errorResult(model: string, msg: string): ClaudeResult {
+function errorResult(model: string, msg: string): AgentResult {
   return {
     text: msg,
     inputTokens: 0,
@@ -273,6 +238,7 @@ function errorResult(model: string, msg: string): ClaudeResult {
     cacheCreationTokens: 0,
     totalTokens: 0,
     costUsd: 0,
+    provider: 'claude',
     model,
     isError: true,
   }
@@ -318,7 +284,7 @@ let mockVerifyDevFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFYDEV) 
 // later attempt resumes from the checkpoint and re-runs only ship).
 let mockShipErrorsLeft = Number(process.env.TICKETLOOP_MOCK_ERROR_SHIP) || 0
 
-async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
+async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
   // Per-stage delay; override with TICKETLOOP_MOCK_DELAY_MS to slow the demo down
   // (useful for watching the live monitor).
   const base = Number(process.env.TICKETLOOP_MOCK_DELAY_MS) || 300 + Math.random() * 500
@@ -328,7 +294,7 @@ async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
   const out = 200 + Math.floor(Math.random() * 1200)
   const cacheRead = Math.floor(Math.random() * 8000)
   const total = inp + out + cacheRead
-  const model = o.stage.model || o.runner.defaultModel
+  const model = o.stage.model || o.runner.providers.claude.defaultModel
   // rough Sonnet-ish blended price for demo realism only
   const cost = (inp * 3 + out * 15 + cacheRead * 0.3) / 1_000_000
   // Ship text carries a per-repo PR URL (workdir basename) so multi-repo demos
@@ -346,7 +312,7 @@ async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
       return {
         text: 'API Error: Unable to connect to API (ENOTFOUND)',
         inputTokens: inp, outputTokens: 0, cacheReadTokens: cacheRead, cacheCreationTokens: 0,
-        totalTokens: inp + cacheRead, costUsd: 0, model, isError: true,
+        totalTokens: inp + cacheRead, costUsd: 0, provider: 'claude', model, isError: true,
       }
     }
     // TICKETLOOP_MOCK_FAIL_SHIPS=N: first N ships open the PR but report red CI,
@@ -388,6 +354,7 @@ async function mockRun(o: RunClaudeOpts): Promise<ClaudeResult> {
     cacheCreationTokens: 0,
     totalTokens: total,
     costUsd: Number(cost.toFixed(4)),
+    provider: 'claude',
     model,
     isError: false,
   }

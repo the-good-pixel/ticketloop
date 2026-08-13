@@ -1,6 +1,6 @@
-# CLAUDE.md — working on ticketloop
+# Agent instructions — working on ticketloop
 
-Guidance for Claude Code (and humans) editing **this** codebase. For what the tool
+Guidance for coding agents (and humans) editing **this** codebase. For what the tool
 *does* and how to configure it, read `README.md` and open `docs/architecture.html`.
 
 ## What this is

@@ -7,11 +7,10 @@ import { dirname, join, resolve, extname } from 'node:path'
 import type { Config, ProjectConfig } from '../types.js'
 import { STAGE_ORDER } from '../types.js'
 import { Governor } from '../governor/governor.js'
-import { readRuns, getRun, readUsage } from '../store.js'
-import { assertAuthSafe } from '../runner/claude.js'
+import { readRuns, getRun } from '../store.js'
+import { assertAuthSafe } from '../runner/index.js'
 import { resolveTracker, DEFAULT_INSTRUCTIONS } from '../config.js'
 import { hasCredential, resolveTrackerKey } from '../credentials.js'
-import { readRealUsage } from '../realUsage.js'
 import { isPaused, setPaused, setTicketPaused, pausedTickets } from './control.js'
 import { log } from '../logger.js'
 
@@ -51,16 +50,18 @@ export interface ServerHooks {
 
 // Selectable models for the per-step dropdown. Aliases (opus/sonnet/haiku)
 // always resolve to the latest of that tier; the dated/specific IDs pin a version.
-const MODELS: { label: string; value: string }[] = [
-  { label: 'Opus (latest)', value: 'opus' },
-  { label: 'Opus 4.8', value: 'claude-opus-4-8' },
-  { label: 'Opus 5', value: 'claude-opus-5' },
-  { label: 'Sonnet (latest)', value: 'sonnet' },
-  { label: 'Sonnet 5', value: 'claude-sonnet-5' },
-  { label: 'Haiku (latest)', value: 'haiku' },
-  { label: 'Haiku 4.5', value: 'claude-haiku-4-5-20251001' },
-  { label: 'Fable 5', value: 'claude-fable-5' },
-]
+const MODELS: Record<string, { label: string; value: string }[]> = {
+  claude: [
+    { label: 'Opus (latest)', value: 'opus' },
+    { label: 'Sonnet (latest)', value: 'sonnet' },
+    { label: 'Haiku (latest)', value: 'haiku' },
+  ],
+  codex: [
+    { label: 'GPT-5.6 Sol', value: 'gpt-5.6-sol' },
+    { label: 'GPT-5.6 Terra', value: 'gpt-5.6-terra' },
+    { label: 'GPT-5.6 Luna', value: 'gpt-5.6-luna' },
+  ],
+}
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
 
 function toolExists(bin: string, args: string[]): boolean {
@@ -68,11 +69,12 @@ function toolExists(bin: string, args: string[]): boolean {
   return (r.status ?? 1) === 0
 }
 
-let toolingCache: { claude: boolean; gh: boolean; git: boolean } | null = null
-function tooling(claudeBin: string) {
+let toolingCache: { claude: boolean; codex: boolean; gh: boolean; git: boolean } | null = null
+function tooling(cfg: Config) {
   if (!toolingCache) {
     toolingCache = {
-      claude: toolExists(claudeBin, ['--version']),
+      claude: toolExists(cfg.runner.providers.claude.bin, ['--version']),
+      codex: toolExists(cfg.runner.providers.codex.bin, ['--version']),
       gh: toolExists('gh', ['--version']),
       git: toolExists('git', ['--version']),
     }
@@ -80,39 +82,7 @@ function tooling(claudeBin: string) {
   return toolingCache
 }
 
-function usageSeries(windowHours: number) {
-  const now = Date.now()
-  const HOUR = 3600_000
-  const DAY = 24 * HOUR
-  const bucketMs = 15 * 60_000
-  const span = windowHours * HOUR
-  const winStart = now - span
-  const buckets: { t: number; tokens: number }[] = []
-  const bucketIdx = new Map<number, number>()
-  for (let start = winStart, i = 0; start < now; start += bucketMs, i++) {
-    bucketIdx.set(start, i)
-    buckets.push({ t: start, tokens: 0 })
-  }
-  const days: { t: number; tokens: number }[] = []
-  const dayIdx = new Map<number, number>()
-  for (let d = 6, i = 0; d >= 0; d--, i++) {
-    const dayStart = (now - d * DAY) - ((now - d * DAY) % DAY)
-    dayIdx.set(dayStart, i)
-    days.push({ t: dayStart, tokens: 0 })
-  }
-  // single pass over the (already 7-day-pruned) events
-  for (const e of readUsage(now - 7 * DAY)) {
-    if (e.ts >= winStart) {
-      const b = buckets[Math.floor((e.ts - winStart) / bucketMs)]
-      if (b) b.tokens += e.totalTokens
-    }
-    const di = dayIdx.get(e.ts - (e.ts % DAY))
-    if (di != null) days[di].tokens += e.totalTokens
-  }
-  return { buckets, days }
-}
-
-const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'deployed', 'partial', 'merged', 'skipped', 'blocked', 'paused', 'failed', 'running']
+const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'deployed', 'partial', 'merged', 'skipped', 'blocked', 'waiting-provider', 'paused', 'failed', 'running']
 
 function parseDate(v: string | null, endOfDay = false): number | null {
   if (!v) return null
@@ -186,12 +156,7 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
     try {
       if (path === '/api/status') return json(res, buildStatus(cfg, hooks))
       if (path === '/api/usage') {
-        return json(res, {
-          ...gov.summary(),
-          series: usageSeries(cfg.quota.windowHours),
-          quota: cfg.quota,
-          real: readRealUsage(), // accurate subscription % from Claude Code, or null
-        })
+        return json(res, { providers: gov.summary() })
       }
       if (path === '/api/activity') {
         const limit = Number(url.searchParams.get('limit') || 50)
@@ -305,7 +270,7 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
 }
 
 function buildStatus(cfg: Config, hooks: ServerHooks) {
-  const auth = assertAuthSafe(cfg.auth.mode)
+  const auth = assertAuthSafe(cfg)
   const s = hooks.status()
   return {
     running: s.running,
@@ -320,8 +285,8 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
     activeRuns: s.activeRuns ?? [],
     pausedTickets: s.pausedTickets ?? [],
     resumableTickets: s.resumableTickets ?? [],
-    authMode: cfg.auth.mode,
-    plan: cfg.quota.plan,
+    authMode: cfg.runner.providers[cfg.runner.defaultProvider].authMode,
+    provider: cfg.runner.defaultProvider,
     tracker: cfg.tracker.type,
     warnings: auth.warnings,
     projects: cfg.projects.map((p) => ({
@@ -335,13 +300,11 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
 /** Sanitized config for the UI: globals read-only, projects editable, NO keys. */
 function buildConfigView(cfg: Config) {
   return {
-    // globals — editable from the dashboard's Settings card (except auth/server,
-    // which stay read-only: they change billing / need a restart).
+    // globals — editable from the dashboard's Settings card except provider
+    // auth and server settings, which are config-file-only.
     globals: {
-      auth: cfg.auth,
       loop: cfg.loop,
       runner: cfg.runner,
-      quota: cfg.quota,
       server: cfg.server,
       trackerDefaults: {
         type: cfg.tracker.type,
@@ -355,7 +318,7 @@ function buildConfigView(cfg: Config) {
     defaultInstructions: DEFAULT_INSTRUCTIONS,
     models: MODELS,
     efforts: EFFORTS,
-    tooling: tooling(cfg.runner.claudeBin),
+    tooling: tooling(cfg),
     projects: cfg.projects.map((p) => {
       const tc = resolveTracker(cfg, p)
       return {

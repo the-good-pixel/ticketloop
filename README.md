@@ -4,8 +4,8 @@ A **local, subscription-powered agent** that watches your tracker (Linear) and r
 configurable dev-cycle loop on tickets — so client questions, small changes, and
 one-off data exports stop eating your dev time.
 
-It runs on **your machine** and shells out to **your own `claude` CLI**, so it uses your
-Claude Pro/Max subscription instead of metered API tokens. A built-in web **dashboard**
+It runs on **your machine** and shells out to your own **Claude Code or Codex CLI**, so it
+can use the subscription you already pay for instead of metered API tokens. A built-in web **dashboard**
 shows quota usage and a full history of what the loop did.
 
 ```
@@ -43,18 +43,21 @@ Three jobs, one loop:
 - [Configuring the steps](#configuring-the-steps) — **the main knob**
 - [What each step must output](#what-each-step-must-output) — the contracts
 - [Safety rails](#safety-rails) · [Quota / governor](#quota--the-governor)
-- [TODO / Upcoming development](#todo--upcoming-development) — multi-CLI harness support, more trackers, catalog, workflow manager
+- [TODO / Upcoming development](#todo--upcoming-development) — more providers, trackers, catalog, workflow manager
 
 ---
 
 ## Why local
 
-Claude Pro/Max subscriptions authenticate through the **local `claude` CLI login**.
-Running the loop on your machine draws from the subscription you already pay for.
-ticketloop defaults to **subscription mode** and protects that billing path: it never
-uses `--bare`, and it **unsets `ANTHROPIC_API_KEY`** for the `claude` child so a stray
-env var can't silently flip you to metered billing. Switch `auth.mode: api` for
-unattended/heavy use on a metered key.
+Claude and Codex subscriptions authenticate through their local CLI login. ticketloop
+defaults to Claude subscription mode. For subscription stages, ticketloop removes the
+provider's API-key variables from the child process so a shell variable cannot silently
+switch billing paths. API mode uses `ANTHROPIC_API_KEY` for Claude or `CODEX_API_KEY`
+for Codex.
+
+For Codex subscription access, run `codex login` and choose ChatGPT. ticketloop uses
+[`codex exec`](https://learn.chatgpt.com/docs/non-interactive-mode) for each stage and
+reuses the [saved ChatGPT login](https://learn.chatgpt.com/docs/auth).
 
 ## Install
 
@@ -64,7 +67,8 @@ npm install
 npm link            # optional: puts `ticketloop` on your PATH
 ```
 
-Requires **Node ≥ 20**, the **`claude` CLI** (logged in), **`git`**, and **`gh`** (for PRs).
+Requires **Node ≥ 20**, at least one configured **Claude or Codex CLI** (logged in),
+**`git`**, and **`gh`** (for PRs).
 Run `ticketloop doctor` to check all of the above at once.
 
 ## Quick start (no credentials)
@@ -135,8 +139,9 @@ a *kind*, and the harness routes accordingly:
 After the first `fix`, the gates run **in sequence — `verify` → `review` → `ship`** — and
 **each must pass before the next runs**. Every gate returns a machine-readable
 `VERDICT: pass` / `VERDICT: fail — <reason>`; the first failure sends its findings
-straight back to `fix`, and the loop repeats up to `loop.maxFixIterations` (with
-no-progress and quota backstops). `ship` is the last gate: its instruction opens/updates
+straight back to `fix`, and the loop repeats up to `loop.maxFixIterations` (with a
+no-progress backstop). Provider quota is checked at every stage; an exhausted provider
+checkpoints the run until that provider becomes available. `ship` is the last gate: its instruction opens/updates
 the PR and drives its **CI to green**. It ends by shipping a PR — clean, or flagged
 `pr-opened-with-findings`.
 
@@ -263,15 +268,25 @@ driven by an instruction, configured per project under `stages:`. Each step acce
 |---|---|
 | `instruction` | **your** prompt for this step (see modes below) |
 | `instructionMode` | `replace` (default — swap the built-in) or `append` (add on top) |
-| `model` | model tier, e.g. `sonnet` or `claude-opus-4-8` |
+| `provider` | `claude` or `codex`; inherits `runner.defaultProvider` |
+| `model` | provider model id, e.g. `sonnet` or `gpt-5.6-terra` |
 | `effort` | `low` / `medium` / `high` |
 | `skill` | a skill to invoke (e.g. `code-review`) |
 | `allowedTools` | which tools the step may use, e.g. `Read,Edit,Bash` |
 | `enabled: false` | skip this step |
 
+`allowedTools` is enforced by Claude Code. Codex CLI does not have an equivalent
+per-invocation tool-name allowlist, so Codex uses `permissionMode` and its sandbox.
+`runner.maxTurns` is also Claude-only. The shared wall-clock `stageTimeoutSec` applies
+to both providers.
+
 ```yaml
+runner:
+  defaultProvider: codex
+  providers:
+    codex: { bin: codex, authMode: subscription, defaultModel: gpt-5.6-terra, defaultEffort: medium }
 stages:                       # global defaults for every project
-  verify: { model: claude-opus-4-8 }
+  verify: { provider: codex, model: gpt-5.6-sol }
 projects:
   - name: my-app
     repoPath: /abs/path/to/my-app
@@ -318,7 +333,7 @@ Notes:
 
 | | owns |
 |---|---|
-| **Model** (`claude -p`) | every step's work, via its instruction + the project's tools/skills/CLI/MCP |
+| **Model** (`claude -p` or `codex exec`) | every step's work, via its instruction + the project's tools/skills/CLI/MCP |
 | **Harness** (the daemon) | scheduling, quota governor, routing, **git plumbing** (worktree/branch/cleanup), the off-limits guardrail, driving the loops by parsing verdicts, per-project keys, history, dashboard |
 
 ---
@@ -357,24 +372,20 @@ repos' empty branches are cleaned up, and if some ship and some fail the run is 
 
 ## Quota / the governor
 
-Anthropic doesn't publish real subscription token quotas, so the dashboard shows usage
-as a percentage of **tunable estimates** (`quota.sessionTokenBudget`,
-`quota.weeklyTokenBudget`) plus the **real** 5-hour / 7-day percentages read from Claude
-Code's status line. The governor tracks every stage's tokens, shows a rolling 5-hour and
-weekly meter, and **pauses the batch** when a meter nears its budget, resuming after
-reset.
+The dashboard shows only percentages and reset times reported by each provider. There
+are no manually configured token budgets. Claude usage comes from Claude Code's status
+line, and Codex usage comes from Codex's account rate-limit status. When a provider does
+not report a percentage, the dashboard shows **unknown** and allows work until the
+provider returns a confirmed quota-exhausted error. A limited provider waits on its own;
+other providers can keep working. Codex stages still record per-run tokens as history,
+but Codex CLI does not report a dollar cost, so cost stays at zero.
 
 ---
 
 ## TODO / Upcoming development
 
-- **Support other coding-agent harnesses (multi-CLI).** The model runner is already
-  abstracted behind a single interface — make it a pluggable **adapter** so ticketloop can
-  drive coding agents beyond Claude Code: **opencode** (model-agnostic, 75+ providers),
-  **Codex CLI**, and **Kimi Code** (Kimi K3; TS/npm, so the lowest-friction adapter). With
-  **per-step harness + model routing** you could run a cheap/open model on light steps
-  (`triage`, `plan`, `reproduce`) and a stronger one on `fix`/`review`. This turns
-  ticketloop into a harness-agnostic orchestrator and removes single-vendor lock-in.
+- **Support more coding-agent CLIs.** Claude Code and Codex CLI are supported. Future
+  adapters could add opencode or Kimi Code through the same provider interface.
 - **Step catalog** — curate and reuse your own steps across workflows and projects.
 - **Workflow manager** — compose your own *enforced* workflows instead of only the
   built-in pipeline. See [`docs/design-step-catalog-workflow-manager.md`](docs/design-step-catalog-workflow-manager.md).
@@ -389,7 +400,7 @@ reset.
 ## Status
 
 Runs end-to-end on real tickets (question, data export, change, and PR-refresh paths all
-verified). Runs on your machine; not intended for hosted/shared multi-user use on a
-subscription (that requires API keys per Anthropic's terms).
+verified). Runs on your machine; hosted or shared multi-user use should use the
+provider's supported automation authentication instead of copying a personal login.
 
 MIT.

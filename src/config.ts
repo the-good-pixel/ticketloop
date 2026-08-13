@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { parse, stringify } from 'yaml'
 import type {
   Config,
+  AgentProvider,
   ProjectConfig,
   StageConfig,
   StagesConfig,
@@ -13,22 +14,14 @@ import { STAGE_ORDER } from './types.js'
 import { findConfigPath, DATA_DIR } from './paths.js'
 
 const DEFAULTS: Config = {
-  version: 1,
+  version: 3,
   loop: { enabled: true, maxFixIterations: 3 },
-  quota: {
-    plan: 'max20x',
-    windowHours: 5,
-    // Rough display gauge only — Anthropic doesn't publish real quotas, and the
-    // token→quota mapping is unreliable. The real backstop is Claude's actual
-    // rate-limit signal (the loop pauses when Claude says stop). Tune to taste.
-    sessionTokenBudget: 6_000_000,
-    weeklyTokenBudget: 30_000_000,
-  },
-  auth: { mode: 'subscription' },
   runner: {
-    claudeBin: 'claude',
-    defaultModel: 'sonnet',
-    defaultEffort: 'medium',
+    defaultProvider: 'claude',
+    providers: {
+      claude: { bin: 'claude', authMode: 'subscription', defaultModel: 'sonnet', defaultEffort: 'medium' },
+      codex: { bin: 'codex', authMode: 'subscription', defaultModel: 'gpt-5.6-terra', defaultEffort: 'medium' },
+    },
     // The loop can't answer permission prompts headlessly, so it runs with
     // permissions skipped. Safety = worktree isolation + exclude guardrail +
     // PR review (never auto-merge), NOT prompts. See README "Safety model".
@@ -47,23 +40,23 @@ const DEFAULTS: Config = {
   },
   repo: { type: 'github', tokenEnv: 'GITHUB_TOKEN' },
   stages: {
-    triage: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
-    clarify: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
-    export: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
-    locate: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
-    reproduce: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Edit,Bash' },
-    plan: { enabled: true, model: 'sonnet', effort: 'medium', allowedTools: 'Read,Bash' },
-    prepare: { enabled: true, model: 'sonnet', effort: 'low', allowedTools: 'Read,Bash' },
-    fix: { enabled: true, model: 'sonnet', allowedTools: 'Read,Edit,Bash' },
-    verify: { enabled: true, model: 'sonnet', allowedTools: 'Read,Edit,Bash' },
-    review: { enabled: true, model: 'sonnet', skill: 'code-review', allowedTools: 'Read,Bash' },
-    ship: { enabled: true, model: 'sonnet', allowedTools: 'Read,Bash' },
+    triage: { enabled: true, effort: 'low', allowedTools: 'Read,Bash' },
+    clarify: { enabled: true, effort: 'medium', allowedTools: 'Read,Bash' },
+    export: { enabled: true, effort: 'medium', allowedTools: 'Read,Bash' },
+    locate: { enabled: true, effort: 'low', allowedTools: 'Read,Bash' },
+    reproduce: { enabled: true, effort: 'medium', allowedTools: 'Read,Edit,Bash' },
+    plan: { enabled: true, effort: 'medium', allowedTools: 'Read,Bash' },
+    prepare: { enabled: true, effort: 'low', allowedTools: 'Read,Bash' },
+    fix: { enabled: true, allowedTools: 'Read,Edit,Bash' },
+    verify: { enabled: true, allowedTools: 'Read,Edit,Bash' },
+    review: { enabled: true, skill: 'code-review', allowedTools: 'Read,Bash' },
+    ship: { enabled: true, allowedTools: 'Read,Bash' },
     // Opt-in dev steps: deploying/verifying in dev needs a real per-project
     // mechanism, so both are OFF by default. Turn them on (enabled: true) + give
     // an instruction to auto-deploy each shipped change to DEV and verify it there.
-    'deploy-dev': { enabled: false, model: 'sonnet', allowedTools: 'Read,Bash' },
-    'verify-dev': { enabled: false, model: 'sonnet', allowedTools: 'Read,Bash' },
-    comment: { enabled: true, model: 'sonnet', allowedTools: 'Read,Bash' },
+    'deploy-dev': { enabled: false, allowedTools: 'Read,Bash' },
+    'verify-dev': { enabled: false, allowedTools: 'Read,Bash' },
+    comment: { enabled: true, allowedTools: 'Read,Bash' },
   },
   projects: [],
 }
@@ -202,8 +195,10 @@ export function resolveStage(
     mergeStage(DEFAULTS.stages[stage], cfg.stages[stage]),
     projectStages?.[stage],
   )
-  if (merged.model === undefined) merged.model = cfg.runner.defaultModel
-  if (merged.effort === undefined) merged.effort = cfg.runner.defaultEffort
+  if (merged.provider === undefined) merged.provider = inferProvider(merged.model) || cfg.runner.defaultProvider
+  const provider = cfg.runner.providers[merged.provider]
+  if (merged.model === undefined) merged.model = provider.defaultModel
+  if (merged.effort === undefined) merged.effort = provider.defaultEffort
   if (merged.permissionMode === undefined) merged.permissionMode = cfg.runner.permissionMode
   if (merged.enabled === undefined) merged.enabled = true
   return merged
@@ -236,10 +231,59 @@ export function loadConfig(explicitPath?: string): {
 } {
   const path = findConfigPath(explicitPath)
   if (!path) return { config: structuredClone(DEFAULTS), path: null }
-  const raw = parse(readFileSync(path, 'utf8')) || {}
+  const raw = migrateConfig(parse(readFileSync(path, 'utf8')) || {})
   const config = deepMerge(structuredClone(DEFAULTS), raw)
   validate(config)
   return { config, path }
+}
+
+// Version 1 had one Claude-only runner. Normalize it to the provider map while
+// preserving every existing setting and keeping Claude as the default.
+function migrateConfig(raw: any): any {
+  if (!raw) return raw
+  let version = Number(raw.version || 1)
+  if (version < 2) {
+    const oldRunner = raw.runner || {}
+    const oldAuth = raw.auth?.mode || 'subscription'
+    delete raw.auth
+    raw.runner = {
+      defaultProvider: 'claude',
+      providers: {
+        claude: {
+          bin: oldRunner.claudeBin || 'claude',
+          authMode: oldAuth,
+          defaultModel: oldRunner.defaultModel || 'sonnet',
+          defaultEffort: oldRunner.defaultEffort || 'medium',
+        },
+      },
+      permissionMode: oldRunner.permissionMode,
+      maxTurns: oldRunner.maxTurns,
+      stageTimeoutSec: oldRunner.stageTimeoutSec,
+    }
+    const pinClaudeModels = (stages: any) => {
+      for (const stage of Object.values(stages || {}) as any[]) {
+        if (stage?.model && !stage.provider) stage.provider = 'claude'
+      }
+    }
+    pinClaudeModels(raw.stages)
+    for (const project of raw.projects || []) pinClaudeModels(project.stages)
+    version = 2
+  }
+  if (version < 3) {
+    // Provider token-to-quota mappings are not reliable. Quota decisions now
+    // use only percentages and reset times reported by each provider.
+    delete raw.quota
+    version = 3
+  }
+  raw.version = version
+  return raw
+}
+
+function inferProvider(model?: string): AgentProvider | undefined {
+  if (!model) return undefined
+  if (/^(claude-|opus$|sonnet$|haiku$|fable$)/i.test(model)) return 'claude'
+  if (/^(gpt-|codex-|o\d)/i.test(model)) return 'codex'
+  return undefined
 }
 
 /** Persist config back to YAML (used by the UI when editing projects). */
@@ -261,6 +305,7 @@ export function validateProject(p: ProjectConfig): void {
   if (p.maxParallel !== undefined && (!Number.isInteger(p.maxParallel) || p.maxParallel < 1))
     throw new Error('maxParallel must be a whole number ≥ 1')
   validateRepos(p)
+  validateStageProviders(p.stages, `project "${p.name}" stages`)
 }
 
 /** Multi-repo `repos` list: non-empty, unique valid names, each with a path. */
@@ -279,9 +324,17 @@ export function validateRepos(p: ProjectConfig): void {
 }
 
 function validate(cfg: Config): void {
-  if (cfg.auth.mode !== 'subscription' && cfg.auth.mode !== 'api') {
-    throw new Error(`auth.mode must be "subscription" or "api"`)
+  if (!['claude', 'codex'].includes(cfg.runner.defaultProvider)) {
+    throw new Error('runner.defaultProvider must be "claude" or "codex"')
   }
+  for (const provider of ['claude', 'codex'] as AgentProvider[]) {
+    const pc = cfg.runner.providers[provider]
+    if (!pc?.bin || !pc.defaultModel) throw new Error(`runner.providers.${provider} needs bin and defaultModel`)
+    if (!['subscription', 'api'].includes(pc.authMode)) {
+      throw new Error(`runner.providers.${provider}.authMode must be "subscription" or "api"`)
+    }
+  }
+  validateStageProviders(cfg.stages, 'stages')
   for (const p of cfg.projects) {
     if (!p.name) throw new Error('every project needs a name')
     if (!p.repoPath) throw new Error(`project "${p.name}" needs repoPath`)
@@ -292,6 +345,15 @@ function validate(cfg: Config): void {
       )
     }
     validateRepos(p)
+    validateStageProviders(p.stages, `project "${p.name}" stages`)
+  }
+}
+
+function validateStageProviders(stages: StagesConfig | undefined, label: string): void {
+  for (const [name, stage] of Object.entries(stages || {})) {
+    if (stage.provider && !['claude', 'codex'].includes(stage.provider)) {
+      throw new Error(`${label}.${name}.provider must be "claude" or "codex"`)
+    }
   }
 }
 
