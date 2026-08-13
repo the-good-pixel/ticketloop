@@ -16,6 +16,12 @@ export const CONTROL_FILE = join(DATA_DIR, 'control.json')
 // Provider-specific hold state, set only from provider status or a confirmed
 // quota-exhausted response.
 export const COOLDOWN_FILE = join(DATA_DIR, 'cooldown.json')
+// User-owned step catalog + workflows (YAML). Built-ins live in the code and
+// are never written here; this holds only what the user creates or imports.
+export const CATALOG_DIR = join(DATA_DIR, 'catalog')
+export const CATALOG_STEPS_DIR = join(CATALOG_DIR, 'steps')
+export const CATALOG_WORKFLOWS_DIR = join(CATALOG_DIR, 'workflows')
+export const CATALOG_IMPORTS_DIR = join(CATALOG_DIR, 'imports')
 // Last percentages and reset times read directly from provider status APIs.
 export const PROVIDER_QUOTA_FILE = join(DATA_DIR, 'provider-quota.json')
 

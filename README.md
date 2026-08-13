@@ -114,6 +114,11 @@ fully commented template. Full walkthrough (incl. running as a background servic
 | `ticketloop pause` | pause the running daemon at the next stage boundary (in-flight work is checkpointed) |
 | `ticketloop resume` | resume — paused/failed runs continue **from where they stopped**, not from scratch |
 | `ticketloop status` | print quota meters + recent runs (shows ⏸ when paused) |
+| `ticketloop steps [id@v]` | list the step catalog, or show one step in full |
+| `ticketloop workflows` | list workflows and which projects use them |
+| `ticketloop workflow show [ref] --project <name>` | print the compiled execution plan |
+| `ticketloop workflow validate` | check every project's workflow against its permissions |
+| `ticketloop catalog clone step\|workflow <id>@<v>` | copy a built-in into your catalog to edit |
 
 Flags: `--config <path>`, `--mock`/`--demo`, `--ticket <ID>`, `--port <n>`, `--debug`.
 

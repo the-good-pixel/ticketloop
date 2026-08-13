@@ -170,3 +170,22 @@ projects:
     exclude:                              # repo-PREFIXED in multi-repo mode
       - backend/migrations/**
       - "**/*auth*"
+
+# What ticketloop is ALLOWED to do. Authority is structured policy, not wording in
+# an instruction: a step that needs a permission you have not granted fails
+# validation before it ever runs. Set these per project to override.
+# `ticketloop workflow validate` tells you exactly what is missing.
+permissions:
+  createFeaturePr: true    # commit, push, open a PR (what the loop has always done)
+  mergeFeaturePr: false    # ticketloop never auto-merges unless you turn this on
+  createDevReleasePr: false
+  mergeDevReleasePr: false
+  deployDev: false         # required before the deploy-dev step can run
+  # deployProduction is never supported.
+
+# What the speed/quality tiers a step names actually mean for you. Steps ask for a
+# tier so they stay portable between people running different providers.
+# executionProfiles:
+#   fast:     { provider: claude, model: haiku,  effort: low }
+#   balanced: { provider: claude, model: sonnet, effort: medium }
+#   quality:  { provider: claude, model: opus,   effort: high }

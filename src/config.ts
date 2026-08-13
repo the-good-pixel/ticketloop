@@ -11,10 +11,12 @@ import type {
   TrackerConfig,
 } from './types.js'
 import { STAGE_ORDER } from './types.js'
+import type { Permission } from './catalog/types.js'
+import { ALL_PERMISSIONS } from './catalog/types.js'
 import { findConfigPath, DATA_DIR } from './paths.js'
 
 const DEFAULTS: Config = {
-  version: 3,
+  version: 4,
   loop: { enabled: true, maxFixIterations: 3 },
   runner: {
     defaultProvider: 'claude',
@@ -57,6 +59,19 @@ const DEFAULTS: Config = {
     'deploy-dev': { enabled: false, allowedTools: 'Read,Bash' },
     'verify-dev': { enabled: false, allowedTools: 'Read,Bash' },
     comment: { enabled: true, allowedTools: 'Read,Bash' },
+  },
+  // What ticketloop is allowed to DO, globally. Under the workflow manager,
+  // authority is structured policy rather than instruction wording: a step that
+  // needs an ungranted permission fails validation before it ever runs.
+  // Opening a feature PR is on by default because that is what the loop has
+  // always done; merging and deploying stay off until a project opts in.
+  permissions: {
+    createFeaturePr: true,
+    mergeFeaturePr: false,
+    createDevReleasePr: false,
+    mergeDevReleasePr: false,
+    deployDev: false,
+    deployProduction: false,
   },
   projects: [],
 }
@@ -269,6 +284,17 @@ function migrateConfig(raw: any): any {
     for (const project of raw.projects || []) pinClaudeModels(project.stages)
     version = 2
   }
+  if (version < 4) {
+    // The workflow manager makes authority explicit. Today "the deploy-dev
+    // stage is enabled" IS the grant, so carry that intent forward rather than
+    // silently breaking a project that already deploys to dev.
+    const deployEnabled = (stages: any) => stages?.['deploy-dev']?.enabled === true
+    if (deployEnabled(raw.stages)) raw.permissions = { ...(raw.permissions || {}), deployDev: true }
+    for (const project of raw.projects || []) {
+      if (deployEnabled(project.stages)) project.permissions = { ...(project.permissions || {}), deployDev: true }
+    }
+    version = 4
+  }
   if (version < 3) {
     // Provider token-to-quota mappings are not reliable. Quota decisions now
     // use only percentages and reset times reported by each provider.
@@ -306,6 +332,7 @@ export function validateProject(p: ProjectConfig): void {
     throw new Error('maxParallel must be a whole number ≥ 1')
   validateRepos(p)
   validateStageProviders(p.stages, `project "${p.name}" stages`)
+  validatePolicy(p.workflow, p.permissions, `project "${p.name}"`)
 }
 
 /** Multi-repo `repos` list: non-empty, unique valid names, each with a path. */
@@ -335,6 +362,7 @@ function validate(cfg: Config): void {
     }
   }
   validateStageProviders(cfg.stages, 'stages')
+  validatePolicy(undefined, cfg.permissions, 'global')
   for (const p of cfg.projects) {
     if (!p.name) throw new Error('every project needs a name')
     if (!p.repoPath) throw new Error(`project "${p.name}" needs repoPath`)
@@ -346,7 +374,24 @@ function validate(cfg: Config): void {
     }
     validateRepos(p)
     validateStageProviders(p.stages, `project "${p.name}" stages`)
+    validatePolicy(p.workflow, p.permissions, `project "${p.name}"`)
   }
+}
+
+/** A project's workflow reference must be pinned, and its permissions real. */
+function validatePolicy(
+  workflow: string | undefined,
+  permissions: Config['permissions'],
+  label: string,
+): void {
+  if (workflow && !/^[\w.-]+@\d+$/.test(workflow))
+    throw new Error(`${label} workflow must be "<id>@<version>" (an unpinned workflow can change under a running ticket)`)
+  for (const key of Object.keys(permissions || {})) {
+    if (!ALL_PERMISSIONS.includes(key as Permission))
+      throw new Error(`${label} has unknown permission "${key}" (valid: ${ALL_PERMISSIONS.join(', ')})`)
+  }
+  if ((permissions as any)?.deployProduction === true)
+    throw new Error(`${label} grants deployProduction — ticketloop never deploys production`)
 }
 
 function validateStageProviders(stages: StagesConfig | undefined, label: string): void {

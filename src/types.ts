@@ -4,6 +4,15 @@ export type AuthMode = 'subscription' | 'api'
 export type AgentProvider = 'claude' | 'codex'
 export type Autonomy = 'clarify' | 'propose' | 'gated-merge'
 
+// Catalog/workflow vocabulary lives in src/catalog/types.ts; config only needs
+// these three names, re-exported here so config consumers have one import.
+export type {
+  ExecutionProfile,
+  ExecutionProfileName,
+  Permission,
+} from './catalog/types.js'
+import type { ExecutionProfile, ExecutionProfileName, Permission } from './catalog/types.js'
+
 // The generic framework. Every stage is a MODEL invocation driven by an
 // instruction (a built-in default, overridable per project/stage). The harness
 // only sequences these, enforces guardrails, and records history — it does not
@@ -158,6 +167,17 @@ export interface ProjectConfig {
   // branch in repoPath instead.
   useWorktree?: boolean
   worktreeBase?: string | null // where to put worktrees (default ~/.ticketloop/worktrees)
+  // Which workflow this project runs, as "<id>@<version>". Omit for the
+  // built-in `standard` workflow (today's pipeline). A legacy `stages` block
+  // still applies on top, compiled into per-node overrides.
+  workflow?: string
+  // What this project is ALLOWED to do. Project policy is the hard runtime
+  // boundary: a workflow or an imported step can request authority, never grant
+  // it. Anything unset is denied.
+  permissions?: Partial<Record<Permission, boolean>>
+  // What this project's speed/quality tiers mean. Steps name a tier so they
+  // stay portable; the project decides the provider/model/effort behind it.
+  executionProfiles?: Partial<Record<ExecutionProfileName, ExecutionProfile>>
   // per-stage overrides for this project
   stages?: StagesConfig
   // MCP servers to expose to the selected coding agent during runs
@@ -180,6 +200,9 @@ export interface Config {
   repo: RepoConfig
   // global default stage config, overridden by project.stages
   stages: StagesConfig
+  // Global defaults for the two policy knobs a project can override.
+  executionProfiles?: Partial<Record<ExecutionProfileName, ExecutionProfile>>
+  permissions?: Partial<Record<Permission, boolean>>
   mcp?: Record<string, McpServerConfig>
   projects: ProjectConfig[]
 }
@@ -273,6 +296,9 @@ export type RunOutcome =
   | 'skipped' // did not qualify
   | 'blocked' // hit a safety guardrail
   | 'waiting-provider' // provider reported exhausted quota; resume when available
+  | 'waiting-approval' // a human must approve something (a deploy, a merge)
+  | 'waiting-deployment' // a deployment is queued/in flight; resume when it lands
+  | 'waiting-external' // some other external condition must change first
   | 'paused' // pause requested mid-run; checkpointed, resume to continue
   | 'failed'
   | 'running'

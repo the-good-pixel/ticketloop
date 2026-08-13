@@ -1,6 +1,8 @@
 # Design — Step Catalog & Workflow Manager
 
-> **Status: DESIGN ONLY — implementation-ready proposal.** This document describes how
+> **Status: PARTLY IMPLEMENTED.** Phases 1–3 are built (`src/catalog/`); the engine still
+> owns execution. See §18 for what exists and §19 for the migration position.
+> This document describes how
 > ticketloop can move from one hard-coded pipeline to reusable catalog steps and
 > user-defined workflows without weakening checkpoints, provider handling, git isolation,
 > tracker isolation, or deployment safety.
@@ -551,3 +553,60 @@ Implementation should not start until:
 4. Waiting and resume behavior is specified for ship, deployment, verification, and post.
 5. Golden traces cover the current routes and the MRM-187/MRM-190 failure cases.
 6. Phase 0 has a separately approved implementation plan.
+
+## 18. Implementation status
+
+| Phase | State |
+|---|---|
+| 0 — runtime semantics in the current engine | not started (needs its own approved plan) |
+| 1 — runtime types and policy | **done** — `src/catalog/types.ts`, plus `permissions` / `executionProfiles` / `workflow` on config |
+| 2 — catalog schemas, compiler, validator | **done** — `store.ts`, `compile.ts`, `validate.ts`, and the `steps` / `workflows` / `workflow show` / `workflow validate` / `catalog clone` CLI |
+| 3 — standard workflow expressed as data | **done** — `builtin-steps.ts` (14 steps) + `builtin-workflows.ts` (`standard@1`), compiling and validating clean |
+| 4 — interpreter behind a feature flag | not started |
+| 5–7 — catalog CLI polish, builder UI, sharing | not started |
+
+Nothing in `src/catalog/` runs during a real ticket yet. `engine.ts` is untouched, so the
+built catalog is inspectable and testable without any risk to live runs.
+
+Two deliberate differences from today are already encoded in `standard@1`, per §12:
+
+- A failed or pending **deploy-dev / verify-dev** stops or suspends instead of routing
+  back to a clean `fix`. The PR is already open; a queued deployment is not a code defect.
+- **Final reporting runs on waiting and failure**, not only on success, so a ticket is
+  never left silent. The question path marks its terminal `reported` so `clarify` and the
+  `finally` comment can never double-post.
+
+Execution profiles deliberately resolve to today's effort levels (`quality` → `medium`)
+so a compiled `standard@1` is a faithful trace of current behavior. Raise `quality` per
+project once the interpreter lands and trace parity has been checked.
+
+## 19. Migration position
+
+The seeding answer: **what ticketloop does today IS the catalog.** Built-in steps import
+their instruction text from `DEFAULT_INSTRUCTIONS` in `config.ts`, so the shipped catalog
+and the running engine cannot drift, and a new user starts from a working pipeline rather
+than a blank one.
+
+What needs migrating, and what does not:
+
+- **Config** — automatic (`version: 3 → 4`). `permissions.createFeaturePr` defaults to
+  true because opening a PR is what the loop has always done. A project whose `stages`
+  already enables `deploy-dev` is granted `deployDev: true`, so an existing deploying
+  project keeps working instead of failing validation on an authority it implicitly had.
+  Merge and production authority stay denied.
+- **`stages` blocks** — no migration. They compile to node overrides on every node that
+  uses that step, on every branch path, which is exactly what they meant when the pipeline
+  was hard-coded. They stay supported through a deprecation window.
+- **Run history (`runs.jsonl`)** — no migration. `StageRecord.stage` stays a stage name
+  while the engine owns execution. When the interpreter lands, `StageRecord` gains an
+  optional `nodeId`; old records simply lack it and the dashboard falls back to the stage
+  name.
+- **Checkpoints** — no migration, and none is wanted. Keys move from `fix#2` to
+  `standard@1/change-implement/2`. An in-flight checkpoint written by the old engine will
+  not match the new keys, so it replays nothing and the ticket re-runs from the start.
+  That is the correct behavior for a cutover: cut over when no ticket is mid-run, or
+  accept one re-run per in-flight ticket. Do **not** write a key translator — it would
+  have to guess which branch path a stage name belonged to.
+- **User catalog files** — nothing exists yet, so there is nothing to migrate. Built-in
+  versions are immutable and a user file that shadows one is rejected at load time, which
+  keeps every run snapshot meaningful for as long as the run lives.

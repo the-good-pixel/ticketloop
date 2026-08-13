@@ -10,6 +10,14 @@ import { makeTracker } from './adapters/tracker/tracker.js'
 import { resolveTrackerKey } from './credentials.js'
 import { isPaused, setPaused, setTicketPaused } from './daemon/control.js'
 import { readJson } from './store.js'
+import { loadCatalog } from './catalog/store.js'
+import {
+  cloneCmd,
+  stepsCmd,
+  workflowShowCmd,
+  workflowValidateCmd,
+  workflowsCmd,
+} from './commands/catalog.js'
 import { DAEMON_STATE } from './paths.js'
 
 interface Flags {
@@ -17,6 +25,7 @@ interface Flags {
   mock: boolean
   ticket?: string
   port?: number
+  project?: string
   positional: string[]
 }
 
@@ -29,6 +38,7 @@ function parse(argv: string[]): { cmd: string; flags: Flags } {
     else if (a === '--config') flags.config = rest[++i]
     else if (a === '--ticket') flags.ticket = rest[++i]
     else if (a === '--port') flags.port = Number(rest[++i])
+    else if (a === '--project') flags.project = rest[++i]
     else if (a === '--debug') log.setLevel('debug')
     else if (!a.startsWith('--')) flags.positional.push(a)
   }
@@ -47,12 +57,18 @@ Usage:
   ticketloop pause [ticket]       Pause the whole loop, or one ticket, at the next stage boundary
   ticketloop resume [ticket]      Resume the loop (or one ticket) from where it stopped
   ticketloop status               Print quota meters + recent runs
+  ticketloop steps [<id>@<v>]     List the step catalog, or show one step
+  ticketloop workflows            List workflows and which projects use them
+  ticketloop workflow show [ref]  Print the compiled execution plan (--project <name>)
+  ticketloop workflow validate    Validate every project's workflow against its policy
+  ticketloop catalog clone step|workflow <id>@<v> [new-id]
 
 Flags:
   --config <path>   Use a specific config file
   --mock / --demo   Use built-in demo tickets and a simulated agent (no quota spent)
   --ticket <ID>     (with run) process a single ticket by identifier/id
   --port <n>        Override dashboard port
+  --project <name>  (with workflow show) compile against that project's policy
   --debug           Verbose logging
 `
 
@@ -149,6 +165,27 @@ async function main() {
   }
 
   switch (cmd) {
+    case 'steps':
+      return stepsCmd(loadCatalog(), flags.positional[0])
+    case 'workflows':
+      return workflowsCmd(loadCatalog(), config)
+    case 'workflow': {
+      const sub = flags.positional[0] || 'show'
+      const cat = loadCatalog()
+      if (sub === 'validate') return workflowValidateCmd(cat, config, flags.positional[1])
+      if (sub === 'show') return workflowShowCmd(cat, config, flags.positional[1], flags.project)
+      log.error('usage: ticketloop workflow show|validate [<id>@<version>]')
+      process.exit(1)
+      return
+    }
+    case 'catalog': {
+      const sub = flags.positional[0]
+      if (sub === 'clone')
+        return cloneCmd(loadCatalog(), flags.positional[1], flags.positional[2], flags.positional[3])
+      log.error('usage: ticketloop catalog clone step|workflow <id>@<version> [new-id]')
+      process.exit(1)
+      return
+    }
     case 'doctor':
       return doctorCmd(config, path)
     case 'status':

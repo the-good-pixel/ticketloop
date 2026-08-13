@@ -67,6 +67,14 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
   github.ts` — `Repo` interface (`GitRepo` + `MockRepo`): worktrees, branches, diffs, gh.
 - `src/store.ts` — per-run JSON files + usage log (atomic writes). `src/governor/` —
   quota meters. `src/web/` — dashboard (`app.js` is one file; served static).
+- `src/catalog/` — **the step catalog + workflow manager** (the pipeline as DATA).
+  `types.ts` = steps, contracts, capabilities, transitions, workflows, artifacts.
+  `builtin-steps.ts` / `builtin-workflows.ts` = the seed — today's 14 stages and today's
+  pipeline, expressed as catalog data (instruction text is imported from `config.ts`, so
+  there is one source of truth). `store.ts` = YAML load/save + immutable versions.
+  `compile.ts` = workflow + project policy → `ExecutionPlan`. `validate.ts` = the
+  diagnostics that block an unsafe plan. **Not wired into the engine yet** — the
+  interpreter is the next phase; `engine.ts` still owns execution.
 
 ## Conventions & invariants (don't break these)
 
@@ -94,6 +102,11 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
   density. Prefer clarity over cleverness; keep files focused.
 
 ## Adding a new stage (checklist)
+
+While the engine still owns execution, a new stage must be added in BOTH places: the
+stage list below, and the catalog (`src/catalog/builtin-steps.ts` + a node in
+`builtin-workflows.ts`). Run `npx tsx src/cli.ts workflow validate` after.
+
 
 1. `types.ts`: add to `StageName` **and** `STAGE_ORDER` (in pipeline order).
 2. `config.ts`: add to `DEFAULTS.stages` (set `enabled: false` if opt-in) and
