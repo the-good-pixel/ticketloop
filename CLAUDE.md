@@ -86,6 +86,11 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
   permissions, repo mutation) from the bundle's own declarations **plus the local steps a
   bundled workflow references**. Checksum mismatch, shadowing a built-in, and a workflow
   whose steps are missing are all hard refusals. Importing never grants authority.
+- `src/web/wfdiagram.js` — lays out a compiled plan tree and draws it as SVG. Two passes
+  (measure bottom-up, place top-down); no graph library, because a workflow is always a
+  tree of sequence/branch/loop, never a free graph. Backward flow (a gate or a failed ship
+  routing into a repair loop) is drawn dashed and amber/red so it reads as the exceptional
+  path. Branch cases fold; the diagram fits to the pane on first render.
 - `src/web/catalog.js` — the Workflows view (catalog browser + workflow builder + sharing).
   Kept out of `app.js`. It re-compiles via `/api/catalog/preview` on every edit, so what is
   shown is the plan that would actually run. `app.js` loads first, so the view also calls

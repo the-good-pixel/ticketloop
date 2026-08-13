@@ -565,7 +565,7 @@ Implementation should not start until:
 | 3 — standard workflow expressed as data | **done** — `builtin-steps.ts` (14 steps) + `builtin-workflows.ts` (`standard@1`), compiling and validating clean |
 | 4 — interpreter behind a feature flag | **done** — `src/loop/interpreter.ts`, opt-in per project via `engine: workflow` |
 | 5 — catalog CLI and dashboard | **done** — Workflows view: browse steps/workflows, compiled-plan preview per project, effective profile + required permissions, built-ins protected |
-| 6 — workflow builder | **done** — clone to draft, edit nodes (step, enabled, transitions, instruction) and loop bounds, continuous validation, save as a new version, assign to a project |
+| 6 — workflow builder | **done** — SVG diagram of the compiled plan (foldable branch cases, fit-to-pane zoom); clone to draft, then edit a node's step/transitions/instruction, a loop's bounds, and the structure itself (move, insert, remove, add gate); continuous validation; save as a new version; assign to a project |
 | 7 — sharing | **done** — checksummed bundle export/import with a trust report; import is inspect-then-accept |
 
 The interpreter is opt-in: a project sets `engine: workflow` to run its assigned workflow
@@ -655,6 +655,6 @@ more than the project allows.
 - **`revalidate` is currently a re-run.** The `Repo` interface has no PR-state read, so a
   resumed ship re-runs the step (its instruction already handles "PR exists → push to it")
   instead of querying GitHub. Adding `prState()` to `Repo` would close the gap.
-- **The builder edits nodes, not structure.** You can change a node's step, transitions,
-  instruction and a loop's bounds, but adding/removing/reordering nodes and branch cases
-  still means editing the YAML under `~/.ticketloop/catalog/`.
+- **Branch cases are not editable in the builder.** Nodes can be moved, inserted and
+  removed, and loops can gain gates, but adding or renaming a branch case still means
+  editing the YAML under `~/.ticketloop/catalog/`.

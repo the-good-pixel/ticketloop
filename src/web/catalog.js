@@ -5,6 +5,8 @@
 // re-compiles on EVERY edit, so what you see is always the plan that would
 // actually run, not the draft you hope it is.
 
+import { renderDiagram, findNode as findTreeNode } from './wfdiagram.js';
+
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, cls, text) => {
   const n = document.createElement(tag);
@@ -31,6 +33,8 @@ const state = {
   draftBase: null,     // the ref it was cloned from
   project: '',         // compile against this project's policy
   preview: null,
+  collapsed: new Set(), // branch cases folded away, keyed "<branchId>:<case>"
+  zoom: null,           // null = fit to the pane on the next render
 };
 
 // ---- loading ---------------------------------------------------------------
@@ -113,6 +117,9 @@ function select(sel) {
   state.draft = null;
   state.draftBase = null;
   state.selected = sel;
+  state.preview = null; // a different workflow folds fresh
+  state.collapsed.clear();
+  state.zoom = null;
   renderRail();
   renderMain();
 }
@@ -210,6 +217,7 @@ function resumeExplain(policy) {
 
 async function renderWorkflow() {
   const ref = state.draft ? null : state.selected.ref;
+  const firstRender = !state.preview;
   const meta = state.draft || state.catalog.workflows.find((w) => w.ref === ref);
   $('#wfTitle').textContent = meta.name;
   $('#wfSubtitle').textContent = state.draft
@@ -224,6 +232,10 @@ async function renderWorkflow() {
   }).catch((e) => ({ error: e.message }));
   state.preview = preview;
 
+  // Open folded. A workflow with five branch cases side by side is wider than
+  // any screen; the shape is what matters first, the detail on demand.
+  if (firstRender && !state.collapsed.size) collapseEveryCase(preview.tree);
+
   renderDiagnostics(preview);
   const body = $('#wfBody');
   body.replaceChildren();
@@ -233,32 +245,63 @@ async function renderWorkflow() {
   }
   if (meta.description) body.append(el('p', 'wf-desc', meta.description));
 
-  // --- the compiled trace: what would actually run ---
+  // --- the diagram: what would actually run ---
   const head = el('div', 'section-head');
   head.append(el('h3', 'wf-h3', 'Compiled plan'));
-  head.append(el('span', 'muted', 'digest ' + preview.digest));
+  const tools = el('div', 'wf-diagram-tools');
+  const zoomBtn = (label, delta) => {
+    const b = el('button', 'btn btn-ghost btn-sm', label);
+    b.addEventListener('click', () => {
+      state.zoom = Math.min(1.6, Math.max(0.45, Math.round(((state.zoom || 1) + delta) * 20) / 20));
+      renderWorkflow();
+    });
+    return b;
+  };
+  tools.append(zoomBtn('−', -0.15));
+  const pct = el('span', 'muted', state.zoom ? Math.round(state.zoom * 100) + '%' : 'fit');
+  tools.append(pct);
+  tools.append(zoomBtn('+', 0.15));
+  const fitBtn = el('button', 'btn btn-ghost btn-sm', 'Fit');
+  fitBtn.addEventListener('click', () => {
+    state.zoom = null;
+    renderWorkflow();
+  });
+  tools.append(fitBtn);
+  const foldAll = el('button', 'btn btn-ghost btn-sm', state.collapsed.size ? 'Expand all' : 'Collapse branches');
+  foldAll.addEventListener('click', () => {
+    if (state.collapsed.size) state.collapsed.clear();
+    else collapseEveryCase(preview.tree);
+    state.zoom = null; // the natural width just changed — refit
+    renderWorkflow();
+  });
+  tools.append(foldAll);
+  tools.append(el('span', 'muted', 'digest ' + preview.digest));
+  head.append(tools);
   body.append(head);
 
-  const trace = el('ol', 'wf-trace');
-  for (const row of preview.trace) {
-    const li = el('li', 'wf-row wf-row-' + row.kind);
-    li.style.paddingLeft = 8 + row.depth * 18 + 'px';
-    if (!row.enabled) li.classList.add('is-off');
-    const top = el('div', 'wf-row-top');
-    top.append(el('span', 'wf-row-label', row.label));
-    if (!row.enabled) top.append(el('span', 'tag', 'disabled'));
-    for (const b of row.badges || []) top.append(el('span', 'tag tag-override', b));
-    li.append(top);
-    if (row.detail) li.append(el('div', 'wf-row-detail', row.detail));
-    for (const p of row.problems) li.append(el('div', 'wf-row-problem', p));
-    if (state.draft && (row.kind === 'step' || row.kind === 'loop')) {
-      li.classList.add('is-editable');
-      li.title = 'Click to edit this node';
-      li.addEventListener('click', () => openNodeEditor(row.id, row.kind));
-    }
-    trace.append(li);
+  if (state.draft) {
+    body.append(el('p', 'muted',
+      'Click a step to edit it, a loop to change its bounds, or a case label to fold it away. ' +
+      'Use the buttons on a selected step to insert, move or remove it.'));
   }
-  body.append(trace);
+
+  const canvas = el('div', 'wf-canvas');
+  body.append(canvas);
+  renderDiagram(canvas, preview.tree, {
+    editable: !!state.draft,
+    collapsed: state.collapsed,
+    zoom: state.zoom,
+    onFit: (z) => { pct.textContent = Math.round(z * 100) + '%'; },
+    onNode: (id) => (state.draft ? openNodeEditor(id, 'step') : showNodeInfo(id)),
+    onLoop: (id) => (state.draft ? openNodeEditor(id, 'loop') : showNodeInfo(id)),
+    onCase: (key) => {
+      if (state.collapsed.has(key)) state.collapsed.delete(key);
+      else state.collapsed.add(key);
+      state.zoom = null;
+      renderWorkflow();
+    },
+  });
+  body.append(legend());
 
   // --- finally + outcomes: the parts people forget until a ticket goes silent ---
   if (preview.finallyNodes.length) {
@@ -282,6 +325,55 @@ async function renderWorkflow() {
   body.append(el('p', 'muted', 'Permissions granted here: ' + (granted.join(', ') || 'none')));
 }
 
+function collapseEveryCase(tree) {
+  for (const p of tree) {
+    if (p.kind === 'branch') {
+      for (const c of p.cases) {
+        state.collapsed.add(p.id + ':' + c.name);
+        collapseEveryCase(c.phases);
+      }
+    }
+    if (p.kind === 'loop') collapseEveryCase([p.repair, ...p.gates]);
+  }
+}
+
+function legend() {
+  const box = el('div', 'wf-legend');
+  const item = (cls, text) => {
+    const s = el('span', 'wf-legend-item');
+    s.append(el('span', 'wf-swatch ' + cls));
+    s.append(el('span', null, text));
+    box.append(s);
+  };
+  item('wd-sw-verdict', 'gate — can send the run back, wait, or stop it');
+  item('wd-sw-route', 'routing — its output picks a branch');
+  item('wd-sw-post', 'replies on the ticket');
+  item('wd-sw-text', 'does work, always continues');
+  item('wd-sw-effect', 'reaches outside the worktree');
+  return box;
+}
+
+/** Read-only inspector for a node in a workflow you are not editing. */
+function showNodeInfo(id) {
+  const n = findTreeNode(state.preview.tree, id);
+  if (!n) return;
+  const lines = [];
+  if (n.kind === 'step') {
+    lines.push(`${n.name} — ${n.ref}`, n.detail);
+    lines.push('results: ' + Object.entries(n.transitions).map(([r, t]) => `${r} → ${t}`).join(', '));
+    if (n.effects.length) lines.push('external effects: ' + n.effects.join(', '));
+    if (n.devOnly) lines.push('DEV only — hard-pinned');
+    if (n.perRepo !== 'once') lines.push(`runs once per ${n.perRepo} repo`);
+    for (const b of n.badges) lines.push(b);
+  } else if (n.kind === 'loop') {
+    lines.push(`repair loop — up to ${n.maxIterations} attempts, then ${n.noProgress === 'stop' ? 'stop' : 'carry on'}`);
+  } else if (n.kind === 'stop') {
+    lines.push(`ends the run as ${n.outcome || n.terminal}`, n.reported ? 'the ticket was already replied to here' : 'the final report still runs');
+  }
+  for (const p of n.problems || []) lines.push(p);
+  toast(lines.filter(Boolean).join(' · '));
+}
+
 function renderDiagnostics(preview) {
   const box = $('#wfDiagnostics');
   box.replaceChildren();
@@ -301,20 +393,24 @@ function renderDiagnostics(preview) {
 
 // ---- builder: node editing --------------------------------------------------
 
-/** Walk the draft's phase tree to find a node and its parent list. */
-function findNode(id, phases, parent) {
+/**
+ * Walk the draft's phase tree for a node. Returns the REAL array it lives in
+ * and its index, so structural edits mutate the draft rather than a copy.
+ * `slot` says what the node is: a phase in a sequence, a loop's gate, or the
+ * loop's repair step (which cannot be moved or removed — it is the loop's
+ * entry point).
+ */
+function findNode(id, phases) {
   phases = phases || state.draft.phases;
   for (let i = 0; i < phases.length; i++) {
     const p = phases[i];
-    if (p.id === id && (p.step || p.stop || p.branch)) return { node: p, list: phases, index: i };
+    if (p.id === id && (p.step || p.stop || p.branch)) return { node: p, list: phases, index: i, slot: 'phase' };
     if (p.loop) {
-      if (p.loop.id === id) return { node: p, list: phases, index: i, isLoop: true };
-      const inner = [p.loop.repair, ...(p.loop.gates || [])];
-      for (let j = 0; j < inner.length; j++) {
-        if (inner[j].id === id) {
-          return { node: inner[j], list: j === 0 ? [p.loop.repair] : p.loop.gates, index: j === 0 ? 0 : j - 1, loop: p.loop };
-        }
-      }
+      if (p.loop.id === id) return { node: p, list: phases, index: i, slot: 'phase', isLoop: true };
+      if (p.loop.repair && p.loop.repair.id === id)
+        return { node: p.loop.repair, list: null, index: 0, slot: 'repair', loop: p.loop };
+      const gi = (p.loop.gates || []).findIndex((g) => g.id === id);
+      if (gi >= 0) return { node: p.loop.gates[gi], list: p.loop.gates, index: gi, slot: 'gate', loop: p.loop };
     }
     if (p.branch) {
       for (const list of Object.values(p.branch.cases || {})) {
@@ -330,11 +426,22 @@ function findNode(id, phases, parent) {
   return null;
 }
 
+/** A node id that is not already taken anywhere in the draft. */
+function freeNodeId(base) {
+  let n = base;
+  let i = 2;
+  while (findNode(n)) n = `${base}-${i++}`;
+  return n;
+}
+
 const RESULTS = ['pass', 'fail', 'wait', 'skip'];
 
 function openNodeEditor(id, kind) {
   const found = findNode(id);
-  if (!found) return;
+  if (!found) {
+    showError(`"${id}" is part of the compiled plan but not editable here.`);
+    return;
+  }
   const form = $('#nodeForm');
   form.replaceChildren();
   $('#nodeTitle').textContent = 'Edit ' + id;
@@ -363,6 +470,22 @@ function openNodeEditor(id, kind) {
     sel.append(new Option('stop the run', 'stop', false, loop.noProgress === 'stop'));
     sel.append(new Option('carry on with what we have', 'exit-loop', false, loop.noProgress === 'exit-loop'));
     np.append(sel);
+
+    const st = field('Structure', 'Gates run in order after the repair step.');
+    const row = el('div', 'struct-row');
+    const addGate = el('button', 'btn btn-ghost btn-sm', '+ Add gate');
+    addGate.type = 'button';
+    addGate.addEventListener('click', () => {
+      const ref = insertPicker();
+      if (!ref) return;
+      const step = findStep(ref);
+      if (step.contract !== 'verdict') return showError(`"${ref}" returns no verdict, so it cannot gate a loop.`);
+      loop.gates.push({ id: freeNodeId(step.id), step: ref, on: { pass: 'exit-loop', fail: 'repair', wait: 'suspend' } });
+      closeNodeEditor();
+      renderWorkflow();
+    });
+    row.append(addGate);
+    st.append(row);
 
     form.onsubmit = (e) => {
       e.preventDefault();
@@ -415,6 +538,47 @@ function openNodeEditor(id, kind) {
     modeSel.append(new Option('append to the step instruction', 'append', false, node.overrides?.instructionMode === 'append'));
     insWrap.append(modeSel);
 
+    // --- structure ---------------------------------------------------------
+    if (found.slot !== 'repair') {
+      const st = field('Structure',
+        found.slot === 'gate'
+          ? 'Gates run in order; the first one that fails short-circuits the rest.'
+          : 'Where this step sits in the sequence.');
+      const row = el('div', 'struct-row');
+      const act = (label, title, fn) => {
+        const b = el('button', 'btn btn-ghost btn-sm', label);
+        b.type = 'button';
+        b.title = title;
+        b.addEventListener('click', () => { fn(); closeNodeEditor(); renderWorkflow(); });
+        row.append(b);
+      };
+      const list = found.list;
+      if (found.index > 0) act('↑ Move up', 'Run this one earlier', () => {
+        [list[found.index - 1], list[found.index]] = [list[found.index], list[found.index - 1]];
+      });
+      if (found.index < list.length - 1) act('↓ Move down', 'Run this one later', () => {
+        [list[found.index + 1], list[found.index]] = [list[found.index], list[found.index + 1]];
+      });
+      act('+ Insert step after', 'Add another step directly after this one', () => {
+        const ref = insertPicker();
+        if (!ref) return;
+        const step = findStep(ref);
+        list.splice(found.index + 1, 0, {
+          id: freeNodeId(step.id),
+          step: ref,
+          // A gate must always say what a failure means; anything else just
+          // carries on. Never leave a new node with an undefined failure path.
+          on: step.contract === 'verdict'
+            ? { pass: 'next', fail: found.slot === 'gate' ? 'repair' : 'stop' }
+            : { pass: 'next' },
+        });
+      });
+      act('✕ Remove', 'Delete this node from the workflow', () => {
+        if (confirm(`Remove "${node.id}" from the workflow?`)) list.splice(found.index, 1);
+      });
+      st.append(row);
+    }
+
     form.onsubmit = (e) => {
       e.preventDefault();
       node.step = stepSel.value;
@@ -440,6 +604,19 @@ function openNodeEditor(id, kind) {
     };
   }
   $('#nodeOverlay').hidden = false;
+}
+
+/** Minimal step chooser for "insert after". Returns a ref, or null if cancelled. */
+function insertPicker() {
+  const options = state.catalog.steps.map((s) => `${s.ref}  —  ${s.name}`).join('\n');
+  const answer = prompt(`Which step? Type its reference exactly.\n\n${options}`, 'plan@1');
+  if (!answer) return null;
+  const ref = answer.trim().split(/\s/)[0];
+  if (!findStep(ref)) {
+    showError(`No step "${ref}" in the catalog.`);
+    return null;
+  }
+  return ref;
 }
 
 function closeNodeEditor() {

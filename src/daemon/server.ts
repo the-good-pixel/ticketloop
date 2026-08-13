@@ -250,7 +250,7 @@ function previewPlan(cfg: Config, b: { workflow?: Workflow; ref?: string; projec
       outcomes: plan.outcomes,
       // A flat, display-ready trace. The tree lives in the UI's own copy of the
       // draft; this is the compiled truth to show beside it.
-      trace: flattenPlan(plan),
+      tree: planTree(plan),
       finallyNodes: plan.finallyNodes.map((f) => ({
         id: f.id,
         ref: f.ref,
@@ -263,17 +263,57 @@ function previewPlan(cfg: Config, b: { workflow?: Workflow; ref?: string; projec
   }
 }
 
-interface TraceRow {
-  depth: number
-  kind: string
+/**
+ * The compiled plan as a TREE, not a flat list. The dashboard draws a diagram
+ * from it, so the nesting (branch cases, loop bodies) has to survive the trip —
+ * a depth-indented list is exactly what people could not read.
+ */
+type PlanNode = StepNodeView | StopNodeView | BranchNodeView | LoopNodeView
+
+interface StepNodeView {
+  kind: 'step'
   id: string
-  label: string
-  detail: string
+  ref: string
+  name: string
+  contract: string
+  effects: string[]
+  devOnly: boolean
+  mutates: boolean
+  perRepo: string
   enabled: boolean
-  /** Ways this node departs from its step's defaults — an overridden node must
-   *  never look identical to a stock one, or "why is this behaving oddly?" has
-   *  no visible answer. Covers legacy `stages` overrides too. */
+  detail: string
+  transitions: Record<string, string>
   badges: string[]
+  problems: string[]
+}
+
+interface StopNodeView {
+  kind: 'stop'
+  id: string
+  terminal: string
+  outcome?: string
+  reported: boolean
+  note?: string
+  problems: string[]
+}
+
+interface BranchNodeView {
+  kind: 'branch'
+  id: string
+  on: { nodeId: string; field: string }
+  cases: { name: string; phases: PlanNode[] }[]
+  /** A branch whose default is a transition rather than its own phase list. */
+  defaultTransition?: string
+  problems: string[]
+}
+
+interface LoopNodeView {
+  kind: 'loop'
+  id: string
+  maxIterations: number
+  noProgress: string
+  repair: PlanNode
+  gates: PlanNode[]
   problems: string[]
 }
 
@@ -290,75 +330,64 @@ function badgesFor(node: any): string[] {
   return out
 }
 
-function flattenPlan(plan: ReturnType<typeof compileWorkflow>): TraceRow[] {
-  const rows: TraceRow[] = []
+function planTree(plan: ReturnType<typeof compileWorkflow>): PlanNode[] {
   const problemsFor = (id: string) =>
     plan.diagnostics.filter((d) => d.nodeId === id).map((d) => `${d.level}: ${d.message}`)
-  const walk = (phases: any[], depth: number) => {
-    for (const p of phases) {
-      if (p.kind === 'step') {
-        const s = p.settings
-        rows.push({
-          depth,
-          kind: 'step',
-          id: p.id,
-          label: `${p.id} (${p.ref})`,
-          detail: [s.profile, s.effort, s.model, s.skill ? '+skill:' + s.skill : '', p.step.contract]
-            .filter(Boolean)
-            .join(' · ') +
-            ' — ' +
-            Object.entries(p.transitions).map(([r, t]) => `${r}→${t}`).join(' '),
-          enabled: s.enabled,
-          badges: badgesFor(p),
-          problems: problemsFor(p.id),
-        })
-      } else if (p.kind === 'stop') {
-        rows.push({
-          depth,
-          kind: 'stop',
-          id: p.id,
-          label: `${p.id} → ${p.terminal}`,
-          detail: (p.outcome ? `outcome: ${p.outcome}` : '') + (p.reported ? ' · already reported' : ''),
-          enabled: true,
-          badges: [],
-          problems: problemsFor(p.id),
-        })
-      } else if (p.kind === 'branch') {
-        rows.push({
-          depth,
-          kind: 'branch',
-          id: p.id,
-          label: `${p.id} — branch on ${p.on.nodeId}.${p.on.field}`,
-          detail: Object.keys(p.cases).join(' | '),
-          enabled: true,
-          badges: [],
-          problems: problemsFor(p.id),
-        })
-        for (const [name, list] of Object.entries(p.cases)) {
-          rows.push({ depth: depth + 1, kind: 'case', id: `${p.id}:${name}`, label: `case ${name}`, detail: '', enabled: true, badges: [], problems: [] })
-          walk(list as any[], depth + 2)
-        }
-        if (Array.isArray(p.default)) {
-          rows.push({ depth: depth + 1, kind: 'case', id: `${p.id}:default`, label: 'default', detail: '', enabled: true, badges: [], problems: [] })
-          walk(p.default, depth + 2)
-        }
-      } else if (p.kind === 'loop') {
-        rows.push({
-          depth,
-          kind: 'loop',
-          id: p.id,
-          label: `${p.id} — repair loop`,
-          detail: `max ${p.maxIterations} · no progress: ${p.noProgress}`,
-          enabled: true,
-          badges: [],
-          problems: problemsFor(p.id),
-        })
-        walk([p.repair, ...p.gates], depth + 1)
+
+  const one = (p: any): PlanNode => {
+    if (p.kind === 'step') {
+      const s = p.settings
+      return {
+        kind: 'step',
+        id: p.id,
+        ref: p.ref,
+        name: p.step.name,
+        contract: p.step.contract,
+        effects: p.step.capabilities.externalEffects,
+        devOnly: p.step.capabilities.devOnly,
+        mutates: p.step.capabilities.mutatesRepo,
+        perRepo: p.step.capabilities.perRepo,
+        enabled: s.enabled,
+        detail: [s.profile, s.effort, s.model, s.skill ? '+skill:' + s.skill : ''].filter(Boolean).join(' · '),
+        transitions: p.transitions,
+        badges: badgesFor(p),
+        problems: problemsFor(p.id),
       }
     }
+    if (p.kind === 'stop') {
+      return {
+        kind: 'stop',
+        id: p.id,
+        terminal: p.terminal,
+        outcome: p.outcome,
+        reported: p.reported,
+        note: p.note,
+        problems: problemsFor(p.id),
+      }
+    }
+    if (p.kind === 'branch') {
+      const cases = Object.entries(p.cases).map(([name, list]) => ({ name, phases: (list as any[]).map(one) }))
+      if (Array.isArray(p.default)) cases.push({ name: 'default', phases: p.default.map(one) })
+      return {
+        kind: 'branch',
+        id: p.id,
+        on: p.on,
+        cases,
+        defaultTransition: Array.isArray(p.default) ? undefined : p.default,
+        problems: problemsFor(p.id),
+      }
+    }
+    return {
+      kind: 'loop',
+      id: p.id,
+      maxIterations: p.maxIterations,
+      noProgress: p.noProgress,
+      repair: one(p.repair),
+      gates: p.gates.map(one),
+      problems: problemsFor(p.id),
+    }
   }
-  walk(plan.phases, 0)
-  return rows
+  return plan.phases.map(one)
 }
 
 export function startServer(cfg: Config, hooks: ServerHooks): { close: () => void } {

@@ -2296,3 +2296,98 @@ select.input {
 .trust-effect { color: var(--amber); }
 
 .tag-override { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+/* ===== Workflow diagram ===== */
+
+.wf-diagram-tools { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+
+.wf-canvas {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  overflow: auto;
+  max-height: 72vh;
+  padding: 4px 4px 14px;
+}
+
+.wd { display: block; }
+
+/* --- nodes --- */
+.wd-box {
+  fill: var(--bg-elev);
+  stroke: var(--border-strong);
+  stroke-width: 1;
+}
+
+.wd-box.has-error { stroke: var(--red); stroke-width: 1.6; }
+.wd-node.is-off { opacity: 0.45; }
+.wd-node.is-editable { cursor: pointer; }
+.wd-node.is-editable:hover .wd-box { stroke: var(--accent); stroke-width: 1.6; }
+.wd-node:focus { outline: none; }
+.wd-node:focus-visible .wd-box { stroke: var(--accent); stroke-width: 2; }
+
+.wd-title { fill: var(--text); font: 600 12px var(--sans); }
+.wd-sub { fill: var(--text-dim); font: 10px var(--mono); }
+.wd-sub-dim { fill: var(--text-faint); }
+
+/* The stripe encodes the CONTRACT — what this node can do to the run's
+   control flow. A gate is the only kind that can send it backwards. */
+.wd-stripe { fill: var(--grey); }
+.wd-verdict .wd-stripe { fill: var(--amber); }
+.wd-route .wd-stripe { fill: var(--accent); }
+.wd-post .wd-stripe { fill: var(--green); }
+.wd-artifact .wd-stripe { fill: var(--accent); }
+
+.wd-branch .wd-box { fill: var(--bg-elev-2); stroke: var(--accent); stroke-dasharray: 4 3; }
+
+.wd-stop .wd-box { fill: var(--bg-elev-2); stroke: var(--green); }
+.wd-term-failed .wd-box, .wd-term-blocked .wd-box { stroke: var(--red); }
+.wd-term-partial .wd-box, .wd-term-waiting .wd-box { stroke: var(--amber); }
+.wd-term-skipped .wd-box { stroke: var(--grey); }
+
+/* --- chips --- */
+.wd-chip { fill: var(--bg-elev-2); stroke: var(--border); }
+.wd-chip-t { fill: var(--text-dim); font: 9px var(--sans); }
+.wd-chip-effect { fill: color-mix(in srgb, var(--amber) 22%, transparent); stroke: var(--amber); }
+.wd-chip-dev { fill: color-mix(in srgb, var(--red) 20%, transparent); stroke: var(--red); }
+.wd-chip-override { fill: color-mix(in srgb, var(--accent) 20%, transparent); stroke: var(--accent); }
+
+/* --- loops --- */
+.wd-loop-box {
+  fill: color-mix(in srgb, var(--amber) 6%, transparent);
+  stroke: color-mix(in srgb, var(--amber) 55%, transparent);
+  stroke-dasharray: 6 4;
+}
+
+.wd-loop-t { fill: var(--amber); font: 600 11px var(--sans); }
+.wd-loop { cursor: pointer; }
+
+/* --- cases --- */
+.wd-case-box { fill: var(--bg-elev-2); stroke: var(--border-strong); }
+.wd-case-t { fill: var(--text-dim); font: 600 10px var(--sans); }
+.wd-case { cursor: pointer; }
+.wd-case:hover .wd-case-box { stroke: var(--accent); }
+
+/* --- edges --- */
+.wd-edge { fill: none; stroke: var(--border-strong); stroke-width: 1.4; }
+.wd-edge-branch { stroke: color-mix(in srgb, var(--accent) 60%, transparent); }
+/* Backward flow is drawn differently on purpose: it is the exceptional path. */
+.wd-edge-repair { stroke: var(--amber); stroke-dasharray: 5 3; }
+.wd-edge-far { stroke: var(--red); }
+.wd-arrowhead { fill: var(--border-strong); }
+.wd-arrowhead-repair { fill: var(--amber); }
+.wd-edge-label { fill: var(--text-faint); font: 10px var(--mono); }
+.wd-repair-label { fill: var(--amber); }
+
+/* --- legend --- */
+.wf-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 11px; color: var(--text-dim); }
+.wf-legend-item { display: flex; align-items: center; gap: 6px; }
+.wf-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.wd-sw-verdict { background: var(--amber); }
+.wd-sw-route { background: var(--accent); }
+.wd-sw-post { background: var(--green); }
+.wd-sw-text { background: var(--grey); }
+.wd-sw-effect { background: color-mix(in srgb, var(--amber) 30%, transparent); border: 1px solid var(--amber); }
+
+.struct-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }

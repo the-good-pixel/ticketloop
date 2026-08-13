@@ -205,6 +205,22 @@ export function validatePlan(plan: ExecutionPlan): Diagnostic[] {
     }
   }
 
+  // --- Side effects with nothing checking them first ------------------------
+  // Opening a PR or deploying before any gate has run means shipping code that
+  // nothing verified. Legal, occasionally deliberate, usually a mistake — so a
+  // warning rather than an error. `w.steps` is in execution order per path.
+  for (let i = 0; i < w.steps.length; i++) {
+    const n = w.steps[i]
+    if (!n.settings.enabled) continue
+    const effects = n.step.capabilities.externalEffects.filter((e) => e !== 'tracker-comment')
+    if (!effects.length) continue
+    const gatedBefore = w.steps
+      .slice(0, i)
+      .some((prev) => prev.settings.enabled && prev.step.contract === 'verdict' && sharePath(prev.path, n.path))
+    if (!gatedBefore)
+      warn('ungated-effect', `node "${n.id}" performs ${effects.join(', ')} before any gate has checked the work`, n.id)
+  }
+
   // --- Terminals and reporting ---------------------------------------------
   if (!w.stops.length) err('no-terminal', 'the workflow has no terminal node — no path can end')
   const finallyClasses = new Set(plan.finallyNodes.flatMap((f) => f.runOn || []))
