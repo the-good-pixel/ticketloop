@@ -118,7 +118,10 @@ fully commented template. Full walkthrough (incl. running as a background servic
 | `ticketloop workflows` | list workflows and which projects use them |
 | `ticketloop workflow show [ref] --project <name>` | print the compiled execution plan |
 | `ticketloop workflow validate` | check every project's workflow against its permissions |
+| `ticketloop workflow assign <id>@<v> --project <name>` | point a project at a workflow (validated first) |
 | `ticketloop catalog clone step\|workflow <id>@<v>` | copy a built-in into your catalog to edit |
+| `ticketloop catalog export <bundle-id> --workflow <ref>` | write a shareable bundle |
+| `ticketloop catalog import <file> [--yes]` | review what a bundle can do, then install it |
 
 Flags: `--config <path>`, `--mock`/`--demo`, `--ticket <ID>`, `--port <n>`, `--debug`.
 

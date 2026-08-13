@@ -12,8 +12,11 @@ import { isPaused, setPaused, setTicketPaused } from './daemon/control.js'
 import { readJson } from './store.js'
 import { loadCatalog } from './catalog/store.js'
 import {
+  catalogExportCmd,
+  catalogImportCmd,
   cloneCmd,
   stepsCmd,
+  workflowAssignCmd,
   workflowShowCmd,
   workflowValidateCmd,
   workflowsCmd,
@@ -26,12 +29,18 @@ interface Flags {
   ticket?: string
   port?: number
   project?: string
+  engine?: string
+  workflow: string[]
+  step: string[]
+  out?: string
+  yes: boolean
+  force: boolean
   positional: string[]
 }
 
 function parse(argv: string[]): { cmd: string; flags: Flags } {
   const [cmd = 'help', ...rest] = argv
-  const flags: Flags = { mock: false, positional: [] }
+  const flags: Flags = { mock: false, workflow: [], step: [], yes: false, force: false, positional: [] }
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]
     if (a === '--mock' || a === '--demo') flags.mock = true
@@ -39,6 +48,12 @@ function parse(argv: string[]): { cmd: string; flags: Flags } {
     else if (a === '--ticket') flags.ticket = rest[++i]
     else if (a === '--port') flags.port = Number(rest[++i])
     else if (a === '--project') flags.project = rest[++i]
+    else if (a === '--engine') flags.engine = rest[++i]
+    else if (a === '--workflow') flags.workflow.push(rest[++i])
+    else if (a === '--step') flags.step.push(rest[++i])
+    else if (a === '--out' || a === '-o') flags.out = rest[++i]
+    else if (a === '--yes') flags.yes = true
+    else if (a === '--force') flags.force = true
     else if (a === '--debug') log.setLevel('debug')
     else if (!a.startsWith('--')) flags.positional.push(a)
   }
@@ -61,7 +76,10 @@ Usage:
   ticketloop workflows            List workflows and which projects use them
   ticketloop workflow show [ref]  Print the compiled execution plan (--project <name>)
   ticketloop workflow validate    Validate every project's workflow against its policy
+  ticketloop workflow assign <id>@<v> --project <name>
   ticketloop catalog clone step|workflow <id>@<v> [new-id]
+  ticketloop catalog export <bundle-id> --workflow <ref> [--out f.yml]
+  ticketloop catalog import <file.yml> [--yes]   Review a shared bundle, then accept it
 
 Flags:
   --config <path>   Use a specific config file
@@ -174,15 +192,37 @@ async function main() {
       const cat = loadCatalog()
       if (sub === 'validate') return workflowValidateCmd(cat, config, flags.positional[1])
       if (sub === 'show') return workflowShowCmd(cat, config, flags.positional[1], flags.project)
-      log.error('usage: ticketloop workflow show|validate [<id>@<version>]')
+      if (sub === 'assign') {
+        if (!flags.positional[1] || !flags.project) {
+          log.error('usage: ticketloop workflow assign <id>@<version> --project <name> [--engine workflow]')
+          process.exit(1)
+        }
+        return workflowAssignCmd(cat, config, path, flags.positional[1], flags.project, flags.engine)
+      }
+      log.error('usage: ticketloop workflow show|validate|assign [<id>@<version>]')
       process.exit(1)
       return
     }
     case 'catalog': {
       const sub = flags.positional[0]
+      const cat = loadCatalog()
       if (sub === 'clone')
-        return cloneCmd(loadCatalog(), flags.positional[1], flags.positional[2], flags.positional[3])
-      log.error('usage: ticketloop catalog clone step|workflow <id>@<version> [new-id]')
+        return cloneCmd(cat, flags.positional[1], flags.positional[2], flags.positional[3])
+      if (sub === 'export') {
+        if (!flags.positional[1]) {
+          log.error('usage: ticketloop catalog export <bundle-id> [--workflow <ref>] [--step <ref>] [--out <file>]')
+          process.exit(1)
+        }
+        return catalogExportCmd(cat, flags.positional[1], { steps: flags.step, workflows: flags.workflow }, flags.out)
+      }
+      if (sub === 'import') {
+        if (!flags.positional[1]) {
+          log.error('usage: ticketloop catalog import <file.yml> [--yes] [--force]')
+          process.exit(1)
+        }
+        return catalogImportCmd(cat, flags.positional[1], flags.yes, flags.force)
+      }
+      log.error('usage: ticketloop catalog clone|export|import …')
       process.exit(1)
       return
     }

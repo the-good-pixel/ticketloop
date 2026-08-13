@@ -13,6 +13,7 @@
     <button id="navActivity" class="nav-btn is-active" role="tab" aria-selected="true">Activity</button>
     <button id="navHistory" class="nav-btn" role="tab" aria-selected="false">History</button>
     <button id="navSetup" class="nav-btn" role="tab" aria-selected="false">Projects</button>
+    <button id="navWorkflows" class="nav-btn" role="tab" aria-selected="false">Workflows</button>
     <button id="navSettings" class="nav-btn" role="tab" aria-selected="false">Settings</button>
   </nav>
   <div class="topbar-right">
@@ -159,6 +160,51 @@
     </section>
   </div>
 
+  <!-- ===== Workflows view: step catalog + workflow builder ===== -->
+  <div id="viewWorkflows" class="view" hidden>
+    <div id="wfError" class="warnings setup-error" hidden></div>
+
+    <section class="wf-layout">
+      <!-- Left rail: what exists -->
+      <aside class="wf-rail">
+        <div class="section-head">
+          <h2>Workflows</h2>
+          <button id="wfImportBtn" class="btn btn-ghost btn-sm" title="Review and install a shared bundle">Import…</button>
+        </div>
+        <ul id="wfList" class="wf-list"></ul>
+
+        <div class="section-head">
+          <h2>Steps</h2>
+        </div>
+        <ul id="wfStepList" class="wf-list"></ul>
+      </aside>
+
+      <!-- Right pane: the selected thing -->
+      <div class="wf-main">
+        <div class="wf-head">
+          <div>
+            <h2 id="wfTitle">Standard dev cycle</h2>
+            <p id="wfSubtitle" class="muted"></p>
+          </div>
+          <div class="wf-actions">
+            <label class="wf-project-pick">
+              Compile for
+              <select id="wfProject"></select>
+            </label>
+            <button id="wfAssignBtn" class="btn btn-ghost btn-sm">Assign to project</button>
+            <button id="wfCloneBtn" class="btn btn-ghost btn-sm">Clone to edit</button>
+            <button id="wfExportBtn" class="btn btn-ghost btn-sm">Export…</button>
+            <button id="wfSaveBtn" class="btn btn-sm" hidden>Save new version</button>
+          </div>
+        </div>
+
+        <div id="wfDraftBanner" class="wf-draft-banner" hidden></div>
+        <div id="wfDiagnostics" class="wf-diagnostics"></div>
+        <div id="wfBody" class="wf-body"></div>
+      </div>
+    </section>
+  </div>
+
   <!-- ===== Settings view (global, not per-project) ===== -->
   <div id="viewSettings" class="view" hidden>
     <div id="settingsError" class="warnings setup-error" hidden></div>
@@ -195,6 +241,43 @@
   </div>
 </div>
 
+<!-- ===== Node editor modal (workflow builder) ===== -->
+<div id="nodeOverlay" class="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="nodeTitle">
+    <div class="modal-head">
+      <h2 id="nodeTitle">Edit node</h2>
+      <button id="nodeClose" class="icon-btn" aria-label="Close">×</button>
+    </div>
+    <form id="nodeForm" class="modal-body"></form>
+    <div class="modal-foot">
+      <div id="nodeInlineError" class="form-inline-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" id="nodeCancel" class="btn btn-ghost">Cancel</button>
+        <button type="submit" id="nodeSave" form="nodeForm" class="btn">Apply</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Bundle share modal (export / import review) ===== -->
+<div id="bundleOverlay" class="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="bundleTitle">
+    <div class="modal-head">
+      <h2 id="bundleTitle">Share</h2>
+      <button id="bundleClose" class="icon-btn" aria-label="Close">×</button>
+    </div>
+    <div id="bundleBody" class="modal-body"></div>
+    <div class="modal-foot">
+      <div id="bundleInlineError" class="form-inline-error" hidden></div>
+      <div class="modal-actions">
+        <button type="button" id="bundleCancel" class="btn btn-ghost">Close</button>
+        <button type="button" id="bundleConfirm" class="btn" hidden>Import</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div id="toast" class="toast" hidden></div>
 
 <script type="module" src="app.js"></script>
+<script type="module" src="catalog.js"></script>

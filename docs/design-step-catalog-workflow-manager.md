@@ -1,7 +1,8 @@
 # Design — Step Catalog & Workflow Manager
 
-> **Status: PARTLY IMPLEMENTED.** Phases 1–4 are built. The interpreter runs, opt-in per
-> project (`engine: workflow`); the legacy engine remains the default. See §18 for what exists and §19 for the migration position.
+> **Status: IMPLEMENTED (phases 1–7).** Phase 0 is the only outstanding item. The
+> interpreter runs opt-in per project (`engine: workflow`); the legacy engine remains the
+> default until the new path has been exercised against real repos. See §18 for what exists and §19 for the migration position.
 > This document describes how
 > ticketloop can move from one hard-coded pipeline to reusable catalog steps and
 > user-defined workflows without weakening checkpoints, provider handling, git isolation,
@@ -563,7 +564,9 @@ Implementation should not start until:
 | 2 — catalog schemas, compiler, validator | **done** — `store.ts`, `compile.ts`, `validate.ts`, and the `steps` / `workflows` / `workflow show` / `workflow validate` / `catalog clone` CLI |
 | 3 — standard workflow expressed as data | **done** — `builtin-steps.ts` (14 steps) + `builtin-workflows.ts` (`standard@1`), compiling and validating clean |
 | 4 — interpreter behind a feature flag | **done** — `src/loop/interpreter.ts`, opt-in per project via `engine: workflow` |
-| 5–7 — catalog CLI polish, builder UI, sharing | not started |
+| 5 — catalog CLI and dashboard | **done** — Workflows view: browse steps/workflows, compiled-plan preview per project, effective profile + required permissions, built-ins protected |
+| 6 — workflow builder | **done** — clone to draft, edit nodes (step, enabled, transitions, instruction) and loop bounds, continuous validation, save as a new version, assign to a project |
+| 7 — sharing | **done** — checksummed bundle export/import with a trust report; import is inspect-then-accept |
 
 The interpreter is opt-in: a project sets `engine: workflow` to run its assigned workflow
 as data. Everything else keeps using `engine.ts`. Both share one copy of the git
@@ -624,3 +627,34 @@ What needs migrating, and what does not:
 - **User catalog files** — nothing exists yet, so there is nothing to migrate. Built-in
   versions are immutable and a user file that shadows one is rejected at load time, which
   keeps every run snapshot meaningful for as long as the run lives.
+
+## 20. Sharing and trust
+
+Bundles are plain YAML with a sha256 over their canonical contents. Import is deliberately
+two steps — inspect, then accept — because a step's instruction is handed to a coding agent
+running with permissions skipped.
+
+The trust report is built from the bundle's own declarations AND from the local steps a
+bundled workflow references. A workflow made entirely of built-in steps still ships PRs and
+deploys, so reporting "nothing beyond reading" because the bundle carried no step
+definitions would be exactly the wrong answer.
+
+Hard refusals: a checksum that does not match the contents, anything that would shadow a
+built-in version, and a workflow whose steps are neither bundled nor already installed.
+
+Importing never grants authority. A step may *request* `deployDev`; only the project's own
+permissions block grants it, and validation still refuses to run a plan whose steps ask for
+more than the project allows.
+
+## 21. What is left
+
+- **Phase 0** — the legacy engine still mis-handles `wait` (it fails open and can report a
+  queued deployment as live). That matters only while `engine: legacy` is the default.
+- **Real-world exercise.** Everything so far is verified against the mock runner. No ticket
+  has run through the interpreter against a real repo and a real model.
+- **`revalidate` is currently a re-run.** The `Repo` interface has no PR-state read, so a
+  resumed ship re-runs the step (its instruction already handles "PR exists → push to it")
+  instead of querying GitHub. Adding `prState()` to `Repo` would close the gap.
+- **The builder edits nodes, not structure.** You can change a node's step, transitions,
+  instruction and a loop's bounds, but adding/removing/reordering nodes and branch cases
+  still means editing the YAML under `~/.ticketloop/catalog/`.

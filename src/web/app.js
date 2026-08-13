@@ -1306,7 +1306,7 @@ const setup = {
 };
 
 // ---- view switching ----
-const VIEWS = ['activity', 'history', 'setup', 'settings'];
+const VIEWS = ['activity', 'history', 'setup', 'workflows', 'settings'];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 
 // `#view` fragment drives the tab so links are shareable; History appends its
@@ -1339,6 +1339,10 @@ function setView(view, opts) {
   if (view === 'activity') {
     if (!opts.silent) history.replaceState(null, '', '#activity');
     poll(); // resume immediately
+  } else if (view === 'workflows') {
+    if (!opts.silent) history.replaceState(null, '', '#workflows');
+    // The Workflows view owns its own data loading (catalog.js).
+    window.dispatchEvent(new CustomEvent('tl:workflows-open'));
   } else if (view === 'setup' || view === 'settings') {
     // Both read the same config payload; each renders only its own section.
     if (!opts.silent) history.replaceState(null, '', '#' + view);
@@ -2350,6 +2354,7 @@ $('#pauseBtn')?.addEventListener('click', doPauseToggle);
 $('#navActivity').addEventListener('click', () => setView('activity'));
 $('#navHistory').addEventListener('click', () => setView('history'));
 $('#navSetup').addEventListener('click', () => setView('setup'));
+$('#navWorkflows').addEventListener('click', () => setView('workflows'));
 $('#navSettings').addEventListener('click', () => setView('settings'));
 $('#addProjectBtn').addEventListener('click', () => openForm(null));
 $('#settingsSave')?.addEventListener('click', saveSettings);
@@ -2359,7 +2364,13 @@ $('#formOverlay').addEventListener('click', (e) => {
   if (e.target === $('#formOverlay')) closeForm();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && !$('#formOverlay').hidden) closeForm();
+  if (e.key !== 'Escape') return;
+  if (!$('#formOverlay').hidden) return closeForm();
+  // The Workflows view owns these two, but Escape is a page-level habit.
+  for (const id of ['#nodeOverlay', '#bundleOverlay']) {
+    const o = $(id);
+    if (o && !o.hidden) { o.hidden = true; return; }
+  }
 });
 
 bindHistory();
@@ -2376,7 +2387,7 @@ const boot = parseHash();
 if (boot.view === 'history') {
   readFiltersFromParams(boot.params);
   setView('history', { silent: true });
-} else if (boot.view === 'setup' || boot.view === 'settings') {
+} else if (boot.view === 'setup' || boot.view === 'settings' || boot.view === 'workflows') {
   setView(boot.view, { silent: true });
 } else {
   poll(); // self-schedules its next tick (fast while live, normal otherwise)

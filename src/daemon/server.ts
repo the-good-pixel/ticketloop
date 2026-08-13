@@ -12,6 +12,28 @@ import { assertAuthSafe } from '../runner/index.js'
 import { resolveTracker, DEFAULT_INSTRUCTIONS } from '../config.js'
 import { hasCredential, resolveTrackerKey } from '../credentials.js'
 import { isPaused, setPaused, setTicketPaused, pausedTickets } from './control.js'
+import {
+  cloneStep,
+  cloneWorkflow,
+  formatRef,
+  getStep,
+  getWorkflow,
+  loadCatalog,
+  nextVersion,
+  saveStep,
+  saveWorkflow,
+} from '../catalog/store.js'
+import { compileWorkflow } from '../catalog/compile.js'
+import { planForProject, DEFAULT_WORKFLOW_REF } from '../commands/catalog.js'
+import {
+  exportBundle,
+  importBundle,
+  inspectBundle,
+  parseBundle,
+  serializeBundle,
+} from '../catalog/bundle.js'
+import type { CatalogStep, Workflow } from '../catalog/types.js'
+import { ALL_PERMISSIONS } from '../catalog/types.js'
 import { log } from '../logger.js'
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web')
@@ -146,6 +168,199 @@ function historyFacets() {
   }
 }
 
+
+// ---- Catalog view builders --------------------------------------------------
+
+/**
+ * Everything the Workflows view needs in one payload: the catalog, which
+ * projects use what, and each project's effective policy — so the UI can show
+ * "this step needs deployDev, which this project has not granted" before the
+ * user assigns anything.
+ */
+function buildCatalogView(cfg: Config) {
+  const cat = loadCatalog()
+  const steps = [...cat.steps.entries()].map(([ref, e]) => ({
+    ref,
+    scope: e.scope,
+    id: e.item.id,
+    version: e.item.version,
+    name: e.item.name,
+    description: e.item.description,
+    contract: e.item.contract,
+    routeFields: e.item.routeFields || [],
+    capabilities: e.item.capabilities,
+    requiresPermissions: e.item.requiresPermissions || [],
+    resumePolicy: e.item.resumePolicy,
+    produces: e.item.produces,
+    consumes: e.item.consumes || [],
+    requires: e.item.requires || [],
+    defaults: e.item.defaults,
+    editable: e.scope !== 'builtin',
+  }))
+  const workflows = [...cat.workflows.entries()].map(([ref, e]) => ({
+    ref,
+    scope: e.scope,
+    id: e.item.id,
+    version: e.item.version,
+    name: e.item.name,
+    description: e.item.description || '',
+    usedBy: cfg.projects.filter((p) => (p.workflow || DEFAULT_WORKFLOW_REF) === ref).map((p) => p.name),
+    editable: e.scope !== 'builtin',
+  }))
+  const projects = cfg.projects.map((p) => ({
+    name: p.name,
+    engine: p.engine || 'legacy',
+    workflow: p.workflow || DEFAULT_WORKFLOW_REF,
+    permissions: { ...(cfg.permissions || {}), ...(p.permissions || {}) },
+  }))
+  return {
+    steps: steps.sort((a, b) => a.ref.localeCompare(b.ref)),
+    workflows: workflows.sort((a, b) => a.ref.localeCompare(b.ref)),
+    projects,
+    permissions: ALL_PERMISSIONS,
+    defaultWorkflow: DEFAULT_WORKFLOW_REF,
+  }
+}
+
+/** Compile a saved ref or an unsaved draft, optionally against a project. */
+function previewPlan(cfg: Config, b: { workflow?: Workflow; ref?: string; project?: string }) {
+  const cat = loadCatalog()
+  const project = b.project ? cfg.projects.find((p) => p.name === b.project) : undefined
+  try {
+    const plan =
+      b.workflow
+        ? compileWorkflow(cat, b.workflow, {
+            config: cfg,
+            project,
+            legacyStages: project ? [cfg.stages, project.stages || {}] : [cfg.stages],
+          })
+        : project && !b.ref
+          ? planForProject(cfg, project, cat)
+          : compileWorkflow(cat, getWorkflow(cat, b.ref || DEFAULT_WORKFLOW_REF), {
+              config: cfg,
+              project,
+              legacyStages: project ? [cfg.stages, project.stages || {}] : [cfg.stages],
+            })
+    return {
+      workflow: plan.workflow,
+      digest: plan.digest,
+      diagnostics: plan.diagnostics,
+      permissions: plan.permissions,
+      profiles: plan.profiles,
+      outcomes: plan.outcomes,
+      // A flat, display-ready trace. The tree lives in the UI's own copy of the
+      // draft; this is the compiled truth to show beside it.
+      trace: flattenPlan(plan),
+      finallyNodes: plan.finallyNodes.map((f) => ({
+        id: f.id,
+        ref: f.ref,
+        runOn: f.runOn,
+        enabled: f.settings.enabled,
+      })),
+    }
+  } catch (e) {
+    return { error: String(e instanceof Error ? e.message : e) }
+  }
+}
+
+interface TraceRow {
+  depth: number
+  kind: string
+  id: string
+  label: string
+  detail: string
+  enabled: boolean
+  /** Ways this node departs from its step's defaults — an overridden node must
+   *  never look identical to a stock one, or "why is this behaving oddly?" has
+   *  no visible answer. Covers legacy `stages` overrides too. */
+  badges: string[]
+  problems: string[]
+}
+
+function badgesFor(node: any): string[] {
+  const out: string[] = []
+  const s = node.settings
+  const d = node.step.defaults || {}
+  if (s.instruction !== node.step.instruction) out.push('custom instruction')
+  if (s.skill !== (d.skill ?? null)) out.push(s.skill ? `skill: ${s.skill}` : 'no skill')
+  if (s.model) out.push(`model: ${s.model}`)
+  if (s.allowedTools !== (d.allowedTools ?? null)) out.push('custom tools')
+  // Only when the node will actually run — a disabled node needs nothing.
+  if (s.enabled && node.missingPermissions?.length) out.push(`needs ${node.missingPermissions.join(', ')}`)
+  return out
+}
+
+function flattenPlan(plan: ReturnType<typeof compileWorkflow>): TraceRow[] {
+  const rows: TraceRow[] = []
+  const problemsFor = (id: string) =>
+    plan.diagnostics.filter((d) => d.nodeId === id).map((d) => `${d.level}: ${d.message}`)
+  const walk = (phases: any[], depth: number) => {
+    for (const p of phases) {
+      if (p.kind === 'step') {
+        const s = p.settings
+        rows.push({
+          depth,
+          kind: 'step',
+          id: p.id,
+          label: `${p.id} (${p.ref})`,
+          detail: [s.profile, s.effort, s.model, s.skill ? '+skill:' + s.skill : '', p.step.contract]
+            .filter(Boolean)
+            .join(' · ') +
+            ' — ' +
+            Object.entries(p.transitions).map(([r, t]) => `${r}→${t}`).join(' '),
+          enabled: s.enabled,
+          badges: badgesFor(p),
+          problems: problemsFor(p.id),
+        })
+      } else if (p.kind === 'stop') {
+        rows.push({
+          depth,
+          kind: 'stop',
+          id: p.id,
+          label: `${p.id} → ${p.terminal}`,
+          detail: (p.outcome ? `outcome: ${p.outcome}` : '') + (p.reported ? ' · already reported' : ''),
+          enabled: true,
+          badges: [],
+          problems: problemsFor(p.id),
+        })
+      } else if (p.kind === 'branch') {
+        rows.push({
+          depth,
+          kind: 'branch',
+          id: p.id,
+          label: `${p.id} — branch on ${p.on.nodeId}.${p.on.field}`,
+          detail: Object.keys(p.cases).join(' | '),
+          enabled: true,
+          badges: [],
+          problems: problemsFor(p.id),
+        })
+        for (const [name, list] of Object.entries(p.cases)) {
+          rows.push({ depth: depth + 1, kind: 'case', id: `${p.id}:${name}`, label: `case ${name}`, detail: '', enabled: true, badges: [], problems: [] })
+          walk(list as any[], depth + 2)
+        }
+        if (Array.isArray(p.default)) {
+          rows.push({ depth: depth + 1, kind: 'case', id: `${p.id}:default`, label: 'default', detail: '', enabled: true, badges: [], problems: [] })
+          walk(p.default, depth + 2)
+        }
+      } else if (p.kind === 'loop') {
+        rows.push({
+          depth,
+          kind: 'loop',
+          id: p.id,
+          label: `${p.id} — repair loop`,
+          detail: `max ${p.maxIterations} · no progress: ${p.noProgress}`,
+          enabled: true,
+          badges: [],
+          problems: problemsFor(p.id),
+        })
+        walk([p.repair, ...p.gates], depth + 1)
+      }
+    }
+  }
+  walk(plan.phases, 0)
+  return rows
+}
+
 export function startServer(cfg: Config, hooks: ServerHooks): { close: () => void } {
   const gov = new Governor(cfg)
 
@@ -208,6 +423,134 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
             setPaused(paused)
             log.info(paused ? '⏸ paused via dashboard' : '▶ resumed via dashboard')
             json(res, { paused })
+          }
+        }).catch((e) => serverError(res, e))
+        return
+      }
+      // ---- Step catalog & workflow manager -------------------------------
+      if (path === '/api/catalog' && req.method === 'GET') {
+        return json(res, buildCatalogView(cfg))
+      }
+      if (path.startsWith('/api/catalog/step/') && req.method === 'GET') {
+        const ref = decodeURIComponent(path.slice('/api/catalog/step/'.length))
+        const cat = loadCatalog()
+        return json(res, { step: getStep(cat, ref), scope: cat.steps.get(ref)?.scope })
+      }
+      if (path.startsWith('/api/catalog/workflow/') && req.method === 'GET') {
+        const ref = decodeURIComponent(path.slice('/api/catalog/workflow/'.length))
+        const cat = loadCatalog()
+        return json(res, { workflow: getWorkflow(cat, ref), scope: cat.workflows.get(ref)?.scope })
+      }
+      // Compile-and-validate WITHOUT saving — this is what makes the builder
+      // safe to edit in: every keystroke can be checked before it is written.
+      if (path === '/api/catalog/preview' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const b = body as { workflow?: Workflow; ref?: string; project?: string }
+          json(res, previewPlan(cfg, b))
+        }).catch((e) => serverError(res, e))
+        return
+      }
+      // Clone a built-in (or any version) into the user catalog, ready to edit.
+      if (path === '/api/catalog/clone' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const b = body as { kind: 'step' | 'workflow'; ref: string; newId?: string }
+          const cat = loadCatalog()
+          const copy = b.kind === 'step' ? cloneStep(cat, b.ref, b.newId) : cloneWorkflow(cat, b.ref, b.newId)
+          json(res, { draft: copy, ref: formatRef(copy) })
+        }).catch((e) => json(res, { error: String(e instanceof Error ? e.message : e) }))
+        return
+      }
+      // Save a NEW version. Published versions are immutable, so the server
+      // assigns the next free version rather than trusting the client's.
+      if (path === '/api/catalog/save' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const b = body as { kind: 'step' | 'workflow'; draft: CatalogStep | Workflow }
+          try {
+            const cat = loadCatalog()
+            const kind = b.kind === 'step' ? 'steps' : 'workflows'
+            const draft: any = { ...b.draft, builtin: false }
+            draft.version = nextVersion(cat, kind as 'steps' | 'workflows', draft.id)
+            if (b.kind === 'workflow') {
+              // Never save a workflow that could not run.
+              const plan = compileWorkflow(loadCatalog(), draft as Workflow, { config: cfg })
+              const errors = plan.diagnostics.filter((d) => d.level === 'error')
+              if (errors.length) return json(res, { error: errors.map((e) => e.message).join('; ') })
+            }
+            const file = b.kind === 'step' ? saveStep(draft) : saveWorkflow(draft)
+            json(res, { ok: true, ref: formatRef(draft), file })
+          } catch (e) {
+            json(res, { error: String(e instanceof Error ? e.message : e) })
+          }
+        }).catch((e) => serverError(res, e))
+        return
+      }
+      // Assign a workflow version to a project. Validated against THAT
+      // project's policy first — assigning a plan that cannot run is the same
+      // mistake as running it.
+      if (path === '/api/catalog/assign' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const b = body as { project: string; ref: string; engine?: 'legacy' | 'workflow' }
+          const project = cfg.projects.find((p) => p.name === b.project)
+          if (!project) return json(res, { error: `unknown project "${b.project}"` })
+          const candidate: ProjectConfig = { ...project, workflow: b.ref, engine: b.engine || project.engine }
+          let plan
+          try {
+            plan = planForProject({ ...cfg, projects: [candidate] }, candidate, loadCatalog())
+          } catch (e) {
+            return json(res, { error: e instanceof Error ? e.message : String(e) })
+          }
+          const errors = plan.diagnostics.filter((d) => d.level === 'error')
+          if (errors.length)
+            return json(res, { error: `${b.ref} cannot run on "${b.project}": ${errors.map((e) => e.message).join('; ')}` })
+          const saved = hooks.saveProject(candidate)
+          if ('error' in saved) return json(res, saved)
+          json(res, {
+            ok: true,
+            engine: candidate.engine || 'legacy',
+            // Assigning a workflow to a legacy-engine project changes nothing at
+            // runtime; say so rather than letting it look done.
+            warning:
+              (candidate.engine || 'legacy') === 'legacy'
+                ? `Project "${b.project}" still runs engine: legacy, so this workflow is not what executes. Switch it to the workflow engine under Projects.`
+                : undefined,
+          })
+        }).catch((e) => serverError(res, e))
+        return
+      }
+      // ---- Sharing: export a bundle, inspect one, then accept it ----------
+      if (path === '/api/catalog/export' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const b = body as { id: string; name?: string; stepRefs?: string[]; workflowRefs?: string[] }
+          try {
+            const bundle = exportBundle(loadCatalog(), b)
+            json(res, { yaml: serializeBundle(bundle), manifest: bundle.manifest })
+          } catch (e) {
+            json(res, { error: String(e instanceof Error ? e.message : e) })
+          }
+        }).catch((e) => serverError(res, e))
+        return
+      }
+      if (path === '/api/catalog/inspect' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const { yaml } = body as { yaml: string }
+          try {
+            const bundle = parseBundle(yaml)
+            json(res, { manifest: bundle.manifest, trust: inspectBundle(loadCatalog(), bundle) })
+          } catch (e) {
+            json(res, { error: String(e instanceof Error ? e.message : e) })
+          }
+        }).catch((e) => serverError(res, e))
+        return
+      }
+      if (path === '/api/catalog/import' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const { yaml, acceptChecksumMismatch } = body as { yaml: string; acceptChecksumMismatch?: boolean }
+          try {
+            const result = importBundle(loadCatalog(), parseBundle(yaml), { acceptChecksumMismatch })
+            log.info(`imported catalog bundle: ${result.written.join(', ') || '(nothing new)'}`)
+            json(res, { ok: true, ...result })
+          } catch (e) {
+            json(res, { error: String(e instanceof Error ? e.message : e) })
           }
         }).catch((e) => serverError(res, e))
         return

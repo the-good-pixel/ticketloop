@@ -81,6 +81,15 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
   deployment / file state), `nodePrompt.ts` (prompt built from a step's contract +
   capabilities, NOT from its name), `workspace.ts` (git isolation + the off-limits
   guardrail, shared with the legacy engine — never fork this).
+- `src/catalog/bundle.ts` — export/import bundles for sharing. Import is INSPECT-then-accept:
+  `inspectBundle` builds the trust report (external effects, skills, tools, requested
+  permissions, repo mutation) from the bundle's own declarations **plus the local steps a
+  bundled workflow references**. Checksum mismatch, shadowing a built-in, and a workflow
+  whose steps are missing are all hard refusals. Importing never grants authority.
+- `src/web/catalog.js` — the Workflows view (catalog browser + workflow builder + sharing).
+  Kept out of `app.js`. It re-compiles via `/api/catalog/preview` on every edit, so what is
+  shown is the plan that would actually run. `app.js` loads first, so the view also calls
+  `load()` on init in case its `tl:workflows-open` event fired before it was listening.
 
 ## Conventions & invariants (don't break these)
 
@@ -117,6 +126,10 @@ traces across both engines before committing.
 A step's `contract` decides how its RESULT is read; `produces.type` decides what typed
 artifact is recorded. They are independent — `ship` is a `verdict` step that produces a
 `github-pr`. Getting this wrong silently disables a gate.
+
+Anything a step can do beyond reading — external effects, a skill, extra tools, a
+permission request, repo mutation — must be visible in BOTH the catalog list and the import
+trust report. A capability a user cannot see is one they cannot refuse.
 
 
 1. `types.ts`: add to `StageName` **and** `STAGE_ORDER` (in pipeline order).
