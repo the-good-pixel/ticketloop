@@ -45,11 +45,11 @@ export interface StageExtras {
   dataMode?: boolean
 }
 
-function ticketBlock(t: Ticket): string {
+export function ticketBlock(t: Ticket): string {
   return `Ticket ${t.identifier}: ${t.title}\n\nDescription:\n${t.description || '(none)'}\nLink: ${t.url}`
 }
 
-function commentThread(t: Ticket): string {
+export function commentThread(t: Ticket): string {
   const cs = t.comments || []
   if (!cs.length) return ''
   const lines = cs.map((c) => {

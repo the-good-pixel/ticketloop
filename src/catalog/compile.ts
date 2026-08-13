@@ -132,16 +132,24 @@ export interface ExecutionPlan {
  */
 export const HARNESS_KEYS = new Set(['openFindings', 'iteration', 'ticket', 'workspace'])
 
-/** Stable checkpoint key for one node invocation. */
+/**
+ * Stable checkpoint key for one node invocation.
+ *
+ * `scope` distinguishes invocations of the SAME node that are different
+ * operations: a per-repo step scopes by repo name, and the final report scopes
+ * by terminal class — reporting a failure and later reporting the success that
+ * followed a resume are two different things, and an idempotency key that
+ * ignored that would silently swallow the second one.
+ */
 export function checkpointKey(
   plan: ExecutionPlan,
   nodeId: string,
   iteration?: number,
-  repo?: string,
+  scope?: string,
 ): string {
   const parts = [`${plan.workflow.id}@${plan.workflow.version}`, nodeId]
   if (iteration !== undefined) parts.push(String(iteration))
-  if (repo) parts.push(repo)
+  if (scope) parts.push(scope)
   return parts.join('/')
 }
 

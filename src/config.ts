@@ -332,7 +332,7 @@ export function validateProject(p: ProjectConfig): void {
     throw new Error('maxParallel must be a whole number ≥ 1')
   validateRepos(p)
   validateStageProviders(p.stages, `project "${p.name}" stages`)
-  validatePolicy(p.workflow, p.permissions, `project "${p.name}"`)
+  validatePolicy(p.workflow, p.permissions, `project "${p.name}"`, p.engine)
 }
 
 /** Multi-repo `repos` list: non-empty, unique valid names, each with a path. */
@@ -374,7 +374,7 @@ function validate(cfg: Config): void {
     }
     validateRepos(p)
     validateStageProviders(p.stages, `project "${p.name}" stages`)
-    validatePolicy(p.workflow, p.permissions, `project "${p.name}"`)
+    validatePolicy(p.workflow, p.permissions, `project "${p.name}"`, p.engine)
   }
 }
 
@@ -383,7 +383,10 @@ function validatePolicy(
   workflow: string | undefined,
   permissions: Config['permissions'],
   label: string,
+  engine?: string,
 ): void {
+  if (engine && !['legacy', 'workflow'].includes(engine))
+    throw new Error(`${label} engine must be "legacy" or "workflow"`)
   if (workflow && !/^[\w.-]+@\d+$/.test(workflow))
     throw new Error(`${label} workflow must be "<id>@<version>" (an unpinned workflow can change under a running ticket)`)
   for (const key of Object.keys(permissions || {})) {

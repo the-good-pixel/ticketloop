@@ -73,8 +73,14 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
   pipeline, expressed as catalog data (instruction text is imported from `config.ts`, so
   there is one source of truth). `store.ts` = YAML load/save + immutable versions.
   `compile.ts` = workflow + project policy → `ExecutionPlan`. `validate.ts` = the
-  diagnostics that block an unsafe plan. **Not wired into the engine yet** — the
-  interpreter is the next phase; `engine.ts` still owns execution.
+  diagnostics that block an unsafe plan.
+- `src/loop/interpreter.ts` — **executes** a compiled plan. Opt-in per project via
+  `engine: workflow`; `processTicket` dispatches to it and shares the run record,
+  checkpoint, marker and images so history/resume behave the same either way.
+  Supporting parts: `verdict.ts` (pass/fail/**wait**/skip), `artifacts.ts` (typed PR /
+  deployment / file state), `nodePrompt.ts` (prompt built from a step's contract +
+  capabilities, NOT from its name), `workspace.ts` (git isolation + the off-limits
+  guardrail, shared with the legacy engine — never fork this).
 
 ## Conventions & invariants (don't break these)
 
@@ -103,9 +109,14 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
 
 ## Adding a new stage (checklist)
 
-While the engine still owns execution, a new stage must be added in BOTH places: the
-stage list below, and the catalog (`src/catalog/builtin-steps.ts` + a node in
-`builtin-workflows.ts`). Run `npx tsx src/cli.ts workflow validate` after.
+Both engines are live, so a new stage must be added in BOTH places: the stage list
+below (legacy), and the catalog (`src/catalog/builtin-steps.ts` + a node in
+`builtin-workflows.ts`). Run `npx tsx src/cli.ts workflow validate` after, and compare
+traces across both engines before committing.
+
+A step's `contract` decides how its RESULT is read; `produces.type` decides what typed
+artifact is recorded. They are independent — `ship` is a `verdict` step that produces a
+`github-pr`. Getting this wrong silently disables a gate.
 
 
 1. `types.ts`: add to `StageName` **and** `STAGE_ORDER` (in pipeline order).

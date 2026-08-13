@@ -120,7 +120,7 @@ export const STANDARD_WORKFLOW: Workflow = {
             // clarify posts the answer itself, so this terminal is `reported`
             // and the `finally` comment step must not run.
             { id: 'answer', step: S.clarify, on: { pass: 'next' } },
-            { id: 'answered', stop: 'success', outcome: 'answered', reported: true },
+            { id: 'answered', stop: 'success', outcome: 'answered', reported: true, note: 'Posted an answer comment.' },
           ],
           data: [
             { id: 'data-plan', step: S.plan, on: { pass: 'next' } },
@@ -140,7 +140,7 @@ export const STANDARD_WORKFLOW: Workflow = {
                 noProgress: 'exit-loop', // deliver what we have; the report says so
               },
             },
-            { id: 'data-done', stop: 'success', outcome: 'exported' },
+            { id: 'data-done', stop: 'success', outcome: 'exported', note: 'Data export posted to the ticket.' },
           ],
           bug: changePhases('bug', true),
           change: changePhases('change', false),

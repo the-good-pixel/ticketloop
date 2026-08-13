@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process'
 import { registerChild, unregisterChild } from './children.js'
 import { log } from '../logger.js'
 import type { AgentResult, RunAgentOpts } from './types.js'
+import { classifyKind } from '../loop/classify.js'
 
 // Claude's real "you've hit your limit" signal — the reliable backstop.
 export function isRateLimitText(t: string): boolean {
@@ -247,8 +248,7 @@ function errorResult(model: string, msg: string): AgentResult {
 // ---- Mock (demo mode) ------------------------------------------------------
 
 const MOCK_TEXTS: Record<string, string> = {
-  // No KIND line on purpose: the engine falls back to classifyKind(ticket) so
-  // the demo routes questions → clarify and changes → the fix loop by title.
+  // Overwritten below with a KIND derived from the ticket in the prompt.
   triage: 'DECISION: eligible\nTriage complete.',
   answer:
     'The 15-minute expiry comes from the access-JWT TTL in auth/session; the ' +
@@ -269,15 +269,32 @@ const MOCK_TEXTS: Record<string, string> = {
   ship: 'Committed, pushed feature/demo-102-submit-label, opened https://github.com/demo/demo-app/pull/142',
   'deploy-dev': 'Pushed the branch to deployment/web/dev; the dev pipeline finished green; change is live on dev.\nVERDICT: pass',
   'verify-dev': 'Browser-tested the apply page on the dev URL; the submit button now reads 立即提交. Works in dev.\nVERDICT: pass',
+  // Aliases so a caller can key mock text by the STEP ID as well as the legacy
+  // MOCK_KIND name (the workflow interpreter passes the step id directly).
+  clarify: '',
+  fix: '',
   comment:
     'Updated the submit button label to 立即提交. PR: https://github.com/demo/demo-app/pull/142 — please review.\n' +
     '— 🤖 via ticketloop\nCOMMENT_URL: https://linear.app/demo/issue/DEMO/#comment-mockcomment',
+}
+
+MOCK_TEXTS.clarify = MOCK_TEXTS.answer
+MOCK_TEXTS.fix = MOCK_TEXTS.diff
+
+// The mock triage classifies from the ticket text in the prompt, using the same
+// heuristic the engine falls back to. Both engines then see a real KIND line, so
+// the demo exercises routing instead of always landing on the change path.
+function mockTriageKind(prompt: string): string {
+  const title = (prompt.match(/^Ticket \S+: (.*)$/m) || [])[1] || ''
+  const desc = (prompt.match(/Description:\n([\s\S]*?)\nLink:/) || [])[1] || ''
+  return classifyKind({ title, description: desc, labels: [] } as never)
 }
 
 let mockVerifyFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFIES) || 0
 let mockReviewFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_REVIEWS) || 0
 let mockShipFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_SHIPS) || 0
 let mockDeployFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_DEPLOYS) || 0
+let mockDeployWaitsLeft = Number(process.env.TICKETLOOP_MOCK_WAIT_DEPLOYS) || 0
 let mockVerifyDevFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFYDEV) || 0
 // TICKETLOOP_MOCK_ERROR_SHIP=N: the first N ship calls THROW (isError) like a
 // dropped connection — used to test resume-after-crash (the run fails, then a
@@ -301,6 +318,7 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
   // produce distinct PRs the engine can parse into rec.prs.
   let text = MOCK_TEXTS[kind] || 'ok'
   // Test hook: make triage classify the ticket as "no action needed".
+  if (kind === 'triage') text = `DECISION: eligible\nKIND: ${mockTriageKind(o.prompt)}\nTriage complete.`
   if (kind === 'triage' && process.env.TICKETLOOP_MOCK_TRIAGE_NOACTION) text = 'DECISION: no-action'
   if (kind === 'ship') {
     const repo = o.cwd.split('/').pop() || 'demo-app'
@@ -338,7 +356,13 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
     mockReviewFailsLeft--
     text = 'Mock review: found a problem to force another fix pass.\nVERDICT: fail — injected mock failure'
   }
-  if (kind === 'deploy-dev' && mockDeployFailsLeft > 0) {
+  // TICKETLOOP_MOCK_WAIT_DEPLOYS=N: the first N deploys report WAIT (queued for a
+  // human approval) rather than fail — the case the workflow design exists to
+  // separate, since nothing is wrong with the code.
+  if (kind === 'deploy-dev' && mockDeployWaitsLeft > 0) {
+    mockDeployWaitsLeft--
+    text = 'Mock deploy-dev: the dev deployment is queued for manual approval.\nVERDICT: wait — awaiting approval'
+  } else if (kind === 'deploy-dev' && mockDeployFailsLeft > 0) {
     mockDeployFailsLeft--
     text = 'Mock deploy-dev: the dev pipeline failed to go green.\nVERDICT: fail — injected mock deploy failure'
   }

@@ -171,6 +171,16 @@ projects:
       - backend/migrations/**
       - "**/*auth*"
 
+# EXPERIMENTAL — run a project through the workflow interpreter instead of the
+# built-in pipeline. `engine: workflow` makes the project execute its assigned
+# workflow (default standard@1) as data. Check what will run first:
+#   ticketloop workflow show --project <name>
+#   ticketloop workflow validate
+# projects:
+#   - name: my-app
+#     engine: workflow        # legacy (default) | workflow
+#     workflow: standard@1    # must be pinned to a version
+
 # What ticketloop is ALLOWED to do. Authority is structured policy, not wording in
 # an instruction: a step that needs a permission you have not granted fails
 # validation before it ever runs. Set these per project to override.

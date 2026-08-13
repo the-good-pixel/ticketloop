@@ -17,16 +17,18 @@ import type { Tracker } from '../adapters/tracker/tracker.js'
 import { makeRepo, type Repo } from '../adapters/repo/github.js'
 import { appendRun, appendUsage, getRun } from '../store.js'
 import { classifyKind } from './classify.js'
-import { matchesAny } from './glob.js'
+import { runWorkflow } from './interpreter.js'
+import { planForProject } from '../commands/catalog.js'
 import { buildStagePrompt, CHECK_STAGES, POST_STAGES, type PriorOutputs, type StageExtras } from './prompts.js'
+import { reattachWorkspace, scanRepos, setupWorkspace, toWorkspaceCk, type WorkRepo } from './workspace.js'
+// Re-exported for callers that still import it from the engine.
+export { resolveBranch } from './workspace.js'
 import { extractImageUrls, downloadImages, latestHumanActivity } from './context.js'
 import { DATA_DIR } from '../paths.js'
-import { join, isAbsolute } from 'node:path'
-import { mkdirSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { log } from '../logger.js'
 import {
   type Checkpoint,
-  type WorkspaceCk,
   loadCheckpoint,
   saveCheckpoint,
   deleteCheckpoint,
@@ -243,7 +245,11 @@ export async function processTicket(
     deleteCheckpoint(ticketKey)
     ck = null
   }
-  const resuming = !!ck && Object.keys(ck.stageOutputs).length > 0
+  // Cached work exists under `stageOutputs` (legacy engine) or `nodeOutputs`
+  // (workflow interpreter) — either one means this is a continuation, not a new
+  // attempt, so the SAME run record is reused and its tokens keep accumulating.
+  const resuming =
+    !!ck && (Object.keys(ck.stageOutputs).length > 0 || Object.keys(ck.nodeOutputs || {}).length > 0)
 
   // CONTINUE THE SAME RUN when resuming: an interruption isn't a new attempt, so
   // reuse the checkpoint's record instead of minting another one (no duplicate
@@ -299,6 +305,30 @@ export async function processTicket(
       }
       ck.imagePaths = imagePaths
     }
+    // --- Workflow interpreter (opt-in per project) --------------------------
+    // The pipeline below is the LEGACY engine. A project with `engine: workflow`
+    // runs its assigned workflow through the interpreter instead, sharing this
+    // function's run record, checkpoint, marker and downloaded images so history
+    // and resume behave identically either way.
+    if (project.engine === 'workflow') {
+      const plan = planForProject(ctx.cfg, project)
+      const errors = plan.diagnostics.filter((d) => d.level === 'error')
+      if (errors.length) {
+        // Never run a plan that failed validation — the diagnostics exist
+        // precisely to stop an unsafe pipeline reaching a real repo.
+        const msg = `workflow ${plan.workflow.id}@${plan.workflow.version} is invalid: ${errors.map((e) => e.message).join('; ')}`
+        finish(rec, 'blocked', msg)
+        rec.error = msg
+        return rec
+      }
+      return await runWorkflow(ctx, plan, ticket, project, rec, ck, {
+        trackerKey: opts.trackerKey,
+        isReprocess: !!opts.reprocess,
+        isPaused: opts.isPaused,
+        imagePaths,
+      })
+    }
+
     const extras: StageExtras = { imagePaths, isReprocess: !!opts.reprocess, trackerKey: opts.trackerKey }
 
     // Triage & clarify are read-only — run them against the main checkout.
@@ -565,179 +595,6 @@ export async function processTicket(
     else deleteCheckpoint(ticketKey)
   }
 }
-
-function worktreePath(project: ProjectConfig, ticketId: string): string {
-  const base = project.worktreeBase || join(DATA_DIR, 'worktrees', project.name)
-  return join(base, ticketId)
-}
-
-// ---- Workspace (single- or multi-repo) -------------------------------------
-// A WorkRepo is one git repo the change path operates on. Single-repo projects
-// produce a one-element list (today's behaviour); multi-repo projects (`repos`
-// set) produce one per entry, each in its own worktree under a shared root.
-interface WorkRepo {
-  name: string
-  srcPath: string // absolute source repo (for worktree ops / in-place)
-  workdir: string // where edits happen (worktree path or in-place)
-  base: string // PR base branch
-  branch: string // this run's working branch (may be versioned on re-processing)
-  exclude: string[] // repo-relative extra excludes
-  shipDisabled: boolean
-}
-
-// The harness must put the worktree on SOME branch before any model step runs
-// (a worktree needs a branch; the guardrail diffs against a base). So it picks a
-// safe DEFAULT — a fresh branch off the current base, i.e. a clean new PR. It
-// does NOT decide new-vs-update-an-existing-PR: that judgment, if wanted, lives
-// in the `prepare`/`ship` instruction, where the model can run `gh pr list` and
-// check out an open PR's branch itself. Here we only avoid colliding with a
-// branch a prior run left behind (which would sit at stale/merged code).
-export function resolveBranch(ctx: EngineCtx, srcPath: string, ticketId: string): string {
-  const base = `ticketloop/${ticketId.toLowerCase()}`
-  if (ctx.mock) return base
-  for (let i = 1; ; i++) {
-    const name = i === 1 ? base : `${base}-${i}`
-    if (!ctx.repo.localBranchExists(srcPath, name)) return name
-  }
-}
-interface Workspace {
-  repos: WorkRepo[]
-  cwd: string // where plan→verify run (workspace root for multi, the repo for single)
-  multi: boolean
-  useWorktree: boolean
-}
-
-// Serialize a live Workspace into the checkpoint so a resumed run can reattach.
-function toWorkspaceCk(ws: Workspace): WorkspaceCk {
-  return { repos: ws.repos.map((r) => ({ ...r })), cwd: ws.cwd, multi: ws.multi, useWorktree: ws.useWorktree }
-}
-
-// Rebuild the Workspace from a checkpoint WITHOUT touching git — the worktrees
-// and branches from the interrupted attempt are still on disk. Returns null if
-// they're gone (user cleaned up), so the caller starts fresh instead.
-function reattachWorkspace(resumeWs: WorkspaceCk, skipDiskCheck = false): Workspace | null {
-  if (resumeWs.useWorktree && !skipDiskCheck) {
-    for (const r of resumeWs.repos) {
-      // A git worktree has a `.git` file (not dir) pointing at the main repo.
-      if (!existsSync(join(r.workdir, '.git'))) return null
-    }
-  }
-  return {
-    repos: resumeWs.repos.map((r) => ({ ...r })),
-    cwd: resumeWs.cwd,
-    multi: resumeWs.multi,
-    useWorktree: resumeWs.useWorktree,
-  }
-}
-
-// Create the worktrees/branches and return the workspace. Throws on a dirty
-// in-place repo (caught by the outer handler → 'failed').
-function setupWorkspace(
-  ctx: EngineCtx,
-  project: ProjectConfig,
-  ticketId: string,
-  reuseBranch?: string,
-  resumeWs?: WorkspaceCk,
-): Workspace {
-  const useWorktree = project.useWorktree !== false
-  const multi = !!(project.repos && project.repos.length)
-
-  // RESUME: reattach the interrupted attempt's worktree/branch as-is.
-  if (resumeWs) {
-    const re = reattachWorkspace(resumeWs, ctx.mock)
-    if (re) {
-      log.info(`  ⤿ reattached workspace at ${re.cwd} (${re.repos.map((r) => r.branch).join(', ')})`)
-      return re
-    }
-    log.warn(`  checkpoint workspace missing on disk — starting fresh`)
-  }
-
-  // Single-repo PR refresh: `locate` found an open PR → check out its branch and
-  // guard only the model's new delta (base = the branch tip at checkout).
-  if (!multi && reuseBranch && useWorktree) {
-    const src = project.repoPath
-    const workdir = worktreePath(project, ticketId)
-    if (ctx.repo.reuseWorktree(src, workdir, reuseBranch)) {
-      const base = ctx.repo.tipSha(workdir)
-      return {
-        repos: [{ name: project.name, srcPath: src, workdir, base, branch: reuseBranch, exclude: [], shipDisabled: false }],
-        cwd: workdir,
-        multi,
-        useWorktree,
-      }
-    }
-    log.warn(`locate named branch "${reuseBranch}" but it couldn't be checked out — starting fresh`)
-  }
-
-  if (multi) {
-    const root = worktreePath(project, ticketId)
-    if (useWorktree) mkdirSync(root, { recursive: true })
-    const repos: WorkRepo[] = []
-    for (const r of project.repos!) {
-      const src = isAbsolute(r.path) ? r.path : join(project.repoPath, r.path)
-      const base = ctx.repo.resolveBase(src, r.base) // origin/<branch> — fetched, never stale
-      const branch = resolveBranch(ctx, src, ticketId)
-      let workdir = src
-      if (useWorktree) {
-        workdir = join(root, r.name)
-        ctx.repo.createWorktree(src, workdir, branch, base)
-      } else if (!ctx.mock) {
-        const clean = ctx.repo.ensureClean(src)
-        if (!clean.clean) throw new Error(`Repo "${r.name}" not clean before starting:\n${clean.detail?.slice(0, 200)}`)
-        ctx.repo.createBranch(src, branch)
-      }
-      repos.push({ name: r.name, srcPath: src, workdir, base, branch, exclude: r.exclude || [], shipDisabled: !!r.shipDisabled })
-    }
-    return { repos, cwd: useWorktree ? root : project.repoPath, multi, useWorktree }
-  }
-
-  // Single-repo: same flow, one repo.
-  const base = ctx.repo.resolveBase(project.repoPath) // origin/<branch> — fetched, never stale
-  const branch = resolveBranch(ctx, project.repoPath, ticketId)
-  let workdir = project.repoPath
-  if (useWorktree) {
-    workdir = worktreePath(project, ticketId)
-    ctx.repo.createWorktree(project.repoPath, workdir, branch, base)
-  } else if (!ctx.mock) {
-    const clean = ctx.repo.ensureClean(project.repoPath)
-    if (!clean.clean) throw new Error(`Repo not clean before starting:\n${clean.detail?.slice(0, 200)}`)
-    ctx.repo.createBranch(project.repoPath, branch)
-  }
-  return {
-    repos: [{ name: project.name, srcPath: project.repoPath, workdir, base, branch, exclude: [], shipDisabled: false }],
-    cwd: workdir,
-    multi,
-    useWorktree,
-  }
-}
-
-// The ONE deterministic safety check, now over every repo. Returns the dirty
-// repos to ship, or a `block` reason if an off-limits path/repo was touched.
-function scanRepos(
-  ctx: EngineCtx,
-  project: ProjectConfig,
-  ws: Workspace,
-): { dirty: WorkRepo[]; block?: string } {
-  const dirty: WorkRepo[] = []
-  for (const r of ws.repos) {
-    const changed = ctx.repo.changedFilesVsBase(r.workdir, r.base)
-    if (!changed.length) continue
-    // A read-only repo must never be modified.
-    if (r.shipDisabled)
-      return { dirty, block: `Off-limits repo "${r.name}" was modified (read-only). Aborted before ship.` }
-    for (const f of changed) {
-      // project.exclude matches repo-PREFIXED paths in multi mode (so existing
-      // patterns like `backend/migrations/**` keep working); repo.exclude
-      // matches the repo-relative path.
-      const projPath = ws.multi ? `${r.name}/${f}` : f
-      const hit = matchesAny(projPath, project.exclude || []) || matchesAny(f, r.exclude)
-      if (hit) return { dirty, block: `Off-limits path touched: ${projPath} (matches "${hit}"). Aborted before ship.` }
-    }
-    dirty.push(r)
-  }
-  return { dirty }
-}
-
 // ---- stage runner ----------------------------------------------------------
 
 async function stage(

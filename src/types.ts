@@ -167,6 +167,11 @@ export interface ProjectConfig {
   // branch in repoPath instead.
   useWorktree?: boolean
   worktreeBase?: string | null // where to put worktrees (default ~/.ticketloop/worktrees)
+  // Which execution engine runs this project. `legacy` (default) is the
+  // hard-coded pipeline in engine.ts; `workflow` interprets the assigned
+  // workflow. Opt in per project so one project can prove the new path while
+  // everything else keeps running the old one.
+  engine?: 'legacy' | 'workflow'
   // Which workflow this project runs, as "<id>@<version>". Omit for the
   // built-in `standard` workflow (today's pipeline). A legacy `stages` block
   // still applies on top, compiled into per-node overrides.
@@ -305,6 +310,10 @@ export type RunOutcome =
 
 export interface StageRecord {
   stage: StageName
+  // Which workflow node produced this record. Absent on legacy-engine runs and
+  // on history written before the workflow interpreter — the dashboard falls
+  // back to `stage` when it is missing.
+  nodeId?: string
   status: 'ok' | 'skipped' | 'failed' | 'running'
   startedAt: number
   endedAt?: number

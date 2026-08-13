@@ -25,6 +25,15 @@ export interface WorkspaceCk {
   useWorktree: boolean
 }
 
+/** What a workflow-interpreter run needs on top of the legacy fields. */
+export interface PlanCk {
+  workflowId: string
+  version: number
+  /** Digest of the compiled plan. A changed digest means the live catalog moved
+   *  under this run, so Resume must keep using the snapshot, not the new plan. */
+  digest: string
+}
+
 export interface Checkpoint {
   runId: string
   ticketKey: string // `${project}:${identifier}`
@@ -34,6 +43,14 @@ export interface Checkpoint {
   // ckKey → the stage's successful output text. A stage that THREW is absent, so
   // it (and everything after) re-runs on resume; a completed stage replays.
   stageOutputs: Record<string, string>
+  // ---- workflow interpreter (absent on legacy-engine checkpoints) ----------
+  plan?: PlanCk
+  // node checkpoint key → the node's output text. Keys are
+  // `<workflow>@<v>/<node-id>[/<iteration>][/<repo>]`, so the same catalog step
+  // used twice in one workflow can never collide.
+  nodeOutputs?: Record<string, string>
+  // typed external state (PRs, deployments, files) keyed by produce-key
+  artifacts?: Record<string, unknown>
   updatedAt: number
 }
 

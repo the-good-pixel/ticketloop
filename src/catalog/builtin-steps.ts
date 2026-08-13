@@ -50,8 +50,10 @@ export const BUILTIN_STEPS: CatalogStep[] = [
     id: 'export',
     name: 'Data export',
     description: 'Read-only data pull producing an export file. Never writes to the source.',
+    // Not a gate — the data loop's gate is `verify`, which judges the exported
+    // data. Export just produces the file.
     defaults: { executionProfile: 'balanced', effort: 'medium', allowedTools: 'Read,Bash', enabled: true },
-    contract: 'artifact',
+    contract: 'text',
     capabilities: { workspace: 'read-only', mutatesRepo: false, perRepo: 'once', devOnly: false, externalEffects: [] },
     resumePolicy: 'rerun',
     consumes: ['plan'],
@@ -138,8 +140,12 @@ export const BUILTIN_STEPS: CatalogStep[] = [
     id: 'ship',
     name: 'Ship',
     description: 'Commit, push, and open (or update) a pull request. Never merges.',
+    // A gate AND an artifact producer: `contract` decides how the RESULT is
+    // read, `produces.type` decides what typed state is recorded. Ship needs
+    // both — a red CI run must route back for repair, and the PR it opened must
+    // still be remembered.
     defaults: { executionProfile: 'quality', allowedTools: 'Read,Bash', enabled: true },
-    contract: 'artifact',
+    contract: 'verdict',
     capabilities: { workspace: 'change', mutatesRepo: true, perRepo: 'changed', devOnly: false, externalEffects: ['create-pr'] },
     requiresPermissions: ['createFeaturePr'],
     resumePolicy: 'revalidate', // the PR may already exist from the interrupted attempt

@@ -1,7 +1,7 @@
 # Design — Step Catalog & Workflow Manager
 
-> **Status: PARTLY IMPLEMENTED.** Phases 1–3 are built (`src/catalog/`); the engine still
-> owns execution. See §18 for what exists and §19 for the migration position.
+> **Status: PARTLY IMPLEMENTED.** Phases 1–4 are built. The interpreter runs, opt-in per
+> project (`engine: workflow`); the legacy engine remains the default. See §18 for what exists and §19 for the migration position.
 > This document describes how
 > ticketloop can move from one hard-coded pipeline to reusable catalog steps and
 > user-defined workflows without weakening checkpoints, provider handling, git isolation,
@@ -562,11 +562,19 @@ Implementation should not start until:
 | 1 — runtime types and policy | **done** — `src/catalog/types.ts`, plus `permissions` / `executionProfiles` / `workflow` on config |
 | 2 — catalog schemas, compiler, validator | **done** — `store.ts`, `compile.ts`, `validate.ts`, and the `steps` / `workflows` / `workflow show` / `workflow validate` / `catalog clone` CLI |
 | 3 — standard workflow expressed as data | **done** — `builtin-steps.ts` (14 steps) + `builtin-workflows.ts` (`standard@1`), compiling and validating clean |
-| 4 — interpreter behind a feature flag | not started |
+| 4 — interpreter behind a feature flag | **done** — `src/loop/interpreter.ts`, opt-in per project via `engine: workflow` |
 | 5–7 — catalog CLI polish, builder UI, sharing | not started |
 
-Nothing in `src/catalog/` runs during a real ticket yet. `engine.ts` is untouched, so the
-built catalog is inspectable and testable without any risk to live runs.
+The interpreter is opt-in: a project sets `engine: workflow` to run its assigned workflow
+as data. Everything else keeps using `engine.ts`. Both share one copy of the git
+isolation and off-limits guardrail (`src/loop/workspace.ts`), the run record, the
+checkpoint, the marker and the downloaded attachments.
+
+Verified against the legacy engine on the demo tickets: all four routes (question, data,
+change, bug) produce an identical step sequence and an identical outcome. Also verified:
+the repair loop, a failed ship re-entering the loop from outside it, crash-and-resume on
+the same run record, pause at a node boundary, and the off-limits guardrail blocking
+before ship.
 
 Two deliberate differences from today are already encoded in `standard@1`, per §12:
 
@@ -575,6 +583,12 @@ Two deliberate differences from today are already encoded in `standard@1`, per �
 - **Final reporting runs on waiting and failure**, not only on success, so a ticket is
   never left silent. The question path marks its terminal `reported` so `clarify` and the
   `finally` comment can never double-post.
+
+Resume policy is now per step rather than "replay everything": `triage`/`plan`/`fix`
+replay from cache, `verify`/`review`/`prepare` re-run (a cached pass is not evidence the
+tree still builds), `locate`/`ship`/`deploy-dev` revalidate, and `comment` is idempotent —
+keyed by terminal class, so a run that reported failure and then resumed to success
+reports the success too.
 
 Execution profiles deliberately resolve to today's effort levels (`quality` → `medium`)
 so a compiled `standard@1` is a faithful trace of current behavior. Raise `quality` per
