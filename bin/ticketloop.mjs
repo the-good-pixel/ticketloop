@@ -7,7 +7,7 @@ import { dirname, resolve } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const entry = resolve(here, '../src/cli.ts')
-const tsx = resolve(here, '../node_modules/.bin/tsx')
+const tsx = fileURLToPath(import.meta.resolve('tsx/cli'))
 
-const r = spawnSync(tsx, [entry, ...process.argv.slice(2)], { stdio: 'inherit' })
+const r = spawnSync(process.execPath, [tsx, entry, ...process.argv.slice(2)], { stdio: 'inherit' })
 process.exit(r.status ?? 1)
