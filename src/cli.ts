@@ -3,6 +3,7 @@ import { log } from './logger.js'
 import { initCmd } from './commands/init.js'
 import { doctorCmd } from './commands/doctor.js'
 import { statusCmd } from './commands/status.js'
+import { supportBundleCmd } from './commands/support.js'
 import { setKeyCmd } from './commands/setkey.js'
 import { watch } from './daemon/watch.js'
 import { makeEngineCtx, processTicket } from './loop/engine.js'
@@ -12,8 +13,6 @@ import { isPaused, setPaused, setTicketPaused } from './daemon/control.js'
 import { readJson } from './store.js'
 import { loadCatalog } from './catalog/store.js'
 import {
-  catalogExportCmd,
-  catalogImportCmd,
   cloneCmd,
   stepsCmd,
   workflowAssignCmd,
@@ -22,6 +21,7 @@ import {
   workflowsCmd,
 } from './commands/catalog.js'
 import { DAEMON_STATE } from './paths.js'
+import { ticketloopVersion } from './version.js'
 
 interface Flags {
   config?: string
@@ -30,17 +30,13 @@ interface Flags {
   port?: number
   project?: string
   engine?: string
-  workflow: string[]
-  step: string[]
   out?: string
-  yes: boolean
-  force: boolean
   positional: string[]
 }
 
 function parse(argv: string[]): { cmd: string; flags: Flags } {
   const [cmd = 'help', ...rest] = argv
-  const flags: Flags = { mock: false, workflow: [], step: [], yes: false, force: false, positional: [] }
+  const flags: Flags = { mock: false, positional: [] }
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]
     if (a === '--mock' || a === '--demo') flags.mock = true
@@ -49,11 +45,7 @@ function parse(argv: string[]): { cmd: string; flags: Flags } {
     else if (a === '--port') flags.port = Number(rest[++i])
     else if (a === '--project') flags.project = rest[++i]
     else if (a === '--engine') flags.engine = rest[++i]
-    else if (a === '--workflow') flags.workflow.push(rest[++i])
-    else if (a === '--step') flags.step.push(rest[++i])
     else if (a === '--out' || a === '-o') flags.out = rest[++i]
-    else if (a === '--yes') flags.yes = true
-    else if (a === '--force') flags.force = true
     else if (a === '--debug') log.setLevel('debug')
     else if (!a.startsWith('--')) flags.positional.push(a)
   }
@@ -63,9 +55,11 @@ function parse(argv: string[]): { cmd: string; flags: Flags } {
 const HELP = `ticketloop — local, subscription-powered ticket-servicing agent
 
 Usage:
+  ticketloop --version            Print the installed version
   ticketloop init                 Scaffold ticketloop.config.yml
   ticketloop set-key <project>    Store a project's Linear API key in the daemon (prompts)
   ticketloop doctor               Check auth, credentials, and tooling
+  ticketloop support-bundle       Write redacted diagnostics safe for a public issue
   ticketloop demo                 Run the loop on built-in demo tickets + dashboard (no creds)
   ticketloop watch                Start the daemon: poll tracker + run loop + dashboard
   ticketloop run [--ticket ID]    Scan once (or one ticket) then exit
@@ -78,8 +72,6 @@ Usage:
   ticketloop workflow validate    Validate every project's workflow against its policy
   ticketloop workflow assign <id>@<v> --project <name>
   ticketloop catalog clone step|workflow <id>@<v> [new-id]
-  ticketloop catalog export <bundle-id> --workflow <ref> [--out f.yml]
-  ticketloop catalog import <file.yml> [--yes]   Review a shared bundle, then accept it
 
 Flags:
   --config <path>   Use a specific config file
@@ -208,26 +200,19 @@ async function main() {
       const cat = loadCatalog()
       if (sub === 'clone')
         return cloneCmd(cat, flags.positional[1], flags.positional[2], flags.positional[3])
-      if (sub === 'export') {
-        if (!flags.positional[1]) {
-          log.error('usage: ticketloop catalog export <bundle-id> [--workflow <ref>] [--step <ref>] [--out <file>]')
-          process.exit(1)
-        }
-        return catalogExportCmd(cat, flags.positional[1], { steps: flags.step, workflows: flags.workflow }, flags.out)
-      }
-      if (sub === 'import') {
-        if (!flags.positional[1]) {
-          log.error('usage: ticketloop catalog import <file.yml> [--yes] [--force]')
-          process.exit(1)
-        }
-        return catalogImportCmd(cat, flags.positional[1], flags.yes, flags.force)
-      }
-      log.error('usage: ticketloop catalog clone|export|import …')
+      log.error('usage: ticketloop catalog clone step|workflow <id>@<version> [new-id]')
       process.exit(1)
       return
     }
     case 'doctor':
       return doctorCmd(config, path)
+    case '--version':
+    case '-v':
+    case 'version':
+      console.log(ticketloopVersion())
+      return
+    case 'support-bundle':
+      return supportBundleCmd(config, path, flags.out)
     case 'status':
       return statusCmd(config)
     case 'demo':

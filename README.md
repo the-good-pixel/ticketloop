@@ -1,414 +1,194 @@
-# ticketloop
+# Ticketloop
 
-A **local, subscription-powered agent** that watches your tracker (Linear) and runs a
-configurable dev-cycle loop on tickets — so client questions, small changes, and
-one-off data exports stop eating your dev time.
+Ticketloop turns trusted Linear tickets into repeatable coding-agent workflows. It runs locally, uses your Claude Code or Codex subscription, isolates code changes in git worktrees, and stops at a pull request for human review.
 
-It runs on **your machine** and shells out to your own **Claude Code or Codex CLI**, so it
-can use the subscription you already pay for instead of metered API tokens. A built-in web **dashboard**
-shows quota usage and a full history of what the loop did.
+The local dashboard lets each project choose and customize a visual workflow. Every step can have its own instruction, provider, model, and effort.
 
-```
-                       ┌─ (question) → clarify ─────────────────────────────────→ 💬 comment
-triage ─ decides kind ─┼─ (data)     → plan → prepare → export → verify ──────────→ 💬 comment + file
-                       └─ (change)   → locate → plan → prepare → fix ⇄ verify → review → ship → 💬 comment
-                                                              └───────── loop until every gate passes ┘
-```
+![Ticketloop workflow builder](docs/assets/workflow-builder.png)
 
-**Model-driven by design.** ticketloop provides the *framework* (the sequence of steps)
-and a sensible default instruction for each step — then the **model** does the actual
-work of each step using whatever skills, tools, MCP servers, and CLIs the project has.
-The harness never dictates *how* a step is done; it sequences the steps, does the
-deterministic git plumbing, enforces a few safety rails, drives the loops by parsing
-each step's machine-readable result, and records history. **You customize any step by
-giving it your own instruction.**
+[Watch the 20-second workflow builder demo](docs/assets/ticketloop-workflow-builder-demo.mp4).
 
-Three jobs, one loop:
+> Ticketloop is an early public release. Start with mock mode, then use a small test project and a dedicated Linear opt-in label. Do not connect an untrusted or public ticket source.
 
-1. **Clarification bot** — a client asks "why does X work this way?" → the agent reads
-   your code and posts an answer. Read-only.
-2. **Data export** — "export the member list with opt-in status" → the agent pulls the
-   data (using creds the ticket provides), verifies it, and posts a file to the ticket.
-   Read-only.
-3. **Simple-fix loop** — a small change → the agent plans, edits, runs your checks,
-   self-reviews, ships a PR, and drives its CI green — or **refreshes an existing PR**
-   when a client leaves feedback on one.
+## What Ticketloop handles
 
----
+- Questions: inspect the repository and post an answer.
+- Data requests: prepare and verify a read-only export, then report it on the ticket.
+- Bugs: locate existing work, reproduce, implement, verify, review, and open or update a pull request.
+- Changes: plan, implement, verify, review, and open or update a pull request.
+- Feedback: resume the same ticket and refresh its existing pull request.
 
-## Contents
-- [Why local](#why-local) · [Install](#install) · [Quick start](#quick-start-no-credentials)
-- [Setup for real use](#setup-for-real-use) · [Commands](#commands)
-- [Architecture](#architecture) — the loop, the three kinds, isolation, per-project keys
-- [Configuring the steps](#configuring-the-steps) — **the main knob**
-- [What each step must output](#what-each-step-must-output) — the contracts
-- [Safety rails](#safety-rails) · [Quota / governor](#quota--the-governor)
-- [TODO / Upcoming development](#todo--upcoming-development) — more providers, trackers, catalog, workflow manager
+Triage routes each eligible ticket into the right path. Failed checks can return to an implementation step through bounded repair loops. Completed steps are checkpointed so a failed or paused run can continue without paying to repeat all prior work.
 
----
+Ticketloop does not deploy to production. Dev deployment steps are optional, permission-gated, and disabled by default.
 
-## Why local
+## Requirements
 
-Claude and Codex subscriptions authenticate through their local CLI login. ticketloop
-defaults to Claude subscription mode. For subscription stages, ticketloop removes the
-provider's API-key variables from the child process so a shell variable cannot silently
-switch billing paths. API mode uses `ANTHROPIC_API_KEY` for Claude or `CODEX_API_KEY`
-for Codex.
+- macOS or Linux. Windows is supported through WSL2, not native PowerShell.
+- Node.js 22 or 24.
+- Git.
+- GitHub CLI (`gh`) logged in if a workflow opens pull requests.
+- Claude Code, Codex CLI, or both, logged in with the subscription you intend to use.
+- A Linear personal API key for real projects.
 
-For Codex subscription access, run `codex login` and choose ChatGPT. ticketloop uses
-[`codex exec`](https://learn.chatgpt.com/docs/non-interactive-mode) for each stage and
-reuses the [saved ChatGPT login](https://learn.chatgpt.com/docs/auth).
+See [Supported platforms](SUPPORTED_PLATFORMS.md) for the tested support policy.
 
 ## Install
 
 ```bash
-git clone git@github.com:the-good-pixel/ticketloop.git && cd ticketloop
-npm install
-npm link            # optional: puts `ticketloop` on your PATH
+npm install --global ticketloop
+ticketloop --version
+ticketloop doctor
 ```
 
-Requires **Node ≥ 20**, at least one configured **Claude or Codex CLI** (logged in),
-**`git`**, and **`gh`** (for PRs).
-Run `ticketloop doctor` to check all of the above at once.
+To run without a global install:
 
-## Quick start (no credentials)
+```bash
+npx ticketloop --version
+```
+
+## Try it safely
 
 ```bash
 ticketloop demo
 ```
 
-Runs the loop against built-in demo tickets with a **simulated** agent (no quota spent)
-and opens the dashboard at http://127.0.0.1:4317. You'll see a question answered, two
-changes taken to a (mock) PR, and a data export — end to end.
+Demo mode uses built-in tickets and a simulated agent. It uses no provider quota, tracker credential, or network request. Open the printed local dashboard URL and inspect the Activity and Workflows views. Press `Ctrl-C` to stop.
 
-## Setup for real use
+## Connect the first project
 
 ```bash
-ticketloop init                    # writes ticketloop.config.yml
-# edit the config: add your project(s), tracker team/states, exclude paths, steps
-ticketloop set-key <project>       # store that project's Linear API key (chmod 600)
-ticketloop doctor                  # verify auth, keys, tooling
-ticketloop watch                   # start the daemon + dashboard
+mkdir ticketloop-workspace
+cd ticketloop-workspace
+ticketloop init
+ticketloop watch
 ```
 
-Or run a single ticket without the daemon:
+Open [http://127.0.0.1:4317/#setup](http://127.0.0.1:4317/#setup), then:
 
-```bash
-ticketloop run --ticket MRM-182
-```
+1. Choose the local git repository.
+2. Choose a workflow.
+3. Set the Linear team, opt-in label, eligible states, and API key.
+4. Review and save.
 
-Start from **[`ticketloop.config.example.yml`](./ticketloop.config.example.yml)** — it's a
-fully commented template. Full walkthrough (incl. running as a background service) in
-**[SETUP.md](./SETUP.md)**.
+The first project is saved while ticket processing is paused. Check the project card and visual workflow, add the opt-in label to one low-risk test ticket, then resume from Activity.
+
+The generated `ticketloop.config.yml` is intentionally small. Advanced project, provider, permission, multi-repo, and MCP settings are documented in [ticketloop.config.example.yml](ticketloop.config.example.yml) and the [setup guide](SETUP.md).
+
+## The workflow builder
+
+Open Workflows in the dashboard to:
+
+- choose the workflow assigned to a project;
+- add work steps from the step catalog;
+- add triage branches and bounded loops;
+- configure each step’s provider, model, effort, and instruction;
+- edit a step’s reusable default instruction;
+- save an immutable new workflow version for one project.
+
+Workflows are structured trees of sequences, branches, and loops. Multiple loops can appear on one path, but loops cannot be nested. The preview is compiled and validated against the selected project before it can be assigned.
+
+Editing a workflow for a project creates a new immutable version and assigns that version to the project. The standard template and other projects do not change.
+
+## Safety model
+
+Ticketloop runs headless coding agents with broad tool access. Safety comes from enforced boundaries, not permission prompts:
+
+- The dashboard binds to `127.0.0.1` by default.
+- Change work uses an isolated git worktree based on the remote default branch.
+- Project exclude rules block protected-path changes before shipping.
+- Workflow capabilities are validated against explicit project permissions.
+- Instruction text cannot grant workflow authority.
+- Pull requests are the normal human review boundary.
+- Automatic merging and dev deployment are off unless explicitly granted.
+- Production deployment is never supported.
+- New activity invalidates an old checkpoint so stale work is not resumed against a changed request.
+
+Only process tickets and comments written by people you trust. Read [SECURITY.md](SECURITY.md) before connecting a real project.
+
+## Continue, start over, and pause
+
+- Continue run reuses completed steps and resumes at the interrupted work.
+- Start over discards the checkpoint and runs the current workflow from the beginning.
+- `ticketloop pause` stops new work and checkpoints an in-flight run at the next step boundary.
+- `ticketloop pause APP-123` pauses one ticket.
+- `ticketloop resume` or the Activity button resumes processing.
+
+Use Start over after changing an earlier step whose completed output must be regenerated. Use Continue run for connection failures, provider limits, daemon restarts, and unchanged work.
 
 ## Commands
 
-| command | what it does |
-|---|---|
-| `ticketloop init` | scaffold `ticketloop.config.yml` |
-| `ticketloop doctor` | check auth / per-project keys / tooling |
-| `ticketloop demo` | run the loop on built-in demo tickets + dashboard (no creds, no quota) |
-| `ticketloop set-key <project>` | store a project's Linear API key |
-| `ticketloop watch` | start the daemon: poll tracker → run loop → serve dashboard |
-| `ticketloop run [--ticket ID]` | scan once (or one ticket by id, any state) then exit |
-| `ticketloop pause` | pause the running daemon at the next stage boundary (in-flight work is checkpointed) |
-| `ticketloop resume` | resume — paused/failed runs continue **from where they stopped**, not from scratch |
-| `ticketloop status` | print quota meters + recent runs (shows ⏸ when paused) |
-| `ticketloop steps [id@v]` | list the step catalog, or show one step in full |
-| `ticketloop workflows` | list workflows and which projects use them |
-| `ticketloop workflow show [ref] --project <name>` | print the compiled execution plan |
-| `ticketloop workflow validate` | check every project's workflow against its permissions |
-| `ticketloop workflow assign <id>@<v> --project <name>` | point a project at a workflow (validated first) |
-| `ticketloop catalog clone step\|workflow <id>@<v>` | copy a built-in into your catalog to edit |
-| `ticketloop catalog export <bundle-id> --workflow <ref>` | write a shareable bundle |
-| `ticketloop catalog import <file> [--yes]` | review what a bundle can do, then install it |
+| Command | Purpose |
+| --- | --- |
+| `ticketloop --version` | Print the installed version. |
+| `ticketloop init` | Create a minimal first-run config. |
+| `ticketloop demo` | Run the offline mock workflow and dashboard. |
+| `ticketloop doctor` | Check configuration, tools, provider login mode, repositories, and tracker keys. |
+| `ticketloop watch` | Poll Linear, run workflows, and serve the dashboard. |
+| `ticketloop run [--ticket ID]` | Run one scan or one ticket, then exit. |
+| `ticketloop pause [ID]` | Pause all work or one ticket at the next step boundary. |
+| `ticketloop resume [ID]` | Resume all work or one ticket. |
+| `ticketloop status` | Show provider quota and recent runs. |
+| `ticketloop support-bundle` | Write redacted diagnostics designed for a public issue. |
+| `ticketloop steps [id@version]` | List catalog steps or inspect one version. |
+| `ticketloop workflows` | List workflows and project assignments. |
+| `ticketloop workflow show --project NAME` | Print the compiled plan for a project. |
+| `ticketloop workflow validate` | Validate every assigned workflow and permission. |
 
-Flags: `--config <path>`, `--mock`/`--demo`, `--ticket <ID>`, `--port <n>`, `--debug`.
+Common flags: `--config <path>`, `--mock`, `--ticket <ID>`, `--project <name>`, and `--debug`.
 
----
+## Data and credentials
 
-## Architecture
+Runtime state lives under `~/.ticketloop` by default:
 
-> 📊 **Visual overview:** open [`docs/architecture.html`](docs/architecture.html) in a browser — a one-page diagram of the loop, the three kinds, the fix loop, multi-repo, and who drives each step.
+- `credentials.json`: per-project tracker keys, user-readable only where the operating system supports file modes;
+- `runs/`: local run history;
+- `checkpoints/`: resumable work;
+- `catalog/`: user-created immutable step and workflow versions;
+- `control.json`: global and per-ticket pause state;
+- `provider-quota.json`: the last provider-reported usage windows.
 
-### The three triage kinds
+Set `TICKETLOOP_HOME` to isolate all state for testing. Real config and local state are ignored by git.
 
-Every ticket first goes through **`triage`** (a model call). It decides *eligibility* and
-a *kind*, and the harness routes accordingly:
+Subscription mode removes provider API-key environment variables from the child process so a shell variable cannot silently change the billing path. API authentication is also supported through explicit provider configuration.
 
-| kind | path | side effects |
-|---|---|---|
-| **question** | `clarify → comment` | posts an answer on the ticket. Read-only. |
-| **data** | `plan → prepare → export → verify → comment` | posts a data file on the ticket. Read-only; runs in a throwaway worktree. |
-| **change** | `locate → plan → prepare → (fix ⇄ verify → review → ship → deploy-dev? → verify-dev?) → comment` | opens/updates a PR (never merges), optionally deploys to dev + verifies it there, + posts a comment. |
+## Troubleshooting
 
-### The fix loop (change path)
+Start with:
 
-After the first `fix`, the gates run **in sequence — `verify` → `review` → `ship`** — and
-**each must pass before the next runs**. Every gate returns a machine-readable
-`VERDICT: pass` / `VERDICT: fail — <reason>`; the first failure sends its findings
-straight back to `fix`, and the loop repeats up to `loop.maxFixIterations` (with a
-no-progress backstop). Provider quota is checked at every stage; an exhausted provider
-checkpoints the run until that provider becomes available. `ship` is the last gate: its instruction opens/updates
-the PR and drives its **CI to green**. It ends by shipping a PR — clean, or flagged
-`pr-opened-with-findings`.
-
-> There is **no** separate test/lint command. Put any build/test/lint you want gated
-> inside the **`verify`** step's instruction (e.g. "run `deno task check`; fail if it
-> doesn't pass") and it becomes part of that step's verdict.
-
-### Deploy to dev + verify in dev (opt-in)
-
-Two optional stages run after `ship` and gate the same way (`VERDICT: pass` / `fail`; a
-failure routes back to `fix`):
-
-- **`deploy-dev`** — deploy the shipped change to the **dev** environment.
-- **`verify-dev`** — confirm it actually **works in dev** (browser-test / hit the dev API),
-  not just that the build passed locally.
-
-Both are **off by default** (they need a real per-project mechanism) and named `*-dev` on
-purpose — the harness pins them to **dev only, never staging/prod**, regardless of the
-instruction. Turn them on where you want them:
-
-```yaml
-stages:
-  deploy-dev:
-    enabled: true
-    instruction: >
-      Push this branch to deployment/web/dev and wait for the dev pipeline to go
-      green (gh run watch). Confirm the change is live on https://dev.example.com.
-  verify-dev:
-    enabled: true
-    instruction: >
-      Browser-test the affected flow on https://dev.example.com and confirm it
-      behaves as the ticket asked. Fail with specifics if it doesn't.
+```bash
+ticketloop doctor
+ticketloop workflow validate
+ticketloop support-bundle
 ```
 
-When disabled, the loop ends at `ship` exactly as before.
+Review the generated support JSON before attaching it to a bug report. The bundle omits credential values, paths, project and ticket names, ticket content, prompts, agent output, raw errors, and pull-request URLs.
 
-### PR refresh (the `locate` step)
+Report bugs through the [issue form](https://github.com/the-good-pixel/ticketloop/issues/new/choose). Report vulnerabilities only through [private vulnerability reporting](https://github.com/the-good-pixel/ticketloop/security/advisories/new).
 
-On the change path, `locate` runs first (read-only) and looks for an **open PR** already
-attached to this ticket — even one opened by a human or another agent, on any branch. If
-it finds one, the harness checks out that branch and the loop **refreshes the same PR**
-(pushing to it) instead of opening a new one; the guardrail then polices only the
-**model's new delta**, not the PR's already-made (possibly approved) changes. No open PR
-→ a fresh branch off `origin/main`.
+## Current limitations
 
-### Parallel runs
+- Linear is the only real tracker adapter.
+- GitHub is the only pull-request adapter.
+- The daemon is local and single-user; there is no hosted multi-user control plane.
+- Tickets are trusted input. Ticketloop is not a sandbox for hostile prompts.
+- Native Windows is not supported.
+- Before `1.0.0`, minor versions may contain config or workflow changes that require review.
 
-**Projects always run in parallel** — each scan launches work for every project that has
-a free slot, so several clients progress at once. Quota is shared: the global governor
-gates every launch.
+## Development
 
-**Within** a project the default is **one ticket at a time** (two runs share one repo, so
-a fixed-port dev server or heavy concurrent git would collide). A project can opt into
-more:
-
-```yaml
-projects:
-  - name: my-app
-    maxParallel: 3     # work up to 3 of this project's tickets concurrently
+```bash
+git clone https://github.com/the-good-pixel/ticketloop.git
+cd ticketloop
+npm install
+npm run check
+npx tsx src/cli.ts demo
 ```
 
-or set **“Max parallel tickets”** in the dashboard's project form. Each ticket still gets
-its own worktree; only raise it if the project's steps don't contend for shared
-resources (ports, a single dev database, etc.).
+There is no build step. TypeScript runs through `tsx`; the dashboard is plain HTML, CSS, and JavaScript.
 
-### Resume & pause
+Read [CONTRIBUTING.md](CONTRIBUTING.md), [UPGRADING.md](UPGRADING.md), and [CHANGELOG.md](CHANGELOG.md) before contributing or updating. Architecture details live in [docs/architecture.html](docs/architecture.html).
 
-A run **checkpoints after every completed stage** (`~/.ticketloop/checkpoints/`),
-recording each stage's output plus the worktree/branch it's using. So when a run stops
-part-way — a dropped connection at `ship`, a rate limit, a daemon restart, or an explicit
-`ticketloop pause` — the next attempt **resumes from the exact stage that stopped**
-instead of starting over:
+## License
 
-- **On resume**, completed stages *replay from cache* (no model call, 0 tokens) and the
-  engine reattaches the **same worktree + branch** (the fix's edits are still there). The
-  run fast-forwards to the first stage that didn't finish and continues from there.
-  A ship that dropped its connection after 45 min of `plan`/`prepare`/`fix`/`verify`/`review`
-  simply re-runs `ship` — the rest is reused.
-- **`ticketloop pause`** stops the loop at the next stage boundary: the in-flight run
-  checkpoints and ends `paused`, and no new tickets are picked up. **`ticketloop resume`**
-  (or the dashboard's ⏸/▶ button) continues each paused run from its checkpoint.
-- **Ticket-level**: `ticketloop pause <ID>` / `resume <ID>` (or the ⏸/▶ on a run's row)
-  pauses just that ticket — the other projects keep running. Because of one-per-project,
-  resuming a ticket whose project is busy with another one **warns** and queues it: it
-  resumes automatically once that project's current run finishes.
-- A checkpoint is **kept** only for `failed` / `blocked` / `paused` outcomes; success or
-  give-up deletes it. It's also **invalidated by new human activity** — if the client
-  comments again, the ask changed, so the run starts fresh rather than resuming stale work.
-- **Resume vs. Restart fresh** (dashboard buttons on a failed/paused run): *Resume* continues
-  from the checkpoint — already-completed stages replay their cached output (so a changed
-  instruction on a *done* stage is NOT re-applied), while the stopped stage onward runs under
-  the **current** workflow (including newly-enabled stages like `deploy-dev`). *Restart fresh*
-  discards the checkpoint and re-runs the whole ticket under the current workflow — use it when
-  you changed an earlier stage and want it applied.
-
-### Isolation & the git base
-
-- Each change runs in a **git worktree** off your repo, so the loop never touches your
-  working tree. No clone needed — point `repoPath` at your normal checkout.
-- The worktree branches off **`origin/main`** (freshly fetched), and the off-limits
-  guardrail diffs against that same ref — so a stale local `main` can never make
-  pulled-in upstream commits look like this branch's changes.
-- The **guardrail** re-runs every loop iteration over **all** repos: if a change touches
-  an `exclude` path (or a read-only repo), the run is **blocked** before shipping.
-
-### Multi-account tracker, per project
-
-Each project points at its **own Linear workspace with its own API key** (`ticketloop
-set-key <project>`). One Linear MCP can only be logged into one account — so **the model
-never uses the Linear MCP.** Instead the harness passes the project's key into the
-posting steps as **`$LINEAR_API_KEY`** (env, never in the prompt) and they post via the
-API to the *correct* workspace. This is what makes multiple client workspaces safe: a
-miles ticket posts with the miles key, an HKBU ticket with the HKBU key — no
-cross-workspace leakage.
-
----
-
-## Configuring the steps
-
-**This is the main knob.** The step *sequence* is fixed, but each step is a model call
-driven by an instruction, configured per project under `stages:`. Each step accepts:
-
-| field | meaning |
-|---|---|
-| `instruction` | **your** prompt for this step (see modes below) |
-| `instructionMode` | `replace` (default — swap the built-in) or `append` (add on top) |
-| `provider` | `claude` or `codex`; inherits `runner.defaultProvider` |
-| `model` | provider model id, e.g. `sonnet` or `gpt-5.6-terra` |
-| `effort` | `low` / `medium` / `high` |
-| `skill` | a skill to invoke (e.g. `code-review`) |
-| `allowedTools` | which tools the step may use, e.g. `Read,Edit,Bash` |
-| `enabled: false` | skip this step |
-
-`allowedTools` is enforced by Claude Code. Codex CLI does not have an equivalent
-per-invocation tool-name allowlist, so Codex uses `permissionMode` and its sandbox.
-`runner.maxTurns` is also Claude-only. The shared wall-clock `stageTimeoutSec` applies
-to both providers.
-
-```yaml
-runner:
-  defaultProvider: codex
-  providers:
-    codex: { bin: codex, authMode: subscription, defaultModel: gpt-5.6-terra, defaultEffort: medium }
-stages:                       # global defaults for every project
-  verify: { provider: codex, model: gpt-5.6-sol }
-projects:
-  - name: my-app
-    repoPath: /abs/path/to/my-app
-    autonomy: propose
-    tracker: { team: MIL, states: [Todo, In Review] }
-    exclude: ["**/migrations/**", "**/*auth*"]
-    stages:                   # per-project overrides win over the globals
-      verify:
-        instructionMode: append
-        instruction: "Run `npm run check` and browser-test the change; fail the verdict if either fails."
-      ship:
-        instruction: "Use the /ship-pr skill: open/update the PR, then watch CI and fix until green. Never merge."
-```
-
-The built-in defaults encode a reasonable house style (small diffs, feature branches,
-run the project's checks, short commits, open a PR but **never merge**, reply in plain
-non-technical English). Override any of them per project.
-
-### What each step must output
-
-The harness parses a machine-readable line from certain steps — **the harness appends
-this requirement itself**, so it holds even if you fully replace the instruction. Write
-your instruction to *do the work*; the contract line is added for you.
-
-| step | must end with | drives |
-|---|---|---|
-| `triage` | `DECISION: eligible\|ineligible` + `KIND: question\|data\|change` | routing |
-| `locate` | `REUSE: <branch>` or `REUSE: none` | reuse an open PR vs fresh |
-| `verify` `review` `ship` | `VERDICT: pass` or `VERDICT: fail — <reason>` | the loop (fail → back to fix) |
-| `clarify` `comment` | posts to the ticket via `$LINEAR_API_KEY`, then `COMMENT_URL: <url>` | delivery |
-
-Notes:
-- **Posting steps** (`clarify`, `comment`) post to Linear *themselves* using the key in
-  `$LINEAR_API_KEY` (the right workspace) — **not** the Linear MCP. End the comment body
-  with `— 🤖 via ticketloop` (the harness asks for this so it can recognize its own
-  comments and not re-trigger on them) and print `COMMENT_URL: <url>`.
-- **`ship`** must open/update the PR and drive CI green *inside its instruction* — the
-  harness never watches CI. If the repo has no CI, "mergeable" counts as pass.
-- **`export`** (data path) must use only the creds/source the ticket provides, stay
-  read-only, write a file, and report its path + a short summary; the following
-  `verify` checks the data; the `comment` attaches the file.
-
-### What the harness does vs the model
-
-| | owns |
-|---|---|
-| **Model** (`claude -p` or `codex exec`) | every step's work, via its instruction + the project's tools/skills/CLI/MCP |
-| **Harness** (the daemon) | scheduling, quota governor, routing, **git plumbing** (worktree/branch/cleanup), the off-limits guardrail, driving the loops by parsing verdicts, per-project keys, history, dashboard |
-
----
-
-## Safety rails
-
-- **`exclude`** — globs the agent must never auto-edit; a fix that touches one **blocks**
-  the run before any PR. In multi-repo, patterns are repo-prefixed (`backend/migrations/**`).
-- **`autonomy`** — `clarify` (answer only) · `propose` (open a PR, human merges — the
-  recommended default) · `gated-merge` (auto-merge trivial clean changes; opt-in).
-- **Never merges** — the loop opens/updates PRs and stops at ready-to-merge.
-- **Worktree isolation** — the loop works in a throwaway worktree, not your checkout.
-- **`shipDisabled` repos** (multi-repo) — greppable context only; editing one blocks.
-
-### Multi-repo projects
-
-One "project" folder can hold several sibling git repos. List them under `repos`;
-`repoPath` becomes the workspace root:
-
-```yaml
-  - name: hkbu
-    repoPath: /abs/path/to/hkbu
-    repos:
-      - { name: frontend, path: bu-job-board-frontend }
-      - { name: backend,  path: bu-job-board-backend  }
-      - { name: infra,    path: iac-uat, shipDisabled: true }   # context only
-    exclude: [backend/migrations/**]
-```
-
-The harness mirrors **one worktree per repo** under the root (the model sees them
-side-by-side, cross-repo greps work), the model edits whichever repos the ticket needs,
-and it ships **one PR per changed repo** — the guardrail runs over all of them, untouched
-repos' empty branches are cleaned up, and if some ship and some fail the run is `partial`.
-(A **monorepo** is not this — just point `repoPath` at the monorepo root. PR-refresh via
-`locate` is single-repo for now.)
-
-## Quota / the governor
-
-The dashboard shows only percentages and reset times reported by each provider. There
-are no manually configured token budgets. Claude usage comes from Claude Code's status
-line, and Codex usage comes from Codex's account rate-limit status. When a provider does
-not report a percentage, the dashboard shows **unknown** and allows work until the
-provider returns a confirmed quota-exhausted error. A limited provider waits on its own;
-other providers can keep working. Codex stages still record per-run tokens as history,
-but Codex CLI does not report a dollar cost, so cost stays at zero.
-
----
-
-## TODO / Upcoming development
-
-- **Support more coding-agent CLIs.** Claude Code and Codex CLI are supported. Future
-  adapters could add opencode or Kimi Code through the same provider interface.
-- **Step catalog** — curate and reuse your own steps across workflows and projects.
-- **Workflow manager** — compose your own *enforced* workflows instead of only the
-  built-in pipeline. See [`docs/design-step-catalog-workflow-manager.md`](docs/design-step-catalog-workflow-manager.md).
-- **Support more issue trackers.** The tracker is already abstracted behind a `Tracker`
-  interface (Linear + mock today) — add adapters for **GitHub Issues**, **Jira**, **Linear**
-  (done), **GitLab**, **Asana**, etc., so tickets can come from wherever your team works.
-  Same shape as the harness abstraction above: one interface, pluggable adapters.
-- **Multi-repo PR-refresh** — `locate` is single-repo for now.
-
----
-
-## Status
-
-Runs end-to-end on real tickets (question, data export, change, and PR-refresh paths all
-verified). Runs on your machine; hosted or shared multi-user use should use the
-provider's supported automation authentication instead of copying a personal login.
-
-MIT.
+MIT

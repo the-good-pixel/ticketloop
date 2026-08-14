@@ -29,12 +29,16 @@ const post = (path, data) =>
 const state = {
   catalog: null,
   selected: null,      // { kind: 'workflow'|'step', ref }
+  selectionSource: 'project', // project | template | catalog
   draft: null,         // an unsaved workflow being edited
   draftBase: null,     // the ref it was cloned from
+  stepDraft: null,     // an unsaved new version of a catalog step
+  stepDraftBase: null, // the published step version it started from
   project: '',         // compile against this project's policy
   preview: null,
   collapsed: new Set(), // branch cases folded away, keyed "<branchId>:<case>"
   zoom: null,           // null = fit to the pane on the next render
+  focusCase: null,      // route tab to centre after the diagram is redrawn
 };
 
 // ---- loading ---------------------------------------------------------------
@@ -42,8 +46,11 @@ const state = {
 async function load() {
   try {
     state.catalog = await api('/api/catalog');
-    if (!state.selected) state.selected = { kind: 'workflow', ref: state.catalog.defaultWorkflow };
     if (!state.project && state.catalog.projects.length) state.project = state.catalog.projects[0].name;
+    const project = currentProject();
+    if (!state.selected) {
+      state.selected = { kind: 'workflow', ref: project?.workflow || state.catalog.defaultWorkflow };
+    }
     renderRail();
     renderProjectPicker();
     await renderMain();
@@ -64,24 +71,46 @@ function showError(msg) {
 function renderRail() {
   const wfList = $('#wfList');
   wfList.replaceChildren();
-  for (const wf of state.catalog.workflows) {
+
+  // Projects are the primary objects people edit. The catalog version is an
+  // implementation detail, so show one entry per project rather than every
+  // historical version of the standard workflow.
+  for (const project of state.catalog.projects) {
+    const wf = state.catalog.workflows.find((item) => item.ref === project.workflow);
     const li = el('li', 'wf-item');
-    if (state.selected.kind === 'workflow' && state.selected.ref === wf.ref) li.classList.add('is-active');
+    if (state.selectionSource === 'project' && project.name === state.project && state.selected.kind === 'workflow')
+      li.classList.add('is-active');
     const main = el('div', 'wf-item-main');
-    main.append(el('span', 'wf-item-name', wf.name));
-    main.append(el('span', 'wf-item-ref', wf.ref));
+    main.append(el('span', 'wf-item-name', projectName(project.name)));
+    main.append(el('span', 'wf-item-ref', wf?.name || 'Standard template'));
     li.append(main);
     const tags = el('div', 'wf-item-tags');
-    tags.append(el('span', 'tag tag-' + wf.scope, wf.scope));
-    if (wf.usedBy.length) tags.append(el('span', 'tag tag-use', wf.usedBy.join(', ')));
+    tags.append(el('span', 'tag tag-use', project.engine === 'workflow' ? 'Custom workflow' : 'Custom instructions'));
     li.append(tags);
-    li.addEventListener('click', () => select({ kind: 'workflow', ref: wf.ref }));
+    li.addEventListener('click', () => selectProject(project.name));
+    wfList.append(li);
+  }
+
+  const latestTemplate = latestStandardTemplate();
+  if (latestTemplate) {
+    const heading = el('li', 'wf-list-label', 'Template');
+    wfList.append(heading);
+    const li = el('li', 'wf-item wf-template-item');
+    if (state.selectionSource === 'template' && state.selected.kind === 'workflow')
+      li.classList.add('is-active');
+    const main = el('div', 'wf-item-main');
+    main.append(el('span', 'wf-item-name', 'Standard template'));
+    main.append(el('span', 'wf-item-ref', 'Starting point for a project workflow'));
+    li.append(main);
+    li.addEventListener('click', () => select({ kind: 'workflow', ref: latestTemplate.ref }, 'template'));
     wfList.append(li);
   }
 
   const stepList = $('#wfStepList');
   stepList.replaceChildren();
-  for (const st of state.catalog.steps) {
+  const availableSteps = latestCatalogSteps();
+  $('#wfStepCount').textContent = `${availableSteps.length} available`;
+  for (const st of availableSteps) {
     const li = el('li', 'wf-item');
     if (state.selected.kind === 'step' && state.selected.ref === st.ref) li.classList.add('is-active');
     const main = el('div', 'wf-item-main');
@@ -101,22 +130,68 @@ function renderRail() {
   }
 }
 
+function projectName(name) {
+  if (name.toLowerCase() === 'hkbu') return 'HKBU';
+  return name.split(/[-_]/).map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+}
+
+function latestStandardTemplate() {
+  return state.catalog.workflows
+    .filter((workflow) => workflow.id === 'standard' && workflow.scope === 'builtin')
+    .sort((a, b) => b.version - a.version)[0];
+}
+
+/** The catalog keeps every immutable version, but normal picking should show
+ * the newest version of each reusable step rather than a wall of history. */
+function latestCatalogSteps() {
+  const latest = new Map();
+  for (const step of state.catalog?.steps || []) {
+    const prior = latest.get(step.id);
+    if (!prior || step.version > prior.version) latest.set(step.id, step);
+  }
+  return [...latest.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function selectProject(name) {
+  if (hasUnsavedDraft() && !confirm('Discard the unsaved changes and switch project?')) return;
+  state.draft = null;
+  state.draftBase = null;
+  state.stepDraft = null;
+  state.stepDraftBase = null;
+  state.project = name;
+  state.selectionSource = 'project';
+  const project = currentProject();
+  state.selected = { kind: 'workflow', ref: project?.workflow || state.catalog.defaultWorkflow };
+  state.preview = null;
+  state.collapsed.clear();
+  state.zoom = null;
+  renderProjectPicker();
+  renderRail();
+  renderMain();
+}
+
 function renderProjectPicker() {
   const sel = $('#wfProject');
   sel.replaceChildren();
-  sel.append(new Option('no project (defaults only)', ''));
   for (const p of state.catalog.projects) {
-    const o = new Option(`${p.name} (${p.engine})`, p.name);
+    const o = new Option(p.name, p.name);
     o.selected = p.name === state.project;
     sel.append(o);
   }
 }
 
-function select(sel) {
-  if (state.draft && !confirm('Discard the unsaved draft?')) return;
+function currentProject() {
+  return state.catalog?.projects.find((p) => p.name === state.project);
+}
+
+function select(sel, source = 'catalog') {
+  if (hasUnsavedDraft() && !confirm('Discard the unsaved changes?')) return;
   state.draft = null;
   state.draftBase = null;
+  state.stepDraft = null;
+  state.stepDraftBase = null;
   state.selected = sel;
+  state.selectionSource = source;
   state.preview = null; // a different workflow folds fresh
   state.collapsed.clear();
   state.zoom = null;
@@ -128,23 +203,45 @@ function select(sel) {
 
 async function renderMain() {
   const isWorkflow = state.selected.kind === 'workflow' || !!state.draft;
-  $('#wfExportBtn').hidden = false;
-  $('#wfSaveBtn').hidden = !state.draft;
-  $('#wfAssignBtn').hidden = !!state.draft || state.selected.kind !== 'workflow';
+  const isEditing = !!state.draft || !!state.stepDraft;
+  $('#viewWorkflows').classList.toggle('is-editing', !!state.draft);
+  document.body.classList.toggle('workflow-editing', !!state.draft);
+  $('#wfSaveBtn').hidden = !isEditing;
+  $('#wfDiscardBtn').hidden = !isEditing;
+  $('#wfCloneBtn').hidden = isEditing;
+  $('#wfAssignBtn').hidden = isEditing || state.selected.kind !== 'workflow' || currentProject()?.workflow === state.selected.ref;
+  $('#wfAssignBtn').textContent = `Switch ${state.project} to this workflow`;
+  $('#wfSaveBtn').textContent = state.stepDraft ? 'Save new default' : `Save for ${state.project}`;
+  $('#wfDiscardBtn').textContent = state.stepDraft ? 'Cancel editing' : 'Discard changes';
   const banner = $('#wfDraftBanner');
-  banner.hidden = !state.draft;
+  banner.hidden = !isEditing;
   if (state.draft) {
     banner.replaceChildren();
-    banner.append(el('b', null, 'Unsaved draft'));
+    banner.append(el('b', null, `Editing for ${state.project || 'project defaults'}`));
     banner.append(el('span', null,
-      ` — cloned from ${state.draftBase}. Published versions are immutable, so saving creates a new version.`));
+      ` — based on ${friendlyRef(state.draftBase)}. Saving creates a new version and uses it only for ${state.project}.`));
+  } else if (state.stepDraft) {
+    banner.replaceChildren();
+    banner.append(el('b', null, `Editing the default for ${state.stepDraft.name}`));
+    banner.append(el('span', null,
+      ` — based on ${friendlyRef(state.stepDraftBase)}. Saving publishes a new step version; existing workflows stay pinned until you choose the new version.`));
   }
   if (isWorkflow) return renderWorkflow();
   return renderStep();
 }
 
+function friendlyRef(ref) {
+  if (!ref) return '';
+  const [id, version] = ref.split('@');
+  return version ? `${id}, version ${version}` : ref;
+}
+
 function findStep(ref) {
   return state.catalog.steps.find((s) => s.ref === ref);
+}
+
+function hasUnsavedDraft() {
+  return !!state.draft || !!state.stepDraft;
 }
 
 // ---- step detail -----------------------------------------------------------
@@ -152,14 +249,28 @@ function findStep(ref) {
 function renderStep() {
   const st = findStep(state.selected.ref);
   if (!st) return;
-  $('#wfTitle').textContent = st.name;
-  $('#wfSubtitle').textContent = `${st.ref} · ${st.scope}${st.editable ? '' : ' · immutable'}`;
-  $('#wfCloneBtn').textContent = 'Clone to edit';
+  const draft = state.stepDraft;
+  $('#wfTitle').textContent = draft?.name || st.name;
+  $('#wfSubtitle').textContent = draft
+    ? `New default based on ${friendlyRef(state.stepDraftBase)} · not saved`
+    : `${friendlyRef(st.ref)} · ${st.scope} · published`;
+  $('#wfCloneBtn').textContent = 'Edit default instruction';
   $('#wfDiagnostics').replaceChildren();
 
   const body = $('#wfBody');
   body.replaceChildren();
-  body.append(el('p', 'wf-desc', st.description));
+  body.append(el('p', 'wf-desc', draft?.description || st.description));
+
+  if (draft) {
+    const intro = el('div', 'wf-step-edit-intro');
+    const marker = el('span', 'wf-step-edit-icon', '✎');
+    const words = el('div');
+    words.append(el('b', null, 'Set the reusable default instruction'));
+    words.append(el('p', null,
+      'Workflow steps without a custom instruction use this text. Saving creates a new catalog version so running and published workflows do not change unexpectedly.'));
+    intro.append(marker, words);
+    body.append(intro);
+  }
 
   const facts = el('div', 'wf-facts');
   const fact = (k, v) => {
@@ -193,15 +304,34 @@ function renderStep() {
     }
   }
 
-  body.append(el('h3', 'wf-h3', 'Instruction'));
+  body.append(el('h3', 'wf-h3', draft ? 'Default instruction' : 'Default instruction'));
+  if (draft) {
+    const help = el('p', 'wf-field-help',
+      'Describe what the agent should do, the important limits, and what a good result looks like. Project workflows can still replace this instruction for one specific node.');
+    body.append(help);
+  }
   const ta = el('textarea', 'wf-instruction');
-  ta.value = state.draft?.instruction ?? '';
-  ta.readOnly = true;
-  // The list payload omits the (long) instruction; fetch it on demand.
-  api('/api/catalog/step/' + encodeURIComponent(st.ref))
-    .then((r) => { ta.value = r.step.instruction; })
-    .catch((e) => { ta.value = '(could not load: ' + e.message + ')'; });
+  ta.value = draft?.instruction || '';
+  ta.readOnly = !draft;
+  ta.placeholder = draft ? 'Write the default instruction for this step…' : '';
+  if (draft) {
+    ta.classList.add('is-editing');
+    ta.addEventListener('input', () => { state.stepDraft.instruction = ta.value; });
+  } else {
+    // The list payload omits the (long) instruction; fetch it on demand.
+    api('/api/catalog/step/' + encodeURIComponent(st.ref))
+      .then((r) => { ta.value = r.step.instruction; })
+      .catch((e) => { ta.value = '(could not load: ' + e.message + ')'; });
+  }
   body.append(ta);
+
+  if (draft) {
+    const note = el('div', 'wf-version-note');
+    note.append(el('b', null, `What happens after saving ${draft.id}@${draft.version}`));
+    note.append(el('span', null,
+      'The new version becomes the version offered when adding or replacing this step. Existing workflow versions keep their current instruction until edited and saved.'));
+    body.append(note);
+  }
 }
 
 function resumeExplain(policy) {
@@ -219,22 +349,30 @@ async function renderWorkflow() {
   const ref = state.draft ? null : state.selected.ref;
   const firstRender = !state.preview;
   const meta = state.draft || state.catalog.workflows.find((w) => w.ref === ref);
-  $('#wfTitle').textContent = meta.name;
+  $('#wfTitle').textContent = state.draft
+    ? meta.name
+    : state.selectionSource === 'template'
+      ? 'Standard template'
+      : `${projectName(state.project)} workflow`;
   $('#wfSubtitle').textContent = state.draft
-    ? 'draft — not saved'
-    : `${ref} · ${meta.scope}${meta.usedBy?.length ? ' · used by ' + meta.usedBy.join(', ') : ''}`;
-  $('#wfCloneBtn').textContent = 'Clone to edit';
+    ? `Draft for ${state.project} · changes not saved`
+    : state.selectionSource === 'project'
+      ? `${projectName(state.project)} workflow · includes this project's custom instructions`
+      : 'Standard template · choose Edit to make a project copy';
+  $('#wfCloneBtn').textContent = `Edit for ${state.project}`;
 
   const preview = await post('/api/catalog/preview', {
     workflow: state.draft || undefined,
     ref: ref || undefined,
-    project: state.project || undefined,
+    project: (state.draft || state.selectionSource === 'project') ? state.project || undefined : undefined,
   }).catch((e) => ({ error: e.message }));
   state.preview = preview;
+  const displayTree = preview.tree ? simplifyTriageTree(preview.tree) : [];
+  const diagramTree = state.focusCase ? focusCaseTree(displayTree, state.focusCase) : displayTree;
 
   // Open folded. A workflow with five branch cases side by side is wider than
   // any screen; the shape is what matters first, the detail on demand.
-  if (firstRender && !state.collapsed.size) collapseEveryCase(preview.tree);
+  if (firstRender && !state.collapsed.size) collapseEveryCase(displayTree);
 
   renderDiagnostics(preview);
   const body = $('#wfBody');
@@ -247,7 +385,12 @@ async function renderWorkflow() {
 
   // --- the diagram: what would actually run ---
   const head = el('div', 'section-head');
-  head.append(el('h3', 'wf-h3', 'Compiled plan'));
+  const title = el('div');
+  title.append(el('h3', 'wf-h3', state.draft ? 'Editing flow' : 'Workflow map'));
+  title.append(el('p', 'wf-canvas-help', state.draft
+    ? 'Select any card, route, loop, or ending to edit it.'
+    : 'Select a route to open it. Choose Edit workflow to make changes.'));
+  head.append(title);
   const tools = el('div', 'wf-diagram-tools');
   const zoomBtn = (label, delta) => {
     const b = el('button', 'btn btn-ghost btn-sm', label);
@@ -275,25 +418,27 @@ async function renderWorkflow() {
     renderWorkflow();
   });
   tools.append(foldAll);
-  tools.append(el('span', 'muted', 'digest ' + preview.digest));
   head.append(tools);
   body.append(head);
 
-  if (state.draft) {
-    body.append(el('p', 'muted',
-      'Click a step to edit it, a loop to change its bounds, or a case label to fold it away. ' +
-      'Use the buttons on a selected step to insert, move or remove it.'));
-  }
+  if (state.draft) body.append(routeTabs(displayTree));
 
   const canvas = el('div', 'wf-canvas');
   body.append(canvas);
-  renderDiagram(canvas, preview.tree, {
+  renderDiagram(canvas, diagramTree, {
     editable: !!state.draft,
+    panReserve: state.draft ? 460 : 0,
     collapsed: state.collapsed,
     zoom: state.zoom,
+    focusCase: state.focusCase,
     onFit: (z) => { pct.textContent = Math.round(z * 100) + '%'; },
     onNode: (id) => (state.draft ? openNodeEditor(id, 'step') : showNodeInfo(id)),
     onLoop: (id) => (state.draft ? openNodeEditor(id, 'loop') : showNodeInfo(id)),
+    onInsert: (id) => openInsertEditor(id),
+    canInsert: (id) => !!findNode(id)?.list,
+    onReplace: (id) => openReplaceEditor(id),
+    onRemove: (id) => removeNodeFromCanvas(id),
+    canRemove: (id) => canRemoveNode(id),
     onCase: (key) => {
       if (state.collapsed.has(key)) state.collapsed.delete(key);
       else state.collapsed.add(key);
@@ -301,7 +446,10 @@ async function renderWorkflow() {
       renderWorkflow();
     },
   });
+  if (state.draft) enableCanvasPan(canvas);
   body.append(legend());
+
+  if (state.draft) return;
 
   // --- finally + outcomes: the parts people forget until a ticket goes silent ---
   if (preview.finallyNodes.length) {
@@ -325,6 +473,177 @@ async function renderWorkflow() {
   body.append(el('p', 'muted', 'Permissions granted here: ' + (granted.join(', ') || 'none')));
 }
 
+/** Drag empty canvas space like a design tool. Nodes and controls keep their
+ * normal click behavior; the canvas itself becomes the pan surface. */
+function enableCanvasPan(canvas) {
+  let active = false;
+  let startX = 0;
+  let startY = 0;
+  let startLeft = 0;
+  let startTop = 0;
+  const interactive = '[data-node], [data-loop], [data-case], [data-insert], [data-replace], [data-remove]';
+
+  canvas.classList.add('is-pannable');
+  canvas.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.target.closest(interactive)) return;
+    active = true;
+    startX = event.clientX;
+    startY = event.clientY;
+    startLeft = canvas.scrollLeft;
+    startTop = canvas.scrollTop;
+    canvas.classList.add('is-panning');
+    try { canvas.setPointerCapture(event.pointerId); } catch (_error) { /* synthetic pointer in tests */ }
+    event.preventDefault();
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!active) return;
+    canvas.scrollLeft = startLeft - (event.clientX - startX);
+    canvas.scrollTop = startTop - (event.clientY - startY);
+    event.preventDefault();
+  });
+  const stop = (event) => {
+    if (!active) return;
+    active = false;
+    canvas.classList.remove('is-panning');
+    try { canvas.releasePointerCapture(event.pointerId); } catch (_error) { /* pointer already released */ }
+  };
+  canvas.addEventListener('pointerup', stop);
+  canvas.addEventListener('pointercancel', stop);
+}
+
+function showNodeDrawer(nodeId) {
+  $('#nodeOverlay').hidden = false;
+  document.body.classList.add('workflow-node-open');
+  requestAnimationFrame(() => keepNodeClearOfDrawer(nodeId));
+}
+
+/** If a card sits under the drawer, pan just enough to keep the whole card
+ * visible. The user can continue dragging from there. */
+function keepNodeClearOfDrawer(nodeId) {
+  if (!nodeId) return;
+  const canvas = $('.wf-canvas');
+  const drawer = $('.wf-node-drawer');
+  const escaped = CSS.escape(nodeId);
+  const target = canvas?.querySelector(`[data-node="${escaped}"], [data-loop="${escaped}"]`);
+  if (!canvas || !drawer || !target) return;
+  const targetBox = target.getBoundingClientRect();
+  const drawerBox = drawer.getBoundingClientRect();
+  const safeRight = drawerBox.left - 28;
+  if (targetBox.right > safeRight) canvas.scrollLeft += targetBox.right - safeRight;
+}
+
+/**
+ * Route tabs act like focused views. Once a route is chosen, its sibling
+ * columns stay available in the tabs but leave the canvas, giving the active
+ * path the centre instead of squeezing it against an edge.
+ */
+function focusCaseTree(tree, key) {
+  const splitAt = key.indexOf(':');
+  const branchId = key.slice(0, splitAt);
+  const caseName = key.slice(splitAt + 1);
+  return tree.map((phase) => {
+    if (phase.kind === 'branch') {
+      const cases = phase.id === branchId
+        ? phase.cases.filter((route) => route.name === caseName)
+        : phase.cases.map((route) => ({ ...route, phases: focusCaseTree(route.phases, key) }));
+      return { ...phase, cases };
+    }
+    if (phase.kind === 'loop') {
+      return { ...phase, repair: focusCaseTree([phase.repair], key)[0], gates: focusCaseTree(phase.gates, key) };
+    }
+    return phase;
+  });
+}
+
+/**
+ * Triage emits two internal fields: DECISION handles early exits and KIND
+ * chooses the work path. People experience both as one decision, so the
+ * editor combines them into one fan-out and omits the invisible no-op exit.
+ * Execution still uses the untouched compiled tree in `state.preview`.
+ */
+function simplifyTriageTree(tree) {
+  const decisionIndex = tree.findIndex((phase) => phase.kind === 'branch' && phase.on?.field === 'DECISION');
+  const kindIndex = tree.findIndex((phase) => phase.kind === 'branch' && phase.on?.field === 'KIND');
+  if (decisionIndex < 0 || kindIndex < 0 || decisionIndex >= kindIndex) return tree;
+  const decision = tree[decisionIndex];
+  const kind = tree[kindIndex];
+  const ineligible = decision.cases.find((route) => route.name === 'ineligible');
+  // The compiler exposes the branch's default fallback as a case named
+  // "default". Triage can only emit question/data/bug/change, and malformed
+  // output already falls back to the Change path. It is execution safety, not
+  // a ticket type users can choose, so keep it out of the visual editor.
+  const ticketTypes = kind.cases.filter((route) => route.name !== 'default');
+  const combined = {
+    ...kind,
+    compact: true,
+    cases: [...(ineligible ? [ineligible] : []), ...ticketTypes],
+  };
+  const result = tree.filter((_, index) => index !== decisionIndex && index !== kindIndex);
+  result.splice(decisionIndex, 0, combined);
+  return result;
+}
+
+function routeTabs(tree) {
+  const box = el('div', 'wf-route-tabs');
+  const label = el('span', 'wf-route-label', 'Triage result');
+  box.append(label);
+  const branches = [];
+  const collect = (phases) => {
+    for (const phase of phases || []) {
+      if (phase.kind === 'branch') {
+        branches.push(phase);
+        for (const route of phase.cases) collect(route.phases);
+      }
+      if (phase.kind === 'loop') collect([phase.repair, ...phase.gates]);
+    }
+  };
+  collect(tree);
+  const branch = branches.sort((a, b) => b.cases.length - a.cases.length)[0];
+  if (!branch) return box;
+
+  const all = el('button', 'wf-route-tab' + (branch.cases.every((route) => !state.collapsed.has(`${branch.id}:${route.name}`)) ? ' is-active' : ''), 'All routes');
+  all.type = 'button';
+  all.addEventListener('click', () => {
+    for (const route of branch.cases) state.collapsed.delete(`${branch.id}:${route.name}`);
+    state.focusCase = null;
+    renderWorkflow();
+  });
+  box.append(all);
+  for (const [index, route] of branch.cases.entries()) {
+    const key = `${branch.id}:${route.name}`;
+    const active = !state.collapsed.has(key) && branch.cases.filter((item) => !state.collapsed.has(`${branch.id}:${item.name}`)).length === 1;
+    const button = el('button', `wf-route-tab wd-route-${routeTone(route.name, index)}` + (active ? ' is-active' : ''), friendlyRoute(route.name));
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      for (const item of branch.cases) state.collapsed.add(`${branch.id}:${item.name}`);
+      state.collapsed.delete(key);
+      state.focusCase = key;
+      renderWorkflow();
+    });
+    box.append(button);
+  }
+  const add = el('button', 'wf-route-add', '+ Add path');
+  add.type = 'button';
+  add.title = 'Add another triage result';
+  add.addEventListener('click', () => openNodeEditor(branch.id, 'branch'));
+  box.append(add);
+  return box;
+}
+
+function routeTone(name, index) {
+  const known = {
+    ineligible: 'rose', question: 'violet', data: 'teal', bug: 'orange', change: 'blue',
+  };
+  if (known[name]) return known[name];
+  const tones = ['blue', 'violet', 'teal', 'orange', 'rose', 'green'];
+  return tones[index % tones.length];
+}
+
+function friendlyRoute(name) {
+  return ({ question: 'Question', data: 'Data request', bug: 'Bug', change: 'Change', default: 'Other' })[name] ||
+    name.replace(/[-_]/g, ' ').replace(/^./, (char) => char.toUpperCase());
+}
+
 function collapseEveryCase(tree) {
   for (const p of tree) {
     if (p.kind === 'branch') {
@@ -345,10 +664,7 @@ function legend() {
     s.append(el('span', null, text));
     box.append(s);
   };
-  item('wd-sw-verdict', 'gate — can send the run back, wait, or stop it');
-  item('wd-sw-route', 'routing — its output picks a branch');
-  item('wd-sw-post', 'replies on the ticket');
-  item('wd-sw-text', 'does work, always continues');
+  item('wd-sw-loop', 'loop — repeats work until a check passes');
   item('wd-sw-effect', 'reaches outside the worktree');
   return box;
 }
@@ -434,8 +750,6 @@ function freeNodeId(base) {
   return n;
 }
 
-const RESULTS = ['pass', 'fail', 'wait', 'skip'];
-
 function openNodeEditor(id, kind) {
   const found = findNode(id);
   if (!found) {
@@ -444,7 +758,11 @@ function openNodeEditor(id, kind) {
   }
   const form = $('#nodeForm');
   form.replaceChildren();
-  $('#nodeTitle').textContent = 'Edit ' + id;
+  $('#nodeTitle').textContent = found.isLoop
+    ? 'Loop settings'
+    : found.node.branch
+      ? 'Triage paths'
+      : friendlyNodeName(found.node);
   $('#nodeInlineError').hidden = true;
 
   const field = (label, hint) => {
@@ -471,22 +789,6 @@ function openNodeEditor(id, kind) {
     sel.append(new Option('carry on with what we have', 'exit-loop', false, loop.noProgress === 'exit-loop'));
     np.append(sel);
 
-    const st = field('Structure', 'Gates run in order after the repair step.');
-    const row = el('div', 'struct-row');
-    const addGate = el('button', 'btn btn-ghost btn-sm', '+ Add gate');
-    addGate.type = 'button';
-    addGate.addEventListener('click', () => {
-      const ref = insertPicker();
-      if (!ref) return;
-      const step = findStep(ref);
-      if (step.contract !== 'verdict') return showError(`"${ref}" returns no verdict, so it cannot gate a loop.`);
-      loop.gates.push({ id: freeNodeId(step.id), step: ref, on: { pass: 'exit-loop', fail: 'repair', wait: 'suspend' } });
-      closeNodeEditor();
-      renderWorkflow();
-    });
-    row.append(addGate);
-    st.append(row);
-
     form.onsubmit = (e) => {
       e.preventDefault();
       loop.maxIterations = Number(num.value);
@@ -494,133 +796,414 @@ function openNodeEditor(id, kind) {
       closeNodeEditor();
       renderWorkflow();
     };
+  } else if (found.node.branch) {
+    const branch = found.node.branch;
+    const routesWrap = field('Triage paths',
+      'The Triage step must return the exact path name. Open Triage separately if its instruction needs to recognize a new type.');
+    const caseRows = el('div', 'wf-case-editor');
+    const cases = Object.entries(branch.cases || {}).map(([name, phases]) => ({ name, phases }));
+    const drawCases = () => {
+      caseRows.replaceChildren();
+      cases.forEach((route, index) => {
+        const row = el('div', 'wf-case-row');
+        const input = el('input');
+        input.value = route.name;
+        input.setAttribute('aria-label', `Route ${index + 1} name`);
+        input.addEventListener('input', () => { route.name = input.value; });
+        const count = el('span', 'tag', `${route.phases.length} item${route.phases.length === 1 ? '' : 's'}`);
+        const remove = el('button', 'icon-btn', '×');
+        remove.type = 'button';
+        remove.title = 'Remove route';
+        remove.addEventListener('click', () => {
+          if (!confirm(`Remove route "${route.name}" and every step inside it?`)) return;
+          cases.splice(index, 1);
+          drawCases();
+        });
+        row.append(input, count, remove);
+        caseRows.append(row);
+      });
+    };
+    drawCases();
+    routesWrap.append(caseRows);
+    const addRoute = el('button', 'btn wf-add-route', '+ Add another path');
+    addRoute.type = 'button';
+    addRoute.addEventListener('click', () => {
+      cases.push({
+        name: `new-path-${cases.length + 1}`,
+        phases: [{
+          id: freeNodeId('new-route-end'),
+          stop: 'failed',
+          note: 'No steps are configured for this triage path yet.',
+        }],
+      });
+      drawCases();
+      const inputs = caseRows.querySelectorAll('input');
+      const last = inputs[inputs.length - 1];
+      last?.focus();
+      last?.select();
+    });
+    routesWrap.append(addRoute);
+
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      const names = cases.map((route) => route.name.trim());
+      if (names.some((name) => !name)) return nodeError('Every route needs a name.');
+      if (new Set(names).size !== names.length) return nodeError('Route names must be unique.');
+      branch.cases = Object.fromEntries(cases.map((route, index) => [names[index], route.phases]));
+      closeNodeEditor();
+      state.collapsed.clear();
+      state.focusCase = null;
+      state.preview = null;
+      renderWorkflow();
+    };
+  } else if (found.node.stop) {
+    const node = found.node;
+    const endWrap = field('End the run as', 'The final report still runs unless this ending already replied to the ticket.');
+    const terminal = el('select');
+    for (const value of ['success', 'partial', 'waiting', 'failed', 'skipped', 'blocked']) {
+      terminal.append(new Option(value, value, false, node.stop === value));
+    }
+    endWrap.append(terminal);
+    const outcomeWrap = field('Outcome label', 'Optional short label shown in run history.');
+    const outcome = el('input'); outcome.value = node.outcome || ''; outcome.placeholder = 'for example: answered';
+    outcomeWrap.append(outcome);
+    const reportedWrap = field('Ticket already updated', 'Turn on only when an earlier step has already posted the result.');
+    const reported = el('input'); reported.type = 'checkbox'; reported.checked = !!node.reported;
+    reportedWrap.append(reported);
+    const noteWrap = field('Note');
+    const note = el('textarea', 'wf-instruction'); note.value = node.note || ''; noteWrap.append(note);
+    form.onsubmit = (e) => {
+      e.preventDefault();
+      node.stop = terminal.value;
+      if (outcome.value.trim()) node.outcome = outcome.value.trim(); else delete node.outcome;
+      if (note.value.trim()) node.note = note.value.trim(); else delete node.note;
+      if (reported.checked) node.reported = true; else delete node.reported;
+      closeNodeEditor();
+      renderWorkflow();
+    };
   } else {
     const node = found.node;
     const step = findStep(node.step);
 
-    const sw = field('Step', 'Which catalog step this node runs. Versions are pinned on purpose.');
-    const stepSel = el('select'); stepSel.name = 'step';
-    for (const s of state.catalog.steps)
-      stepSel.append(new Option(`${s.name} — ${s.ref}`, s.ref, false, s.ref === node.step));
-    sw.append(stepSel);
+    const modelWrap = field('Model',
+      `Choose the model for this step in the ${projectName(state.project)} workflow.`);
+    const modelSel = el('select');
+    modelSel.append(new Option('Use the project default', ''));
+    const models = state.catalog.models || {};
+    for (const [provider, choices] of Object.entries(models)) {
+      const group = document.createElement('optgroup');
+      group.label = provider === 'claude' ? 'Claude' : provider === 'codex' ? 'Codex' : provider;
+      for (const choice of choices) {
+        const option = new Option(choice.label, `${provider}:${choice.value}`);
+        group.append(option);
+      }
+      modelSel.append(group);
+    }
+    const currentProvider = node.overrides?.provider || '';
+    const currentModel = node.overrides?.model || '';
+    const currentValue = currentModel ? `${currentProvider || state.catalog.defaultProvider}:${currentModel}` : '';
+    if (currentValue && ![...modelSel.options].some((option) => option.value === currentValue)) {
+      modelSel.append(new Option(currentModel, currentValue));
+    }
+    modelSel.value = currentValue;
+    modelWrap.append(modelSel);
 
-    const enabledWrap = field('Enabled', 'A disabled node is skipped, and its transitions for "skip" apply.');
-    const enabled = el('input'); enabled.type = 'checkbox';
-    enabled.checked = node.overrides?.enabled !== false && (step ? step.defaults.enabled !== false : true);
-    enabledWrap.append(enabled);
+    const effortWrap = field('Thinking effort',
+      'Higher effort gives the model more room to reason, but usually takes longer.');
+    const effortSel = el('select');
+    effortSel.append(new Option('Use the project default', ''));
+    for (const effort of state.catalog.efforts || []) {
+      const label = effort === 'xhigh' ? 'Extra high' : effort.charAt(0).toUpperCase() + effort.slice(1);
+      effortSel.append(new Option(label, effort));
+    }
+    effortSel.value = node.overrides?.effort || '';
+    effortWrap.append(effortSel);
 
-    const transWrap = field('What each result means',
-      'A gate that fails must say where the work goes. "wait" means something outside your control — it suspends instead of rewriting the code.');
-    const targets = ['next', 'stop', 'suspend', 'continue', 'exit-loop', 'repair'];
-    // Any named loop can be a repair target, which is how ship reaches back in.
-    for (const row of state.preview?.trace || [])
-      if (row.kind === 'loop') targets.push(row.id + '.repair');
-    const selects = {};
-    for (const r of RESULTS) {
-      const line = el('div', 'trans-row');
-      line.append(el('span', 'trans-k', r));
-      const s = el('select');
-      s.append(new Option('(default)', ''));
-      for (const t of [...new Set(targets)]) s.append(new Option(t, t, false, node.on?.[r] === t));
-      if (node.on?.[r]) s.value = node.on[r];
-      selects[r] = s;
-      line.append(s);
-      transWrap.append(line);
+    let passSelect = null;
+    let failSelect = null;
+    if (step?.contract === 'verdict') {
+      const outcomes = field('When the check finishes',
+        'Waiting always pauses the workflow. A skipped check always moves on.');
+      passSelect = simpleOutcomeSelect(outcomes, 'On success', [
+        ['Continue to the next step', 'next'],
+        ...(found.loop ? [['Finish this loop', 'exit-loop']] : []),
+        ['Stop this path', 'stop'],
+      ], node.on?.pass || 'next');
+      const failOptions = found.loop
+        ? [['Try this loop again', 'repair'], ['Stop this path', 'stop']]
+        : [['Stop this path', 'stop'], ...availableLoopTargets()];
+      failSelect = simpleOutcomeSelect(outcomes, 'On failure', failOptions, node.on?.fail || 'stop');
     }
 
-    const insWrap = field('Instruction override',
-      'Leave empty to use the step’s own instruction. This is the main knob: tell the model how YOU want this step done.');
+    const defaultWrap = field('Default instruction',
+      `Read-only instruction from “${step?.name || 'this step'}” in the step library.`);
+    const defaultText = el('div', 'wf-default-instruction', 'Loading default instruction…');
+    defaultWrap.append(defaultText);
+    if (step?.ref) {
+      api('/api/catalog/step/' + encodeURIComponent(step.ref))
+        .then((result) => {
+          if (defaultText.isConnected) defaultText.textContent = result.step.instruction || 'No default instruction.';
+        })
+        .catch((error) => {
+          if (defaultText.isConnected) defaultText.textContent = `Could not load the default instruction: ${error.message}`;
+        });
+    }
+
+    const insWrap = field('Project customization',
+      `Leave empty to use the default. If you add text, the ${projectName(state.project)} workflow uses your version instead; the step-library default stays unchanged.`);
     const ta = el('textarea', 'wf-instruction');
     ta.value = node.overrides?.instruction || '';
+    ta.placeholder = 'Add a project-specific instruction…';
     insWrap.append(ta);
-    const modeSel = el('select');
-    modeSel.append(new Option('replace the step instruction', 'replace', false, node.overrides?.instructionMode !== 'append'));
-    modeSel.append(new Option('append to the step instruction', 'append', false, node.overrides?.instructionMode === 'append'));
-    insWrap.append(modeSel);
-
-    // --- structure ---------------------------------------------------------
-    if (found.slot !== 'repair') {
-      const st = field('Structure',
-        found.slot === 'gate'
-          ? 'Gates run in order; the first one that fails short-circuits the rest.'
-          : 'Where this step sits in the sequence.');
-      const row = el('div', 'struct-row');
-      const act = (label, title, fn) => {
-        const b = el('button', 'btn btn-ghost btn-sm', label);
-        b.type = 'button';
-        b.title = title;
-        b.addEventListener('click', () => { fn(); closeNodeEditor(); renderWorkflow(); });
-        row.append(b);
-      };
-      const list = found.list;
-      if (found.index > 0) act('↑ Move up', 'Run this one earlier', () => {
-        [list[found.index - 1], list[found.index]] = [list[found.index], list[found.index - 1]];
-      });
-      if (found.index < list.length - 1) act('↓ Move down', 'Run this one later', () => {
-        [list[found.index + 1], list[found.index]] = [list[found.index], list[found.index + 1]];
-      });
-      act('+ Insert step after', 'Add another step directly after this one', () => {
-        const ref = insertPicker();
-        if (!ref) return;
-        const step = findStep(ref);
-        list.splice(found.index + 1, 0, {
-          id: freeNodeId(step.id),
-          step: ref,
-          // A gate must always say what a failure means; anything else just
-          // carries on. Never leave a new node with an undefined failure path.
-          on: step.contract === 'verdict'
-            ? { pass: 'next', fail: found.slot === 'gate' ? 'repair' : 'stop' }
-            : { pass: 'next' },
-        });
-      });
-      act('✕ Remove', 'Delete this node from the workflow', () => {
-        if (confirm(`Remove "${node.id}" from the workflow?`)) list.splice(found.index, 1);
-      });
-      st.append(row);
-    }
 
     form.onsubmit = (e) => {
       e.preventDefault();
-      node.step = stepSel.value;
       node.on = node.on || {};
-      for (const r of RESULTS) {
-        if (selects[r].value) node.on[r] = selects[r].value;
-        else delete node.on[r];
+      if (passSelect && failSelect) {
+        node.on.pass = passSelect.value;
+        node.on.fail = failSelect.value;
+        node.on.wait = 'suspend';
+        node.on.skip = found.loop && passSelect.value === 'exit-loop' ? 'exit-loop' : 'next';
       }
       node.overrides = node.overrides || {};
+      node.overrides.enabled = true;
+      if (modelSel.value) {
+        const splitAt = modelSel.value.indexOf(':');
+        node.overrides.provider = modelSel.value.slice(0, splitAt);
+        node.overrides.model = modelSel.value.slice(splitAt + 1);
+      } else {
+        delete node.overrides.provider;
+        delete node.overrides.model;
+      }
+      if (effortSel.value) node.overrides.effort = effortSel.value;
+      else delete node.overrides.effort;
       if (ta.value.trim()) {
         node.overrides.instruction = ta.value;
-        node.overrides.instructionMode = modeSel.value;
+        node.overrides.instructionMode = 'replace';
       } else {
         delete node.overrides.instruction;
         delete node.overrides.instructionMode;
       }
-      const stepDefaultEnabled = findStep(stepSel.value)?.defaults.enabled !== false;
-      if (enabled.checked === stepDefaultEnabled) delete node.overrides.enabled;
-      else node.overrides.enabled = enabled.checked;
       if (!Object.keys(node.overrides).length) delete node.overrides;
       closeNodeEditor();
       renderWorkflow();
     };
   }
-  $('#nodeOverlay').hidden = false;
+  showNodeDrawer(id);
 }
 
-/** Minimal step chooser for "insert after". Returns a ref, or null if cancelled. */
-function insertPicker() {
-  const options = state.catalog.steps.map((s) => `${s.ref}  —  ${s.name}`).join('\n');
-  const answer = prompt(`Which step? Type its reference exactly.\n\n${options}`, 'plan@1');
-  if (!answer) return null;
-  const ref = answer.trim().split(/\s/)[0];
-  if (!findStep(ref)) {
-    showError(`No step "${ref}" in the catalog.`);
-    return null;
+function simpleOutcomeSelect(host, label, options, value) {
+  const row = el('label', 'wf-outcome-row');
+  row.append(el('span', null, label));
+  const select = el('select');
+  for (const [text, target] of options) select.append(new Option(text, target, false, target === value));
+  if (![...select.options].some((option) => option.value === value)) select.value = options[0]?.[1] || '';
+  row.append(select);
+  host.append(row);
+  return select;
+}
+
+function availableLoopTargets() {
+  const loops = (state.preview?.trace || []).filter((row) => row.kind === 'loop');
+  return loops.map((loop) => [`Send back to “${friendlyLoopName(loop.id)}”`, `${loop.id}.repair`]);
+}
+
+function friendlyLoopName(id) {
+  return id.replace(/[-_]/g, ' ').replace(/^./, (char) => char.toUpperCase());
+}
+
+function openInsertEditor(id) {
+  const found = findNode(id);
+  if (!found?.list) return;
+  openStepPicker(`Add after ${friendlyNodeName(found.node)}`, found, false);
+}
+
+function openReplaceEditor(id) {
+  const found = findNode(id);
+  if (!found?.node?.step) return;
+  openStepPicker(`Replace ${friendlyNodeName(found.node)}`, found, true);
+}
+
+function openStepPicker(title, found, replacing) {
+  const form = $('#nodeForm');
+  form.replaceChildren();
+  $('#nodeTitle').textContent = title;
+  $('#nodeInlineError').hidden = true;
+  const wrap = el('div', 'field wf-step-picker-field');
+  wrap.append(el('p', 'field-hint', replacing
+    ? 'Choose a replacement. Instructions from the old step will be cleared.'
+    : 'Choose a flow control or a catalog step.'));
+
+  const inLoop = !!found.loop;
+  // Catalog contracts describe how the engine parses a result, not how the
+  // builder should explain the step. Locate emits a route-shaped REUSE value,
+  // but every result continues to the next card, so it is work from the user's
+  // point of view. Only steps that actually shape the visible graph belong in
+  // Flow controls.
+  const currentSteps = latestCatalogSteps();
+  const routeSteps = currentSteps.filter((step) => step.id === 'triage');
+  const workSteps = currentSteps.filter((step) => step.id !== 'triage');
+  if (!replacing && !inLoop) {
+    const flow = pickerSection(wrap, 'Flow controls', 'Shape how the path runs.');
+    pickerChoice(flow, { name: 'Loop', description: 'Repeat work until its checks pass', icon: '↻', contract: 'flow' }, () => {
+      found.list.splice(found.index + 1, 0, createLoopNode());
+      closeNodeEditor();
+      renderWorkflow();
+    });
+    for (const step of routeSteps) pickerCatalogStep(flow, found, step, replacing);
+  } else if (replacing && !inLoop && routeSteps.length) {
+    const flow = pickerSection(wrap, 'Flow steps', 'Steps that inspect a ticket and choose what happens next.');
+    for (const step of routeSteps) pickerCatalogStep(flow, found, step, true);
   }
-  return ref;
+
+  const availableWork = inLoop
+    ? workSteps.filter((step) => step.contract === 'verdict' && !step.capabilities.externalEffects.length && !(step.requires || []).length)
+    : workSteps;
+  if (availableWork.length) {
+    const work = pickerSection(wrap, inLoop ? 'Quality checks' : 'Work steps', inLoop
+      ? 'A loop repeats when one of these checks fails.'
+      : 'Reusable steps from your step catalog.');
+    for (const step of availableWork) pickerCatalogStep(work, found, step, replacing);
+  }
+
+  form.append(wrap);
+  form.onsubmit = (event) => event.preventDefault();
+  $('#nodeSave').hidden = true;
+  $('#nodeCancel').textContent = 'Close';
+  showNodeDrawer(found.node?.id || found.node?.loop?.id);
+}
+
+function pickerSection(host, title, hint) {
+  const section = el('section', 'wf-picker-section');
+  section.append(el('h3', null, title));
+  section.append(el('p', null, hint));
+  const grid = el('div', 'wf-step-grid');
+  section.append(grid);
+  host.append(section);
+  return grid;
+}
+
+function pickerCatalogStep(grid, found, step, replacing) {
+  pickerChoice(grid, {
+    name: step.name,
+    description: stepChoiceDescription(step),
+    icon: stepIcon(step),
+    contract: step.contract,
+  }, () => {
+    if (replacing) replaceNodeStep(found, step);
+    else found.list.splice(found.index + 1, 0, createStepNode(step, found));
+    closeNodeEditor();
+    renderWorkflow();
+  });
+}
+
+function pickerChoice(grid, choice, onChoose) {
+    const button = el('button', `wf-step-choice wd-choice-${choice.contract}`);
+    button.type = 'button';
+    button.className = `wf-step-choice wd-choice-${choice.contract}`;
+    button.append(el('span', 'wf-step-choice-icon', choice.icon));
+    const words = el('span');
+    words.append(el('b', null, choice.name));
+    words.append(el('small', null, choice.description));
+    button.append(words);
+    button.addEventListener('click', onChoose);
+    grid.append(button);
+}
+
+function createStepNode(step, found) {
+  return {
+    id: freeNodeId(step.id),
+    step: step.ref,
+    on: step.contract === 'verdict'
+      ? { pass: found.loop ? 'exit-loop' : 'next', fail: found.loop ? 'repair' : 'stop', wait: 'suspend', skip: found.loop ? 'exit-loop' : 'next' }
+      : { pass: 'next' },
+    overrides: { enabled: true },
+  };
+}
+
+function replaceNodeStep(found, step) {
+  found.node.step = step.ref;
+  found.node.on = createStepNode(step, found).on;
+  found.node.overrides = { enabled: true };
+}
+
+function createLoopNode() {
+  const currentSteps = latestCatalogSteps();
+  const repairStep = currentSteps.find((step) => step.id === 'fix') ||
+    currentSteps.find((step) => step.contract === 'text');
+  const gateStep = currentSteps.find((step) => step.id === 'verify') ||
+    currentSteps.find((step) => step.contract === 'verdict');
+  if (!repairStep || !gateStep) throw new Error('A loop needs at least one work step and one quality check in the catalog.');
+  return {
+    loop: {
+      id: freeNodeId('work-loop'),
+      repair: {
+        id: freeNodeId('loop-work'),
+        step: repairStep.ref,
+        on: { pass: 'next' },
+        overrides: { enabled: true },
+      },
+      gates: [{
+        id: freeNodeId('loop-check'),
+        step: gateStep.ref,
+        on: { pass: 'exit-loop', fail: 'repair', wait: 'suspend', skip: 'exit-loop' },
+        overrides: { enabled: true },
+      }],
+      maxIterations: 3,
+      noProgress: 'stop',
+    },
+  };
+}
+
+function removeNodeFromCanvas(id) {
+  const found = findNode(id);
+  if (!found?.list) return;
+  if (found.slot === 'gate' && found.loop?.gates.length <= 1) {
+    return toast('A loop needs at least one quality check');
+  }
+  if (!confirm(`Remove “${friendlyNodeName(found.node)}” from this path?`)) return;
+  found.list.splice(found.index, 1);
+  closeNodeEditor();
+  state.zoom = null;
+  renderWorkflow();
+}
+
+function canRemoveNode(id) {
+  const found = findNode(id);
+  if (!found?.list) return false;
+  return !(found.slot === 'gate' && found.loop?.gates.length <= 1);
+}
+
+function friendlyNodeName(node) {
+  if (node.step) return findStep(node.step)?.name || node.id;
+  if (node.stop) return 'ending';
+  if (node.loop) return 'loop';
+  if (node.branch) return 'route';
+  return node.id || 'item';
+}
+
+function stepIcon(step) {
+  if (step.capabilities.externalEffects.length) return '↗';
+  return ({ route: '⑂', verdict: '✓', post: '↥', text: '•', artifact: '◆' })[step.contract] || '•';
+}
+
+function stepChoiceDescription(step) {
+  if (step.capabilities.externalEffects.length) return 'Connects to an outside service';
+  if (step.id === 'locate') return 'Checks whether this ticket already has a PR';
+  return ({ route: 'Chooses what happens next', verdict: 'Checks the work before continuing', post: 'Updates the ticket', text: 'Does a piece of work', artifact: 'Creates an output' })[step.contract] || 'Workflow step';
+}
+
+function nodeError(message) {
+  const box = $('#nodeInlineError');
+  box.hidden = false;
+  box.textContent = message;
 }
 
 function closeNodeEditor() {
   $('#nodeOverlay').hidden = true;
+  document.body.classList.remove('workflow-node-open');
+  $('#nodeSave').hidden = false;
+  $('#nodeCancel').textContent = 'Cancel';
 }
 
 // ---- clone / save ----------------------------------------------------------
@@ -633,7 +1216,8 @@ async function assignSelected() {
   const project = state.catalog.projects.find((p) => p.name === state.project);
   if (!confirm(`Run "${state.selected.ref}" on project "${state.project}"?`)) return;
   try {
-    const r = await post('/api/catalog/assign', { project: state.project, ref: state.selected.ref });
+    const r = await post('/api/catalog/assign', { project: state.project, ref: state.selected.ref, engine: 'workflow' });
+    state.selectionSource = 'project';
     toast(`${state.project} now runs ${state.selected.ref}`);
     if (r.warning) showError(r.warning);
     else showError('');
@@ -646,147 +1230,124 @@ async function assignSelected() {
 async function cloneSelected() {
   try {
     const kind = state.selected.kind;
-    const r = await post('/api/catalog/clone', { kind, ref: state.selected.ref });
+    const currentRef = currentProject()?.workflow || '';
+    const currentId = currentRef.split('@')[0];
+    const newId = kind === 'workflow'
+      ? (currentId && currentId !== 'standard' && state.selected.ref === currentRef ? currentId : state.project)
+      : undefined;
+    const r = await post('/api/catalog/clone', { kind, ref: state.selected.ref, newId, project: state.project });
     if (kind === 'workflow') {
       state.draft = r.draft;
+      state.draft.name = `${projectName(state.project)} workflow`;
+      enableWiredSteps(state.draft);
       state.draftBase = state.selected.ref;
+      // The full-screen editor should open at a comfortable reading size.
+      // Wide workflows remain reachable by scrolling the canvas.
+      state.zoom = 1.1;
       await renderMain();
-      toast('Draft created — edit nodes, then save a new version');
+      toast(`Editing a private draft for ${state.project}`);
     } else {
-      // A cloned step is saved straight away: there is nothing to preview, and
-      // the instruction is edited in the file or via the API.
-      const saved = await post('/api/catalog/save', { kind: 'step', draft: r.draft });
-      toast('Saved ' + saved.ref);
-      state.selected = { kind: 'step', ref: saved.ref };
-      await load();
+      state.stepDraft = r.draft;
+      state.stepDraftBase = state.selected.ref;
+      await renderMain();
+      requestAnimationFrame(() => document.querySelector('.wf-instruction.is-editing')?.focus());
+      toast(`Editing the default for ${r.draft.name}`);
     }
   } catch (e) {
     showError(e.message);
   }
 }
 
+function enableWiredSteps(workflow) {
+  const visitStep = (node) => {
+    node.overrides = { ...(node.overrides || {}), enabled: true };
+  };
+  const visit = (phases) => {
+    for (const phase of phases || []) {
+      if (phase.step) visitStep(phase);
+      if (phase.loop) {
+        visitStep(phase.loop.repair);
+        for (const gate of phase.loop.gates || []) visitStep(gate);
+      }
+      if (phase.branch) {
+        for (const route of Object.values(phase.branch.cases || {})) visit(route);
+        if (Array.isArray(phase.branch.default)) visit(phase.branch.default);
+      }
+    }
+  };
+  visit(workflow.phases);
+  for (const node of workflow.finally || []) visitStep(node);
+}
+
 async function saveDraft() {
+  if (state.stepDraft) return saveStepDraft();
+  let saved = null;
   try {
-    const saved = await post('/api/catalog/save', { kind: 'workflow', draft: state.draft });
+    saved = await post('/api/catalog/save', { kind: 'workflow', draft: state.draft, project: state.project });
+    if (state.project) {
+      // Saving from the visual editor is the explicit point where a project
+      // opts into the workflow interpreter. Existing stage settings continue
+      // to supply the project's provider, model and instruction overrides.
+      await post('/api/catalog/assign', { project: state.project, ref: saved.ref, engine: 'workflow' });
+    }
     state.draft = null;
     state.draftBase = null;
     state.selected = { kind: 'workflow', ref: saved.ref };
-    toast('Saved ' + saved.ref);
+    state.selectionSource = 'project';
+    closeNodeEditor();
+    toast(state.project ? `Saved and applied to ${state.project}` : `Saved ${saved.ref}`);
+    await load();
+  } catch (e) {
+    // Saving and assigning are separate server operations. If project policy
+    // refuses the assignment, do not leave a stale draft that would create yet
+    // another version on retry.
+    if (saved) {
+      state.draft = null;
+      state.draftBase = null;
+      state.selected = { kind: 'workflow', ref: saved.ref };
+      state.selectionSource = 'project';
+      closeNodeEditor();
+      await load();
+      return showError(`Saved ${friendlyRef(saved.ref)}, but could not apply it to ${state.project}: ${e.message}`);
+    }
+    showError(e.message);
+  }
+}
+
+async function saveStepDraft() {
+  const instruction = String(state.stepDraft?.instruction || '').trim();
+  if (!instruction) return showError('The default instruction cannot be empty.');
+  try {
+    state.stepDraft.instruction = instruction;
+    const saved = await post('/api/catalog/save', { kind: 'step', draft: state.stepDraft });
+    state.stepDraft = null;
+    state.stepDraftBase = null;
+    state.selected = { kind: 'step', ref: saved.ref };
+    state.selectionSource = 'catalog';
+    toast(`Saved ${saved.ref} as the new default`);
+    showError('');
     await load();
   } catch (e) {
     showError(e.message);
   }
 }
 
-// ---- sharing ---------------------------------------------------------------
-
-function openBundle(title, build) {
-  $('#bundleTitle').textContent = title;
-  $('#bundleInlineError').hidden = true;
-  const body = $('#bundleBody');
-  body.replaceChildren();
-  build(body);
-  $('#bundleOverlay').hidden = false;
-}
-
-async function exportSelected() {
-  const isWorkflow = state.selected.kind === 'workflow' && !state.draft;
-  if (state.draft) return showError('Save the draft before exporting it.');
-  try {
-    const r = await post('/api/catalog/export', {
-      id: state.selected.ref.split('@')[0],
-      workflowRefs: isWorkflow ? [state.selected.ref] : [],
-      stepRefs: isWorkflow ? [] : [state.selected.ref],
-    });
-    openBundle('Export bundle', (body) => {
-      body.append(el('p', 'muted',
-        `${r.manifest.steps.length} step(s), ${r.manifest.workflows.length} workflow(s). ` +
-        `Checksum ${r.manifest.checksum.slice(0, 12)}… — the receiving side verifies it.`));
-      const ta = el('textarea', 'wf-instruction wf-bundle');
-      ta.value = r.yaml;
-      ta.readOnly = true;
-      body.append(ta);
-      const copy = el('button', 'btn btn-ghost btn-sm', 'Copy to clipboard');
-      copy.addEventListener('click', () => {
-        navigator.clipboard.writeText(r.yaml).then(() => toast('Copied'));
-      });
-      body.append(copy);
-    });
-    $('#bundleConfirm').hidden = true;
-  } catch (e) {
-    showError(e.message);
+function discardDraft() {
+  if (state.stepDraft) {
+    if (!confirm('Discard this unsaved default instruction?')) return;
+    state.stepDraft = null;
+    state.stepDraftBase = null;
+    showError('');
+    return renderMain();
   }
-}
-
-function openImport() {
-  openBundle('Import a shared bundle', (body) => {
-    body.append(el('p', 'muted', 'Paste a bundle. Nothing is written until you have seen what it can do.'));
-    const ta = el('textarea', 'wf-instruction wf-bundle');
-    ta.id = 'bundlePaste';
-    body.append(ta);
-    const review = el('button', 'btn btn-sm', 'Review');
-    review.addEventListener('click', async () => {
-      try {
-        const r = await post('/api/catalog/inspect', { yaml: ta.value });
-        renderTrust(body, r, ta.value);
-      } catch (e) {
-        showInlineError(e.message);
-      }
-    });
-    body.append(review);
-  });
-  $('#bundleConfirm').hidden = true;
-}
-
-function renderTrust(body, r, yaml) {
-  const old = body.querySelector('.trust');
-  if (old) old.remove();
-  const box = el('div', 'trust');
-  box.append(el('h3', 'wf-h3', `${r.manifest.name} (${r.manifest.id})`));
-  box.append(el('p', 'muted', `steps: ${r.manifest.steps.join(', ') || 'none'} · workflows: ${r.manifest.workflows.join(', ') || 'none'}`));
-  box.append(el('p', r.trust.checksumOk ? 'trust-ok' : 'trust-bad',
-    r.trust.checksumOk ? '✓ checksum verified' : '✗ checksum does not match — this bundle was modified after export'));
-
-  box.append(el('h3', 'wf-h3', 'What it can do on your machine'));
-  const ul = el('ul', 'wf-plain');
-  if (r.trust.mutating.length) ul.append(el('li', null, 'Modifies repositories: ' + r.trust.mutating.join(', ')));
-  for (const e of r.trust.externalEffects) ul.append(el('li', 'trust-effect', `${e.ref} reaches outside the worktree: ${e.effects.join(', ')}`));
-  for (const s of r.trust.skills) ul.append(el('li', null, `${s.ref} invokes skill(s): ${s.skills.join(', ')}`));
-  for (const t of r.trust.tools) ul.append(el('li', null, `${t.ref} requests tools: ${t.allowedTools}`));
-  for (const p of r.trust.requestedPermissions)
-    ul.append(el('li', null, `${p.ref} REQUESTS ${p.permissions.join(', ')} — importing does not grant this`));
-  if (!ul.children.length) ul.append(el('li', null, 'Nothing beyond reading and reporting.'));
-  box.append(ul);
-  box.append(el('p', 'muted',
-    'Step instructions are handed to a coding agent running with permissions skipped. Read them before accepting.'));
-  // The checksum already has its own status line above; repeating it here just
-  // makes the reader hunt for the errors that are actually different.
-  for (const e of r.trust.errors) {
-    if (e.startsWith('checksum')) continue;
-    box.append(el('p', 'trust-bad', '✗ ' + e));
-  }
-  if (r.trust.conflicts.length)
-    box.append(el('p', 'muted', 'Already installed, will be left alone: ' + r.trust.conflicts.join(', ')));
-  body.append(box);
-
-  const confirm = $('#bundleConfirm');
-  confirm.hidden = !!r.trust.errors.length;
-  confirm.onclick = async () => {
-    try {
-      const done = await post('/api/catalog/import', { yaml });
-      toast('Imported ' + (done.written.join(', ') || 'nothing new'));
-      $('#bundleOverlay').hidden = true;
-      await load();
-    } catch (e) {
-      showInlineError(e.message);
-    }
-  };
-}
-
-function showInlineError(msg) {
-  const box = $('#bundleInlineError');
-  box.hidden = false;
-  box.textContent = msg;
+  if (!state.draft || !confirm('Discard all unsaved workflow changes?')) return;
+  state.draft = null;
+  state.draftBase = null;
+  state.preview = null;
+  state.collapsed.clear();
+  state.zoom = null;
+  closeNodeEditor();
+  renderMain();
 }
 
 function toast(msg) {
@@ -801,20 +1362,38 @@ function toast(msg) {
 // ---- wiring ----------------------------------------------------------------
 
 window.addEventListener('tl:workflows-open', load);
+window.addEventListener('tl:edit-project-workflow', async (event) => {
+  if (!state.catalog) await load();
+  const project = event.detail?.project;
+  if (!project || !state.catalog.projects.some((item) => item.name === project)) return;
+  selectProject(project);
+});
 // app.js loads first and may have already switched to this view during boot
 // (a #workflows deep link), firing the event before the listener above existed.
 // Catch that case by loading now if the view is already showing.
 if (!$('#viewWorkflows').hidden) load();
 $('#wfProject').addEventListener('change', (e) => {
+  if (hasUnsavedDraft() && !confirm('Discard the unsaved changes and switch project?')) {
+    e.target.value = state.project;
+    return;
+  }
+  state.draft = null;
+  state.draftBase = null;
+  state.stepDraft = null;
+  state.stepDraftBase = null;
   state.project = e.target.value;
+  state.selectionSource = 'project';
+  const project = currentProject();
+  state.selected = { kind: 'workflow', ref: project?.workflow || state.catalog.defaultWorkflow };
+  state.preview = null;
+  state.collapsed.clear();
+  state.zoom = null;
+  renderRail();
   renderMain();
 });
 $('#wfAssignBtn').addEventListener('click', assignSelected);
 $('#wfCloneBtn').addEventListener('click', cloneSelected);
 $('#wfSaveBtn').addEventListener('click', saveDraft);
-$('#wfExportBtn').addEventListener('click', exportSelected);
-$('#wfImportBtn').addEventListener('click', openImport);
+$('#wfDiscardBtn').addEventListener('click', discardDraft);
 $('#nodeClose').addEventListener('click', closeNodeEditor);
 $('#nodeCancel').addEventListener('click', closeNodeEditor);
-$('#bundleClose').addEventListener('click', () => ($('#bundleOverlay').hidden = true));
-$('#bundleCancel').addEventListener('click', () => ($('#bundleOverlay').hidden = true));

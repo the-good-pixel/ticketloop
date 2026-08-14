@@ -1,5 +1,16 @@
 node_modules/
 ticketloop.config.yml
+ticketloop.config.yaml
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.pfx
+credentials.json
+ticketloop-support-*.json
+*.tgz
+coverage/
 *.log
 .DS_Store
 /dist

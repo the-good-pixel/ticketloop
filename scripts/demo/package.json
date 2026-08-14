@@ -1,0 +1,12 @@
+{
+  "name": "ticketloop-demo-recorder",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "record": "tsx record.ts"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0",
+    "tsx": "^4.19.0"
+  }
+}

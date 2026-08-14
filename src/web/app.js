@@ -106,6 +106,29 @@ const state = {
   runsById: new Map(),
 };
 
+const OUTCOME_LABELS = {
+  answered: 'Answer posted',
+  exported: 'Export posted',
+  'pr-opened': 'PR ready',
+  'pr-opened-with-findings': 'PR needs review',
+  deployed: 'Ready on dev',
+  partial: 'Partly completed',
+  merged: 'Merged',
+  skipped: 'No action needed',
+  blocked: 'Safety block',
+  'waiting-provider': 'Waiting for model quota',
+  'waiting-approval': 'Waiting for approval',
+  'waiting-deployment': 'Waiting for deployment',
+  'waiting-external': 'Waiting on another system',
+  paused: 'Paused',
+  failed: 'Needs attention',
+  running: 'Running',
+};
+
+function outcomeLabel(outcome) {
+  return OUTCOME_LABELS[outcome] || outcome || 'Unknown';
+}
+
 let connOk = true;
 function setConn(ok) {
   connOk = ok;
@@ -181,21 +204,21 @@ function renderUsage(u) {
 }
 
 // ---- rendering: stage tracker (compact pills) ----
-function stageStatusMap(stages) {
-  const map = new Map();
-  (stages || []).forEach((s) => map.set(s.stage, s.status));
-  return map;
-}
-
 function renderStageTracker(stages) {
   const wrap = el('div', 'stages');
-  const map = stageStatusMap(stages);
-  // Show the known pipeline order, then any stage the run has that we don't know
-  // about (future-proof against new stages the frontend list hasn't caught up to).
-  const known = new Set(STAGE_ORDER);
-  const extra = (Array.isArray(stages) ? stages : []).map((s) => s && s.stage).filter((n) => n && !known.has(n));
-  [...STAGE_ORDER, ...extra].forEach((name) => {
-    const status = map.get(name);
+  // Show only work that actually happened. The old fixed fourteen-step strip
+  // made short branches look unfinished and listed nodes a custom workflow did
+  // not even contain. Repeated loop nodes keep their latest status.
+  const ordered = [];
+  const byName = new Map();
+  (Array.isArray(stages) ? stages : []).forEach((stage) => {
+    if (!stage?.stage) return;
+    const name = stage.stage;
+    if (!byName.has(name)) ordered.push(name);
+    byName.set(name, stage.status);
+  });
+  ordered.forEach((name) => {
+    const status = byName.get(name);
     let cls = 'stage-none';
     if (status === 'ok') cls = 'stage-ok';
     else if (status === 'failed') cls = 'stage-failed';
@@ -231,7 +254,7 @@ function renderTicketGroup(g) {
 
   const sub = el('div', 'run-sub');
   if (g.project) sub.appendChild(el('span', null, g.project));
-  if (g.autonomy) sub.appendChild(el('span', null, g.autonomy));
+  if (g.autonomy) sub.appendChild(el('span', null, autonomyLabel(g.autonomy)));
   sub.appendChild(el('span', 'run-count', g.runs.length + (g.runs.length === 1 ? ' run' : ' runs')));
   if (latest.resumes) sub.appendChild(el('span', null, '↻ resumed ' + latest.resumes + '×'));
   main.appendChild(sub);
@@ -243,20 +266,25 @@ function renderTicketGroup(g) {
   // Resume / Restart act on the TICKET (they continue its latest work).
   if (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked' || latest.outcome === 'waiting-provider') {
     const actions = el('div', 'run-actions');
-    const resume = el('button', 'btn btn-ghost btn-sm', '▶ Resume');
+    const resume = el('button', 'btn btn-ghost btn-sm', '▶ Continue run');
     resume.title = 'Continue this run from its checkpoint (already-done steps are reused)';
     resume.addEventListener('click', (e) => { e.stopPropagation(); doRetry(g.key, false); });
-    const fresh = el('button', 'btn btn-ghost btn-sm', '↻ Restart fresh');
+    const fresh = el('button', 'btn btn-ghost btn-sm', '↻ Start over');
     fresh.title = 'Discard the checkpoint and start a NEW run under the current workflow';
     fresh.addEventListener('click', (e) => { e.stopPropagation(); doRetry(g.key, true); });
     actions.appendChild(resume);
     actions.appendChild(fresh);
     main.appendChild(actions);
+    main.appendChild(el(
+      'div',
+      'run-action-help muted',
+      'Continue run reuses completed steps. Start over discards saved progress and runs the current workflow from the beginning.',
+    ));
   }
   head.appendChild(main);
 
   const side = el('div', 'run-side');
-  side.appendChild(el('span', 'badge badge-' + (latest.outcome || 'skipped'), latest.outcome || '—'));
+  side.appendChild(el('span', 'badge badge-' + (latest.outcome || 'skipped'), outcomeLabel(latest.outcome)));
   const metrics = el('div', 'run-metrics');
   metrics.appendChild(el('span', null, fmtTokens(g.totalTokens) + ' tok'));
   metrics.appendChild(el('span', null, fmtMoney(g.costUsd)));
@@ -299,7 +327,7 @@ function renderRun(r) {
 
   // side column
   const side = el('div', 'run-side');
-  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), r.outcome || '—'));
+  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome)));
   const metrics = el('div', 'run-metrics');
   metrics.appendChild(el('span', null, fmtTokens(r.totalTokens) + ' tok'));
   metrics.appendChild(el('span', null, fmtMoney(r.costUsd)));
@@ -1390,8 +1418,9 @@ function showError(box, msg) {
 async function loadConfig() {
   try {
     setSetupError('');
-    const cfg = await api('/api/config');
+    const [cfg, status] = await Promise.all([api('/api/config'), api('/api/status')]);
     setup.config = cfg;
+    setup.status = status;
     setup.pendingDelete = null;
     renderSetup();
   } catch (e) {
@@ -1400,9 +1429,34 @@ async function loadConfig() {
 }
 
 function renderSetup() {
+  if (setup.status) renderStatus(setup.status);
+  renderSetupRunState();
   renderEnvStrip();
   renderSettings();
   renderProjects();
+}
+
+function renderSetupRunState() {
+  const box = $('#setupRunState');
+  if (!box) return;
+  const paused = !!setup.status?.paused;
+  box.className = 'setup-run-state ' + (paused ? 'is-paused' : 'is-running');
+  box.replaceChildren();
+  const copy = el('div');
+  copy.appendChild(el('strong', null, paused ? 'Ticket processing is paused' : 'Ticket processing is on'));
+  copy.appendChild(el(
+    'span',
+    'muted',
+    paused
+      ? 'Projects and workflows can be edited safely. Resume from Activity when you are ready.'
+      : 'Eligible tickets may be picked up on the next scan. Pause from Activity before making large setup changes.',
+  ));
+  box.appendChild(el('span', 'setup-state-dot'));
+  box.appendChild(copy);
+  const activity = el('button', 'btn btn-ghost btn-sm', paused ? 'Review and resume' : 'Open Activity');
+  activity.type = 'button';
+  activity.addEventListener('click', () => setView('activity'));
+  box.appendChild(activity);
 }
 
 // ---- global settings (everything not tied to one project) ----
@@ -1608,6 +1662,35 @@ function renderProjects() {
   list.replaceChildren();
   if (!projects.length) {
     empty.hidden = false;
+    empty.replaceChildren();
+    const welcome = el('div', 'onboarding-empty');
+    welcome.appendChild(el('span', 'onboarding-kicker', 'Start safely'));
+    welcome.appendChild(el('h3', null, 'Connect your first project'));
+    welcome.appendChild(el(
+      'p',
+      'muted',
+      'Choose a repository, a workflow, and the Linear tickets Ticketloop may see. The daemon stays paused after setup so you can review everything before the first scan.',
+    ));
+    const steps = el('div', 'onboarding-promises');
+    [
+      ['1', 'Your checkout stays clean', 'Code changes run in an isolated git worktree.'],
+      ['2', 'Tickets must opt in', 'Only the Linear label and states you choose are scanned.'],
+      ['3', 'You stay in control', 'Ticketloop opens a PR; it never merges the first project automatically.'],
+    ].forEach(([number, title, copy]) => {
+      const item = el('div', 'onboarding-promise');
+      item.appendChild(el('span', 'onboarding-number', number));
+      const text = el('div');
+      text.appendChild(el('strong', null, title));
+      text.appendChild(el('span', 'muted', copy));
+      item.appendChild(text);
+      steps.appendChild(item);
+    });
+    welcome.appendChild(steps);
+    const start = el('button', 'btn onboarding-start', 'Set up first project');
+    start.type = 'button';
+    start.addEventListener('click', () => openForm(null));
+    welcome.appendChild(start);
+    empty.appendChild(welcome);
     return;
   }
   empty.hidden = true;
@@ -1620,12 +1703,32 @@ function autonomyClass(a) {
   return 'auto-clarify';
 }
 
+function autonomyLabel(a) {
+  if (a === 'propose') return 'PR for review';
+  if (a === 'gated-merge') return 'May merge low-risk changes';
+  return 'Answers only';
+}
+
+function workflowSummary(p) {
+  if (p.engine !== 'workflow' || !p.workflow) return null;
+  const workflow = (setup.config?.workflows || []).find((item) => item.ref === p.workflow);
+  const version = String(p.workflow).includes('@') ? 'v' + String(p.workflow).split('@').pop() : '';
+  return {
+    name: workflow?.id === 'standard' ? 'Standard template' : (workflow?.name || 'Custom workflow'),
+    version,
+  };
+}
+
 function renderProjectCard(p) {
   const card = el('div', 'project-card');
 
   const head = el('div', 'project-head');
   head.appendChild(el('h3', 'project-name', p.name || '(unnamed)'));
-  head.appendChild(el('span', 'badge auto-badge ' + autonomyClass(p.autonomy), p.autonomy || '—'));
+  head.appendChild(el('span', 'badge auto-badge ' + autonomyClass(p.autonomy), autonomyLabel(p.autonomy)));
+  const trackerReady = p.resolvedTracker?.type === 'mock' || p.hasKey;
+  const workflow = workflowSummary(p);
+  const ready = p.repoExists !== false && trackerReady && !!workflow;
+  head.appendChild(el('span', 'project-ready ' + (ready ? 'is-ready' : 'needs-setup'), ready ? 'Ready' : 'Needs setup'));
   card.appendChild(head);
 
   // repo path
@@ -1636,15 +1739,38 @@ function renderProjectCard(p) {
   }
   card.appendChild(pathLine);
 
+  const workflowRow = el('div', 'project-workflow-row');
+  const workflowCopy = el('div');
+  workflowCopy.appendChild(el('span', 'project-row-label', 'Workflow'));
+  if (workflow) {
+    workflowCopy.appendChild(el('strong', null, workflow.name));
+    if (workflow.version) workflowCopy.appendChild(el('span', 'project-workflow-version', workflow.version));
+  } else {
+    workflowCopy.appendChild(el('strong', 'project-missing', 'Choose a workflow before running'));
+  }
+  workflowRow.appendChild(workflowCopy);
+  const manageWorkflow = el('button', 'btn btn-ghost btn-sm', workflow ? 'Edit workflow' : 'Choose workflow');
+  manageWorkflow.type = 'button';
+  manageWorkflow.addEventListener('click', () => {
+    setView(workflow ? 'workflows' : 'setup');
+    if (workflow) window.dispatchEvent(new CustomEvent('tl:edit-project-workflow', { detail: { project: p.name } }));
+    else openForm(p.name);
+  });
+  workflowRow.appendChild(manageWorkflow);
+  card.appendChild(workflowRow);
+
   // tracker
   const rt = p.resolvedTracker || {};
   const team = rt.team || (p.tracker && p.tracker.team) || '—';
   const label = rt.simpleLabel || '—';
-  card.appendChild(el('div', 'project-tracker muted', 'tracker: ' + team + ' · ' + label));
+  card.appendChild(el('div', 'project-tracker muted', 'Linear scope · team ' + team + ' · opt-in label ' + label));
 
   // key status
   const keyRow = el('div', 'key-row');
-  if (p.hasKey) {
+  const mockTracker = p.resolvedTracker?.type === 'mock';
+  if (mockTracker) {
+    keyRow.appendChild(el('span', 'key-status key-set', 'No API key needed for mock tickets'));
+  } else if (p.hasKey) {
     const src = p.keySource ? '(' + p.keySource + ')' : '';
     keyRow.appendChild(el('span', 'key-status key-set', 'key set ' + src));
   } else {
@@ -1687,7 +1813,7 @@ function renderProjectCard(p) {
       keyBtn.disabled = false;
     }
   });
-  card.appendChild(keyForm);
+  if (!mockTracker) card.appendChild(keyForm);
 
   // actions
   const actions = el('div', 'project-actions');
@@ -1789,18 +1915,27 @@ function repoRowEl(r) {
 
 function openForm(name) {
   setup.editing = name || null;
-  const p = name ? findProject(name) : null;
+  const isFirstProject = !name && !((setup.config && setup.config.projects) || []).length;
+  const p = name ? findProject(name) : (isFirstProject ? setup.firstProjectDraft || null : null);
+  setup.firstProject = isFirstProject;
+  setup.reviewingFirstProject = false;
   const cfg = setup.config || {};
   const g = cfg.globals || {};
   const td = g.trackerDefaults || {};
-  const stageOrder = cfg.stageOrder || STAGE_ORDER;
-  const defaults = cfg.defaultInstructions || {};
 
-  $('#formTitle').textContent = name ? 'Edit project' : 'Add project';
+  $('#formTitle').textContent = name ? 'Edit project' : (isFirstProject ? 'Set up your first project' : 'Add project');
+  $('#formOverlay').classList.toggle('onboarding-overlay', isFirstProject);
   $('#formInlineError').hidden = true;
 
   const form = $('#projectForm');
   form.replaceChildren();
+
+  if (isFirstProject) {
+    const intro = el('div', 'onboarding-intro');
+    intro.appendChild(el('span', 'onboarding-step', 'Project setup · 1 of 2'));
+    intro.appendChild(el('p', null, 'Connect one repository to one workflow. You can add more projects and tune advanced settings later.'));
+    form.appendChild(intro);
+  }
 
   // name
   const nameIn = mkInput('f_name', 'text', p ? p.name : '', 'my-project');
@@ -1956,148 +2091,82 @@ function openForm(name) {
     'File-path patterns the agent must NEVER edit — a hard safety rail. If a change would touch any of these, the run is blocked before a PR is opened. One per line, e.g. **/migrations/**, **/*auth*.',
   ));
 
-  // ---- Steps: per-step instructions (prominent, always visible) ----
-  const stepsSection = el('div', 'steps-section');
-  stepsSection.appendChild(el('h3', 'steps-title', 'Steps'));
-  stepsSection.appendChild(el(
-    'div',
-    'field-help muted steps-intro',
-    "Each step is run by the model using an instruction. Review the defaults and customize any that don't fit your project.",
-  ));
+  // Workflow assignment is a project-level choice. Step models and
+  // instructions live in the visual workflow editor itself.
+  const workflowSelect = el('select', 'input');
+  workflowSelect.id = 'f_workflow';
+  workflowSelect.appendChild(new Option('Choose a workflow…', ''));
+  for (const workflow of cfg.workflows || []) {
+    const label = workflow.id === 'standard'
+      ? 'Standard template'
+      : workflow.name;
+    workflowSelect.appendChild(new Option(label, workflow.ref));
+  }
+  // Legacy projects have not actively chosen a visual workflow yet, even if a
+  // compatibility pin exists in their config.
+  workflowSelect.value = p?.engine === 'workflow' ? p.workflow || '' : '';
+  const workflowField = inputRow(
+    'Workflow',
+    workflowSelect,
+    'Choose the visual workflow this project will run. Set up or customize workflows before starting the loop.',
+  );
+  form.appendChild(workflowField);
 
-  const pStages = (p && p.stages) || {};
-  const gStages = g.stages || {};
-  stageOrder.forEach((stage) => {
-    const cur = pStages[stage] || {};
-    const block = el('div', 'stage-config');
+  if (isFirstProject) {
+    // A real first project uses Linear. The key is stored separately from the
+    // YAML config and is never returned to the browser.
+    const keyIn = mkInput('f_key', 'password', setup.firstProjectKey || '', 'lin_api_…');
+    keyIn.autocomplete = 'off';
+    const keyField = inputRow(
+      'Linear API key',
+      keyIn,
+      'Stored only in Ticketloop’s local credential file. The key is not written to ticketloop.config.yml.',
+    );
 
-    // name + an Enabled toggle (reflects the effective state: project override,
-    // else the global default — deploy-dev / verify-dev default OFF).
-    const head = el('div', 'stage-config-head');
-    head.appendChild(el('div', 'stage-config-name', stage));
-    const globalEnabled = gStages[stage] ? gStages[stage].enabled !== false : true;
-    const effEnabled = cur.enabled !== undefined ? cur.enabled : globalEnabled;
-    const enWrap = el('label', 'stage-enable');
-    const enCb = el('input');
-    enCb.type = 'checkbox';
-    enCb.id = 'f_stage_enabled_' + stage;
-    enCb.dataset.stage = stage;
-    enCb.checked = effEnabled;
-    enWrap.appendChild(enCb);
-    enWrap.appendChild(el('span', null, 'Enabled'));
-    head.appendChild(enWrap);
-    block.appendChild(head);
+    const safety = el('div', 'onboarding-safety');
+    safety.appendChild(el('strong', null, 'The first run will not start yet'));
+    safety.appendChild(el('span', 'muted', 'Setup pauses the daemon before saving. Review the project, then resume from Activity when you are ready.'));
 
-    // read-only default instruction
-    const defWrap = el('div', 'stage-default');
-    defWrap.appendChild(el('span', 'stage-default-label muted', 'Default:'));
-    defWrap.appendChild(el('div', 'stage-default-text muted', defaults[stage] || '(none)'));
-    block.appendChild(defWrap);
-
-    // model + effort dropdowns on their own row (above the override textarea)
-    const pickRow = el('div', 'stage-pick-row');
-
-    const providerSel = el('select', 'input stage-provider');
-    providerSel.id = 'f_stage_provider_' + stage;
-    const providerInherit = el('option', null, '(inherit default)');
-    providerInherit.value = '';
-    providerSel.appendChild(providerInherit);
-    ['claude', 'codex'].forEach((provider) => {
-      const o = el('option', null, provider);
-      o.value = provider;
-      if (cur.provider === provider) o.selected = true;
-      providerSel.appendChild(o);
+    // Keep the first screen focused. Less common controls remain available
+    // without forcing every new user to understand them up front.
+    const coreIds = new Set(['f_name', 'f_repo', 'f_team', 'f_label', 'f_workflow']);
+    const fields = [...form.querySelectorAll(':scope > .field')];
+    const advanced = el('details', 'onboarding-advanced');
+    advanced.appendChild(el('summary', null, 'Advanced project settings'));
+    const advancedBody = el('div', 'onboarding-advanced-body');
+    fields.forEach((field) => {
+      const control = field.querySelector('input[id], select[id], textarea[id]');
+      if (!control || !coreIds.has(control.id)) advancedBody.appendChild(field);
     });
-    const providerLbl = el('label', 'stage-pick');
-    providerLbl.appendChild(el('span', 'stage-pick-label muted', 'Provider'));
-    providerLbl.appendChild(providerSel);
-    pickRow.appendChild(providerLbl);
+    advanced.appendChild(advancedBody);
 
-    const modelSel = el('select', 'input stage-model');
-    modelSel.id = 'f_stage_model_' + stage;
-    modelSel.dataset.stage = stage;
-    const modelInherit = el('option', null, '(inherit default)');
-    modelInherit.value = '';
-    modelSel.appendChild(modelInherit);
-    const fillModels = (provider, selected) => {
-      modelSel.replaceChildren();
-      const inherit = el('option', null, '(inherit default)');
-      inherit.value = '';
-      modelSel.appendChild(inherit);
-      const models = (cfg.models && cfg.models[provider]) || [];
-      let matched = false;
-      models.forEach((m) => {
-        const o = el('option', null, m.label);
-        o.value = m.value;
-        if (selected && selected === m.value) { o.selected = true; matched = true; }
-        modelSel.appendChild(o);
-      });
-      if (selected && !matched) {
-        const o = el('option', null, selected);
-        o.value = selected;
-        o.selected = true;
-        modelSel.appendChild(o);
-      }
-    };
-    fillModels(cur.provider || (g.runner && g.runner.defaultProvider) || 'claude', cur.model);
-    providerSel.addEventListener('change', () => fillModels(providerSel.value || (g.runner && g.runner.defaultProvider) || 'claude', ''));
-    const modelLbl = el('label', 'stage-pick');
-    modelLbl.appendChild(el('span', 'stage-pick-label muted', 'Model'));
-    modelLbl.appendChild(modelSel);
-    pickRow.appendChild(modelLbl);
+    // Put the workflow directly after the repository, followed by the Linear
+    // scope and key. This matches the mental setup sequence.
+    const repoFieldEl = repoIn.closest('.field');
+    if (repoFieldEl) repoFieldEl.after(workflowField);
+    form.appendChild(keyField);
+    form.appendChild(safety);
+    form.appendChild(advanced);
+    $('#formSave').textContent = 'Review setup';
+  } else {
+    $('#formSave').textContent = 'Save';
+  }
 
-    const effortSel = el('select', 'input stage-effort');
-    effortSel.id = 'f_stage_effort_' + stage;
-    effortSel.dataset.stage = stage;
-    const effortInherit = el('option', null, '(inherit default)');
-    effortInherit.value = '';
-    effortSel.appendChild(effortInherit);
-    const efforts = Array.isArray(cfg.efforts) ? cfg.efforts : [];
-    efforts.forEach((ef) => {
-      const o = el('option', null, ef);
-      o.value = ef;
-      if (cur.effort === ef) o.selected = true;
-      effortSel.appendChild(o);
+  if (name && p) {
+    const workflowSection = el('div', 'project-workflow-link');
+    const copy = el('div');
+    copy.appendChild(el('h3', null, 'Workflow'));
+    copy.appendChild(el('p', 'field-help muted', 'Create workflows and configure each step’s model and instruction in the visual editor.'));
+    const editWorkflow = el('button', 'btn btn-ghost', 'Manage workflows');
+    editWorkflow.type = 'button';
+    editWorkflow.addEventListener('click', () => {
+      closeForm();
+      setView('workflows');
+      window.dispatchEvent(new CustomEvent('tl:edit-project-workflow', { detail: { project: p.name } }));
     });
-    const effortLbl = el('label', 'stage-pick');
-    effortLbl.appendChild(el('span', 'stage-pick-label muted', 'Thinking effort'));
-    effortLbl.appendChild(effortSel);
-    pickRow.appendChild(effortLbl);
-
-    block.appendChild(pickRow);
-
-    // optional override
-    block.appendChild(el('div', 'stage-override-label muted', 'Your override'));
-    const instr = el('textarea', 'input textarea stage-instr');
-    instr.id = 'f_stage_instr_' + stage;
-    instr.dataset.stage = stage;
-    instr.rows = 2;
-    instr.placeholder = 'Leave blank to use the default';
-    if (cur.instruction) instr.value = cur.instruction;
-    block.appendChild(instr);
-
-    // instruction mode control
-    const ctrlRow = el('div', 'stage-ctrl-row');
-
-    const modeSel = el('select', 'input stage-mode');
-    modeSel.id = 'f_stage_mode_' + stage;
-    modeSel.dataset.stage = stage;
-    ['replace', 'append'].forEach((m) => {
-      const o = el('option', null, m);
-      o.value = m;
-      if (cur.instructionMode === m) o.selected = true;
-      modeSel.appendChild(o);
-    });
-    const modeLbl = el('label', 'stage-ctrl');
-    modeLbl.appendChild(el('span', 'muted', 'replace / append'));
-    modeLbl.appendChild(modeSel);
-    ctrlRow.appendChild(modeLbl);
-
-    block.appendChild(ctrlRow);
-
-    stepsSection.appendChild(block);
-  });
-  form.appendChild(stepsSection);
+    workflowSection.append(copy, editWorkflow);
+    form.appendChild(workflowSection);
+  }
 
   form.onsubmit = onFormSubmit;
   $('#formOverlay').hidden = false;
@@ -2107,7 +2176,10 @@ function openForm(name) {
 
 function closeForm() {
   $('#formOverlay').hidden = true;
+  $('#formOverlay').classList.remove('onboarding-overlay');
+  $('#formSave').textContent = 'Save';
   setup.editing = null;
+  setup.reviewingFirstProject = false;
 }
 
 // ---- folder picker (GET /api/fs) ----
@@ -2276,36 +2348,27 @@ function buildProjectFromForm() {
     .filter(Boolean);
   if (states.length) tracker.states = states;
   if (Object.keys(tracker).length) proj.tracker = tracker;
+  if (setup.firstProject) {
+    proj.tracker = { ...(proj.tracker || {}), type: 'linear' };
+    // The first project is deliberately review-only until the user resumes.
+    proj.autonomy = 'propose';
+    proj.useWorktree = true;
+  }
 
-  // per-stage overrides — only non-empty
-  const stageOrder = (setup.config && setup.config.stageOrder) || STAGE_ORDER;
-  const gStages = (setup.config && setup.config.globals && setup.config.globals.stages) || {};
-  const stages = {};
-  stageOrder.forEach((stage) => {
-    const provider = val('f_stage_provider_' + stage);
-    const model = val('f_stage_model_' + stage);
-    const effort = val('f_stage_effort_' + stage);
-    const instrEl = document.getElementById('f_stage_instr_' + stage);
-    const instruction = instrEl ? instrEl.value.trim() : '';
-    const ov = {};
-    if (provider) ov.provider = provider;
-    if (model) ov.model = model;
-    if (effort) ov.effort = effort;
-    if (instruction) {
-      ov.instruction = instruction;
-      const modeEl = document.getElementById('f_stage_mode_' + stage);
-      ov.instructionMode = modeEl ? modeEl.value : 'replace';
-    }
-    // Emit `enabled` only when it differs from the global default, so we don't
-    // bloat every stage — but a deliberate on/off (e.g. deploy-dev on) persists.
-    const enEl = document.getElementById('f_stage_enabled_' + stage);
-    if (enEl) {
-      const globalEnabled = gStages[stage] ? gStages[stage].enabled !== false : true;
-      if (enEl.checked !== globalEnabled) ov.enabled = enEl.checked;
-    }
-    if (Object.keys(ov).length) stages[stage] = ov;
-  });
-  if (Object.keys(stages).length) proj.stages = stages;
+  // Step settings are edited in Workflows. Preserve existing settings when
+  // this form saves unrelated project setup fields.
+  const existing = setup.editing ? findProject(setup.editing) : null;
+  if (existing?.stages) proj.stages = structuredClone(existing.stages);
+  const workflow = val('f_workflow');
+  if (workflow) {
+    proj.workflow = workflow;
+    proj.engine = 'workflow';
+  } else if (existing?.engine === 'workflow') {
+    // Do not silently turn off an active workflow just because an older client
+    // omitted the field. The current form always includes it.
+    proj.workflow = existing.workflow;
+    proj.engine = existing.engine;
+  }
 
   return proj;
 }
@@ -2323,12 +2386,34 @@ function setFormError(msg) {
 async function onFormSubmit(e) {
   e.preventDefault();
   setFormError('');
+  if (setup.reviewingFirstProject) return finishFirstProject();
+
   const proj = buildProjectFromForm();
   if (!proj.name) return setFormError('Name is required.');
   if (!proj.repoPath) return setFormError('Repo path is required.');
   const multiEl = document.getElementById('f_multi');
   if (multiEl && multiEl.checked && !proj.repos)
     return setFormError('Add at least one repo (name + path), or turn off "multiple repos".');
+
+  if (setup.firstProject) {
+    const workflow = document.getElementById('f_workflow')?.value || '';
+    const label = document.getElementById('f_label')?.value.trim() || '';
+    const key = document.getElementById('f_key')?.value.trim() || '';
+    if (!workflow) return setFormError('Choose the workflow this project will run.');
+    if (!label) return setFormError('Add an opt-in label so Ticketloop cannot scan every ticket.');
+    if (!key) return setFormError('Add the Linear API key for this project.');
+    if (!proj.repos) {
+      try {
+        const folder = await api('/api/fs?path=' + encodeURIComponent(proj.repoPath));
+        if (!folder.isGitRepo) return setFormError('Choose a Git repository. The selected folder does not contain .git.');
+      } catch (err) {
+        return setFormError('Could not check the repository: ' + (err.message || err));
+      }
+    }
+    setup.firstProjectDraft = proj;
+    setup.firstProjectKey = key;
+    return renderFirstProjectReview(proj);
+  }
 
   const saveBtn = $('#formSave');
   saveBtn.disabled = true;
@@ -2343,6 +2428,75 @@ async function onFormSubmit(e) {
     toast('saved');
   } catch (err) {
     setFormError(err.message || 'Save failed.');
+  } finally {
+    saveBtn.disabled = false;
+  }
+}
+
+function renderFirstProjectReview(proj) {
+  setup.reviewingFirstProject = true;
+  $('#formTitle').textContent = 'Review your first project';
+  const form = $('#projectForm');
+  form.replaceChildren();
+  const intro = el('div', 'onboarding-intro');
+  intro.appendChild(el('span', 'onboarding-step', 'Project setup · 2 of 2'));
+  intro.appendChild(el('h3', null, 'Nothing runs when you save'));
+  intro.appendChild(el('p', 'muted', 'Ticketloop will pause first, save this project, and store the Linear key locally. Resume only after checking the project and workflow.'));
+  form.appendChild(intro);
+
+  const review = el('dl', 'onboarding-review');
+  const row = (term, value) => {
+    review.appendChild(el('dt', null, term));
+    review.appendChild(el('dd', value && value.startsWith('/') ? 'mono' : null, value || '—'));
+  };
+  row('Project', proj.name);
+  row('Repository', proj.repoPath);
+  row('Workflow', proj.workflow);
+  row('Linear team', proj.tracker?.team || 'All teams in this workspace');
+  row('Opt-in label', proj.tracker?.simpleLabel);
+  row('Eligible states', (proj.tracker?.states || setup.config?.globals?.trackerDefaults?.states || []).join(', '));
+  row('Change policy', 'Open a PR for review; never auto-merge');
+  row('Starts', 'Paused');
+  form.appendChild(review);
+
+  const back = el('button', 'btn btn-ghost onboarding-back', '← Back and edit');
+  back.type = 'button';
+  back.addEventListener('click', () => openForm(null));
+  form.appendChild(back);
+  $('#formSave').textContent = 'Save paused';
+}
+
+async function finishFirstProject() {
+  const proj = setup.firstProjectDraft;
+  const key = setup.firstProjectKey;
+  if (!proj || !key) return setFormError('Setup details were lost. Go back and try again.');
+  const saveBtn = $('#formSave');
+  saveBtn.disabled = true;
+  try {
+    // Pause BEFORE adding the live project so the scheduler cannot pick up a
+    // ticket between config save and the user’s final review.
+    await mutate('/api/pause', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused: true }),
+    });
+    await mutate('/api/projects', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(proj),
+    });
+    await mutate('/api/keys', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ project: proj.name, key }),
+    });
+    setup.firstProjectDraft = null;
+    setup.firstProjectKey = '';
+    closeForm();
+    await loadConfig();
+    toast('project saved · daemon paused');
+  } catch (err) {
+    setFormError((err.message || 'Setup failed.') + ' The daemon remains paused.');
   } finally {
     saveBtn.disabled = false;
   }
@@ -2366,8 +2520,8 @@ $('#formOverlay').addEventListener('click', (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   if (!$('#formOverlay').hidden) return closeForm();
-  // The Workflows view owns these two, but Escape is a page-level habit.
-  for (const id of ['#nodeOverlay', '#bundleOverlay']) {
+  // The Workflows view owns the node drawer, but Escape is a page-level habit.
+  for (const id of ['#nodeOverlay']) {
     const o = $(id);
     if (o && !o.hidden) { o.hidden = true; return; }
   }

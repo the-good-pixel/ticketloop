@@ -1,195 +1,164 @@
-# Setup & usage walkthrough
+# Setup guide
 
-A step-by-step guide from zero to a running loop. Follow it in order.
+This guide takes a private tester from installation to one controlled live ticket.
 
-## 0. Prerequisites
+## 1. Check the machine
 
-- **Node ≥ 20** — `node --version`
-- **`claude` CLI, logged in** — `claude --version`, and make sure `claude` opens
-  without asking you to log in (that means your Pro/Max subscription is active).
-- **`git`** and, for opening PRs, **`gh`** logged in — `gh auth status`.
-- A **Linear API key** — Linear → Settings → Security & access → *Personal API keys*
-  → create one. It looks like `lin_api_...`.
-
-## 1. Install
+Install Node.js 22 or 24, Git, and GitHub CLI. Log in to at least one coding-agent CLI:
 
 ```bash
-cd ticketloop
-npm install
-npm link          # optional: makes `ticketloop` available everywhere
+node --version
+git --version
+gh auth status
+claude --version
+codex --version
 ```
 
-Without `npm link`, run commands as `node bin/ticketloop.mjs <command>`.
+Claude Code and Codex CLI are alternatives. Both may be installed, and each workflow step can choose one.
 
-## 2. Try it with zero setup (demo mode)
+## 2. Install and run the offline demo
 
 ```bash
+npm install --global ticketloop
+ticketloop --version
+ticketloop doctor
 ticketloop demo
 ```
 
-- Runs the loop against **built-in demo tickets** with a **simulated** agent — no
-  Linear, no `claude` calls, **no quota spent**.
-- Open the dashboard it prints (http://127.0.0.1:4317).
-- You'll see: one client **question answered**, two small **changes → mock PR**, and
-  the quota meters filling. Click any run to expand its per-stage detail.
-- `Ctrl-C` to stop.
+Demo mode uses a simulated agent and built-in tickets. No provider quota, Linear key, or network access is used. Stop it with `Ctrl-C`.
 
-This is the fastest way to understand what the tool does before wiring real accounts.
+## 3. Create the local workspace
 
-## 3. Configure for a real project
+The config can live in any folder. It does not need to be inside the project repository.
 
 ```bash
+mkdir -p ~/ticketloop-workspace
+cd ~/ticketloop-workspace
 ticketloop init
-```
-
-This writes `ticketloop.config.yml` (globals + an empty/example project list).
-
-> **Easiest path — set projects up in the dashboard.** Run `ticketloop watch`, open the
-> dashboard, and use the **Setup** tab to add each project and paste its Linear key,
-> one at a time — no YAML, no env vars. The globals (auth, quota, poll interval, tracker
-> defaults) stay in the config file and show read-only there. The rest of this section is
-> the equivalent by hand if you prefer editing the file.
-
-Open `ticketloop.config.yml` and set, at minimum:
-
-```yaml
-tracker:                       # defaults shared by all projects
-  type: linear
-  simpleLabel: ai-loop         # only tickets with this Linear label are picked up
-  states: [Todo, Backlog]
-
-projects:
-  - name: my-app
-    repoPath: /absolute/path/to/my-app     # your normal checkout — NOT a clone
-    autonomy: propose                       # open PRs, you merge
-    useWorktree: true                       # isolate each change in a git worktree (default)
-    tracker:
-      team: MIL                             # this project's Linear workspace (key via set-key)
-    exclude:                                # NEVER auto-edit these
-      - "**/migrations/**"
-      - "**/*auth*"
-      - "**/*timezone*"
-    testCmd: "npm run check"                # the model runs this in the verify step
-```
-
-> **No clone needed.** Each change runs in an isolated **git worktree** off your repo
-> (`~/.ticketloop/worktrees/<project>/<ticket>`), created before the change and removed
-> after. Your working tree is never touched. Point `repoPath` at your normal checkout.
-
-**Label your safe tickets.** In Linear, add the `ai-loop` label (or whatever you set in
-`simpleLabel`) to tickets you're happy for the loop to handle. It only ever looks at
-labelled tickets in the listed states — a dedicated label is your on/off switch.
-
-### Store your keys in the daemon (no env vars)
-
-Store each project's Linear key once; it's saved to `~/.ticketloop/credentials.json`
-(chmod 600) and used automatically:
-
-```bash
-ticketloop set-key my-app        # prompts for the key (hidden), saves it
-ticketloop set-key other-app     # a different workspace/account
-```
-
-> **Multiple Linear workspaces/accounts?** That's exactly why keys are per-project —
-> `set-key <project>` stores each one separately, and each project polls only its own
-> workspace. (`gh` is already authed from `gh auth login`; nothing else needed for GitHub.)
-
-### Check everything
-
-```bash
-ticketloop doctor
-```
-
-Fix anything it flags. In particular, in **subscription mode** it will warn if
-`ANTHROPIC_API_KEY` is set — unset it in your shell to avoid accidental metered
-billing elsewhere (ticketloop already scrubs it for its own `claude` calls).
-
-## 4. Run it
-
-Dry-run a single scan without committing to the daemon:
-
-```bash
-ticketloop run                 # process all eligible tickets once, then exit
-ticketloop run --ticket MIL-123   # just one ticket
-```
-
-Then run the daemon for real:
-
-```bash
 ticketloop watch
 ```
 
-- It polls Linear every `pollIntervalSec` (default 5 min), processes each new eligible
-  ticket, and serves the dashboard.
-- Questions get an **answer comment**. Changes get a **branch → PR** and a comment
-  linking it. It **stops at the PR** — you review and merge.
-- Watch progress live on the dashboard, or `ticketloop status` in another terminal.
+Open [http://127.0.0.1:4317/#setup](http://127.0.0.1:4317/#setup).
 
-## 5. Keep it running in the background (macOS `launchd`)
+The first-project setup asks for:
 
-Create `~/Library/LaunchAgents/com.ticketloop.plist`:
+- a short project name;
+- the normal local git checkout;
+- the visual workflow;
+- an optional Linear team key;
+- a required opt-in label;
+- eligible Linear states;
+- the project’s Linear API key.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.ticketloop</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/node</string>
-    <string>/absolute/path/to/ticketloop/bin/ticketloop.mjs</string>
-    <string>watch</string>
-    <string>--config</string>
-    <string>/absolute/path/to/ticketloop.config.yml</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <!-- Linear keys come from `ticketloop set-key` (stored in ~/.ticketloop),
-         so no API keys are needed here. Just PATH for node/git/gh/claude. -->
-    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
-  </dict>
-  <key>RunAtLoad</key><true/>
-  <!-- Restart on CRASH, but not on a clean exit (so `SIGTERM`/stop stays stopped),
-       and throttle restarts so a ticket that reliably crashes can't hammer. -->
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ThrottleInterval</key><integer>60</integer>
-  <key>StandardOutPath</key><string>/tmp/ticketloop.log</string>
-  <key>StandardErrorPath</key><string>/tmp/ticketloop.err</string>
-</dict>
-</plist>
+The key is stored in `~/.ticketloop/credentials.json`, not in YAML or the browser response.
+
+## 4. Review before the first scan
+
+The first project is saved paused. Before resuming:
+
+1. Confirm the project card says Ready.
+2. Open Edit workflow and inspect every path.
+3. Keep the project policy at PR for review.
+4. Keep dev deployment and merge permissions off.
+5. Add exclude rules for migrations, authentication, billing, secrets, generated files, infrastructure, or other sensitive paths.
+6. Run `ticketloop workflow validate`.
+7. Create or choose one small Linear test ticket.
+8. Add the exact opt-in label and put the ticket in one eligible state.
+
+Resume from Activity. Watch the first run and review the resulting comment or pull request manually.
+
+## 5. Customize the workflow
+
+Use Workflows in the dashboard. Select a project before editing.
+
+- Work steps are reusable prompts and instructions from the catalog.
+- Flow steps control triage, branches, and loops.
+- Multiple loops may appear on one path; nested loops are rejected.
+- Each work step and triage can choose a provider, model, and effort.
+- Editing the shown default instruction creates a new default step version. Existing workflows stay pinned until updated.
+- Saving a project edit creates and assigns a new immutable workflow version for that project.
+
+Use Continue run after an interruption. Use Start over when a change to an earlier step must apply to the whole ticket again.
+
+## 6. Advanced configuration
+
+The complete reference is [ticketloop.config.example.yml](ticketloop.config.example.yml). Common settings include:
+
+```yaml
+runner:
+  defaultProvider: claude
+  providers:
+    claude:
+      authMode: subscription
+      defaultModel: opus
+      defaultEffort: medium
+
+tracker:
+  type: linear
+  simpleLabel: ai-loop
+  states: [Todo, Backlog]
+  pollIntervalSec: 300
 ```
 
-Then:
+For a multi-repo project, `repoPath` is the parent workspace and `repos` lists each repository. A read-only repository uses `shipDisabled: true`. Each changed writable repository gets its own pull request.
+
+Do not store keys directly in the config. Use the first-project form or:
 
 ```bash
-launchctl load ~/Library/LaunchAgents/com.ticketloop.plist   # start on login + now
-launchctl unload ~/Library/LaunchAgents/com.ticketloop.plist # stop
-tail -f /tmp/ticketloop.log                                  # watch logs
+ticketloop set-key PROJECT_NAME
 ```
 
-> `which node` to get the right node path for `ProgramArguments`. The loop is a
-> catch-up poller: if your machine sleeps, tickets simply wait and are picked up when
-> it wakes.
+## 7. Run controls
 
-**Linux (`systemd --user`):** create `~/.config/systemd/user/ticketloop.service` with
-`ExecStart=/usr/bin/node /path/to/bin/ticketloop.mjs watch --config /path/to/config`
-(keys already stored via `set-key`), then `systemctl --user enable --now ticketloop`.
+```bash
+ticketloop watch
+ticketloop status
+ticketloop pause
+ticketloop resume
+ticketloop pause APP-123
+ticketloop resume APP-123
+ticketloop run --ticket APP-123
+```
 
-## 6. Where state lives
+`watch` keeps polling. `run` performs a one-shot scan. A ticket-specific `run` bypasses normal state selection, so use it only when you intend to process that ticket immediately.
 
-- Config: `./ticketloop.config.yml` (or `~/.ticketloop/config.yml`).
-- Usage + run history: `~/.ticketloop/usage.jsonl`, `runs.jsonl`, `daemon.json`.
-  (Override the directory with `TICKETLOOP_HOME`.)
-- Delete these to reset history/quota tracking.
+## 8. Background service
 
-## 7. Tuning
+First prove the foreground process works. Then use the service manager for the operating system.
 
-- **Meters look wrong?** Adjust `quota.sessionTokenBudget` / `weeklyTokenBudget` — they
-  are estimates, not official numbers.
-- **Loop too eager / too shy?** Tighten or loosen the triage by editing the `triage`
-  stage `instruction`, and curate the `exclude` globs and which tickets you label.
-- **Cost control = scope control.** Keep `defaultModel: sonnet`; only raise a specific
-  stage to `opus` if you genuinely need it. Narrow `exclude`/label discipline keeps
-  runs small, which keeps them both safe and cheap.
+Find the installed command:
+
+```bash
+command -v ticketloop
+```
+
+For macOS, create a user LaunchAgent that runs:
+
+```text
+/absolute/path/to/ticketloop watch --config /absolute/path/to/ticketloop.config.yml
+```
+
+For Linux, create a `systemd --user` service with the same command as `ExecStart`.
+
+Do not expose port `4317` publicly. Keep the dashboard bound to `127.0.0.1`. Keys stored with `ticketloop set-key` are loaded from the user’s Ticketloop home, so the service must run as the same user.
+
+## 9. Diagnostics
+
+```bash
+ticketloop doctor
+ticketloop workflow validate
+ticketloop support-bundle
+```
+
+The support bundle is designed for a public issue, but review the JSON before uploading it. Security problems must use GitHub private vulnerability reporting.
+
+## 10. Update or remove
+
+See [UPGRADING.md](UPGRADING.md) before updating.
+
+```bash
+npm install --global ticketloop@latest
+npm uninstall --global ticketloop
+```
+
+Uninstalling the package does not delete `~/.ticketloop` or a workspace config. Keep those files for reinstalling, or move them to Trash after confirming they are no longer needed.

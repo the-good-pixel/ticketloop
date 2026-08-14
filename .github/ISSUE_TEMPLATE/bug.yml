@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a reproducible Ticketloop problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Ticketloop. Do not include API keys, environment values, ticket content, private repository paths, agent output, or customer data. Security problems belong in a [private security report](https://github.com/the-good-pixel/ticketloop/security/advisories/new).
+  - type: input
+    id: version
+    attributes:
+      label: Ticketloop version
+      description: Run `ticketloop --version` or copy the version from a support bundle.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Operating system
+      options:
+        - macOS
+        - Linux
+        - Windows with WSL2
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Use mock mode when possible. Remove private names and paths.
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: bundle
+    attributes:
+      label: Redacted support bundle
+      description: Run `ticketloop support-bundle`, review the JSON, then drag the file here. The bundle is optional but usually makes diagnosis much faster.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacy check
+      options:
+        - label: I checked this report and its attachments for secrets, ticket content, customer data, and private code.
+          required: true

@@ -30,7 +30,7 @@ import {
   type Catalog,
 } from '../catalog/store.js'
 
-export const DEFAULT_WORKFLOW_REF = 'standard@1'
+export const DEFAULT_WORKFLOW_REF = 'standard@2'
 
 /** The workflow a project runs, and the legacy stage blocks layered on it. */
 export function planForProject(cfg: Config, project: ProjectConfig, cat = loadCatalog()): ExecutionPlan {

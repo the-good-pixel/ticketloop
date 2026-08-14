@@ -16,7 +16,7 @@ import { ALL_PERMISSIONS } from './catalog/types.js'
 import { findConfigPath, DATA_DIR } from './paths.js'
 
 const DEFAULTS: Config = {
-  version: 4,
+  version: 5,
   loop: { enabled: true, maxFixIterations: 3 },
   runner: {
     defaultProvider: 'claude',
@@ -300,6 +300,14 @@ function migrateConfig(raw: any): any {
       if (deployEnabled(project.stages)) project.permissions = { ...(project.permissions || {}), deployDev: true }
     }
     version = 4
+  }
+  if (version < 5) {
+    // standard@2 fails closed when triage omits or invents DECISION/KIND.
+    // Upgrade only the built-in v1 pin; custom workflows remain untouched.
+    for (const project of raw.projects || []) {
+      if (!project.workflow || project.workflow === 'standard@1') project.workflow = 'standard@2'
+    }
+    version = 5
   }
   raw.version = version
   return raw
