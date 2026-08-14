@@ -36,7 +36,7 @@ See [Supported platforms](SUPPORTED_PLATFORMS.md) for the tested support policy.
 ## Install
 
 ```bash
-npm install --global ticketloop
+npm install --global @the-good-pixel/ticketloop
 ticketloop --version
 ticketloop doctor
 ```
@@ -44,7 +44,7 @@ ticketloop doctor
 To run without a global install:
 
 ```bash
-npx ticketloop --version
+npx @the-good-pixel/ticketloop --version
 ```
 
 ## Try it safely
