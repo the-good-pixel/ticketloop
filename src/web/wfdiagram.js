@@ -7,18 +7,21 @@
 
 const NS = 'http://www.w3.org/2000/svg';
 
-// Geometry. Tuned so a full standard workflow is readable at 100% on a laptop.
-const NW = 208;        // step box width
-const NH = 58;         // step box height
-const STOP_H = 38;     // terminal pill height
-const VG = 34;         // vertical gap (leaves room for an arrow + its label)
-const HG = 30;         // gap between branch case columns
+// Geometry. Cards are deliberately comfortable to scan in the full-screen
+// editor; the canvas can scroll when a workflow is wider than the viewport.
+const NW = 244;        // step box width
+const NH = 70;         // step box height
+const STOP_H = 44;     // terminal pill height
+const VG = 40;         // vertical gap (leaves room for an arrow + its label)
+// Expanded paths need room for loop borders, card shadows and cross-loop
+// failure lines. A narrow gutter makes neighbouring paths look connected.
+const HG = 78;         // gap between branch case columns
 const PAD = 18;        // loop container padding
-const LOOP_HEAD = 30;  // loop container title bar
+const LOOP_HEAD = 34;  // loop container title bar
 const BACK_LANE = 34;  // right-hand lane inside a loop for its repair arrow
-const CASE_HEAD = 26;  // case label strip above each branch column
-const CHIP_W = 150;    // width of a collapsed case column
-const MARGIN = 28;
+const CASE_HEAD = 38;  // case label strip above each branch column
+const CHIP_W = 152;    // width of a collapsed case column
+const MARGIN = 32;
 
 const svg = (tag, attrs, text) => {
   const n = document.createElementNS(NS, tag);
@@ -26,6 +29,36 @@ const svg = (tag, attrs, text) => {
   if (text != null) n.textContent = text;
   return n;
 };
+
+function displayRef(ref) {
+  const [id, version] = String(ref || '').split('@');
+  return version ? `${id} · version ${version}` : id;
+}
+
+function friendlyRoute(name) {
+  return ({ question: 'Question', data: 'Data request', bug: 'Bug', change: 'Change', default: 'Other' })[name] ||
+    name.replace(/[-_]/g, ' ').replace(/^./, (char) => char.toUpperCase());
+}
+
+function routeTone(name, index) {
+  const known = {
+    ineligible: 'rose', question: 'violet', data: 'teal', bug: 'orange', change: 'blue',
+  };
+  if (known[name]) return known[name];
+  const tones = ['blue', 'violet', 'teal', 'orange', 'rose', 'green'];
+  return tones[index % tones.length];
+}
+
+function contractLabel(contract, effects) {
+  if (effects?.length) return 'External action';
+  return ({ route: 'Routes the ticket', verdict: 'Quality check', post: 'Updates the ticket', text: 'Work step', artifact: 'Creates an output' })[contract] || 'Workflow step';
+}
+
+function branchDescription(branch) {
+  if (branch.on.field === 'KIND') return 'Routes by ticket type';
+  if (branch.on.field === 'DECISION') return 'Checks whether work is needed';
+  return 'Uses an earlier answer';
+}
 
 // ---- pass 1: measure --------------------------------------------------------
 
@@ -52,7 +85,7 @@ function layPhase(p, collapsed) {
       cases,
       w: Math.max(NW, inner),
       innerW: inner,
-      h: NH + VG + Math.max(...cases.map((c) => c.h), CASE_HEAD),
+      h: (p.compact ? 0 : NH) + VG + Math.max(...cases.map((c) => c.h), CASE_HEAD),
     };
   }
   // loop
@@ -102,13 +135,9 @@ function arrow(c, x1, y1, x2, y2, label, cls) {
 function drawStep(c, n, x, y, ctx) {
   const g = svg('g', { class: 'wd-node wd-' + n.contract + (n.enabled ? '' : ' is-off'), 'data-node': n.id, tabindex: '0' });
   const hasError = n.problems.some((p) => p.startsWith('error'));
-  g.append(svg('rect', { x, y, width: NW, height: NH, rx: 10, class: 'wd-box' + (hasError ? ' has-error' : '') }));
-  // Contract stripe: a gate must be distinguishable at a glance from a step
-  // that merely does work, because only a gate can send the run backwards.
-  g.append(svg('rect', { x, y, width: 4, height: NH, rx: 2, class: 'wd-stripe' }));
-  g.append(svg('text', { x: x + 14, y: y + 22, class: 'wd-title' }, n.id));
-  g.append(svg('text', { x: x + 14, y: y + 38, class: 'wd-sub' }, n.ref + (n.enabled ? '' : ' · disabled')));
-  g.append(svg('text', { x: x + 14, y: y + 51, class: 'wd-sub wd-sub-dim' }, n.detail.slice(0, 34)));
+  g.append(svg('rect', { x, y, width: NW, height: NH, rx: 12, class: 'wd-box' + (hasError ? ' has-error' : '') }));
+  g.append(svg('text', { x: x + 18, y: y + 29, class: 'wd-title' }, n.name || n.id));
+  g.append(svg('text', { x: x + 18, y: y + 51, class: 'wd-sub' }, (n.enabled ? contractLabel(n.contract, n.effects) : 'Turned off')));
 
   // Badges down the right edge: anything that reaches outside the worktree, a
   // DEV pin, or a local override.
@@ -119,22 +148,28 @@ function drawStep(c, n, x, y, ctx) {
     g.append(svg('text', { x: x + NW - w / 2 - 8, y: by + 1, class: 'wd-chip-t', 'text-anchor': 'middle' }, text));
     by += 17;
   };
-  for (const e of n.effects) chip(e, 'wd-chip-effect');
-  if (n.devOnly) chip('DEV only', 'wd-chip-dev');
-  if (n.badges.length) chip(n.badges.length === 1 ? n.badges[0].slice(0, 18) : n.badges.length + ' overrides', 'wd-chip-override');
+  // Browse mode exposes execution metadata. Edit mode stays focused on the
+  // flow; detailed settings remain available in the node drawer.
+  if (!ctx.editable) {
+    for (const e of n.effects) chip(e, 'wd-chip-effect');
+    if (n.devOnly) chip('DEV only', 'wd-chip-dev');
+    if (n.badges.length) chip(n.badges.length === 1 ? n.badges[0].slice(0, 18) : n.badges.length + ' overrides', 'wd-chip-override');
+  }
 
   if (ctx.editable) g.classList.add('is-editable');
+  if (ctx.editable) drawNodeActions(g, x, y, n.id, true, !ctx.canRemove || ctx.canRemove(n.id));
   c.shapes.push(g);
   c.boxes.set(n.id, { x, y, w: NW, h: NH });
   note(c, x, y, NW, NH);
 }
 
-function drawStop(c, n, x, y) {
-  const g = svg('g', { class: 'wd-node wd-stop wd-term-' + n.terminal, 'data-node': n.id });
+function drawStop(c, n, x, y, ctx) {
+  const g = svg('g', { class: 'wd-node wd-stop wd-term-' + n.terminal + (ctx.editable ? ' is-editable' : ''), 'data-node': n.id, tabindex: '0' });
   g.append(svg('rect', { x, y, width: NW, height: STOP_H, rx: 19, class: 'wd-box' }));
   g.append(svg('text', { x: x + NW / 2, y: y + 17, class: 'wd-title', 'text-anchor': 'middle' }, n.outcome || n.terminal));
   g.append(svg('text', { x: x + NW / 2, y: y + 30, class: 'wd-sub', 'text-anchor': 'middle' },
     n.reported ? 'ends here · already replied' : 'ends here · reported by finally'));
+  if (ctx.editable) drawNodeActions(g, x, y - 10, n.id, false, !ctx.canRemove || ctx.canRemove(n.id));
   c.shapes.push(g);
   c.boxes.set(n.id, { x, y, w: NW, h: STOP_H });
   note(c, x, y, NW, STOP_H);
@@ -143,22 +178,24 @@ function drawStop(c, n, x, y) {
 function placePhase(c, lay, cx, y, ctx) {
   const p = lay.p;
   if (p.kind === 'step') return drawStep(c, p, cx - NW / 2, y, ctx);
-  if (p.kind === 'stop') return drawStop(c, p, cx - NW / 2, y);
+  if (p.kind === 'stop') return drawStop(c, p, cx - NW / 2, y, ctx);
 
   if (p.kind === 'branch') {
-    drawBranchHead(c, p, cx - NW / 2, y, ctx);
-    const top = y + NH;
+    const headH = p.compact ? 0 : NH;
+    if (!p.compact) drawBranchHead(c, p, cx - NW / 2, y, ctx);
+    const top = y + headH;
     let x = cx - lay.innerW / 2;
-    for (const col of lay.cases) {
+    for (const [caseIndex, col] of lay.cases.entries()) {
       const colCx = x + col.w / 2;
       // Case label strip, clickable to collapse/expand this branch.
-      const g = svg('g', { class: 'wd-case' + (col.collapsed ? ' is-collapsed' : ''), 'data-case': p.id + ':' + col.c.name });
-      const chipW = Math.min(col.w, 172);
-      g.append(svg('rect', { x: colCx - chipW / 2, y: top + VG - CASE_HEAD, width: chipW, height: 20, rx: 10, class: 'wd-case-box' }));
-      g.append(svg('text', { x: colCx, y: top + VG - CASE_HEAD + 14, class: 'wd-case-t', 'text-anchor': 'middle' },
-        (col.collapsed ? '▸ ' : '▾ ') + col.c.name + (col.collapsed ? ` (${countPhases(col.c.phases)})` : '')));
+      const tone = routeTone(col.c.name, caseIndex);
+      const g = svg('g', { class: `wd-case wd-route-${tone}` + (col.collapsed ? ' is-collapsed' : ''), 'data-case': p.id + ':' + col.c.name });
+      const chipW = Math.min(col.w, 196);
+      g.append(svg('rect', { x: colCx - chipW / 2, y: top + VG - CASE_HEAD, width: chipW, height: 30, rx: 15, class: 'wd-case-box' }));
+      g.append(svg('text', { x: colCx, y: top + VG - CASE_HEAD + 20, class: 'wd-case-t', 'text-anchor': 'middle' },
+        (col.collapsed ? '' : '✓ ') + friendlyRoute(col.c.name)));
       c.shapes.push(g);
-      arrow(c, cx, y + NH, colCx, top + VG - CASE_HEAD, null, 'wd-edge-branch');
+      arrow(c, cx, y + headH, colCx, top + VG - CASE_HEAD, null, `wd-edge-branch wd-route-${tone}`);
       if (!col.collapsed) placeSeq(c, col.seq, colCx, top + VG + VG / 2 - CASE_HEAD + CASE_HEAD, ctx);
       note(c, colCx - col.w / 2, top, col.w, col.h);
       x += col.w + HG;
@@ -171,7 +208,8 @@ function placePhase(c, lay, cx, y, ctx) {
   const g = svg('g', { class: 'wd-loop', 'data-loop': p.id });
   g.append(svg('rect', { x: x0, y, width: lay.w, height: lay.h, rx: 14, class: 'wd-loop-box' }));
   g.append(svg('text', { x: x0 + 14, y: y + 20, class: 'wd-loop-t' },
-    `↻ ${p.id} — up to ${p.maxIterations} attempt${p.maxIterations === 1 ? '' : 's'}, then ${p.noProgress === 'stop' ? 'stop' : 'carry on'}`));
+    `↻ Improve until ready · up to ${p.maxIterations} attempt${p.maxIterations === 1 ? '' : 's'}`));
+  if (ctx.editable) drawLoopRemove(g, x0 + lay.w - 18, y + 15, p.id, !ctx.canRemove || ctx.canRemove(p.id));
   c.shapes.push(g);
   const innerCx = x0 + PAD + lay.seq.w / 2;
   placeSeq(c, lay.seq, innerCx, y + LOOP_HEAD + PAD, ctx);
@@ -200,11 +238,12 @@ function countPhases(phases) {
 }
 
 function drawBranchHead(c, p, x, y, ctx) {
-  const g = svg('g', { class: 'wd-node wd-branch', 'data-node': p.id });
-  g.append(svg('rect', { x, y, width: NW, height: NH, rx: 10, class: 'wd-box' }));
-  g.append(svg('text', { x: x + NW / 2, y: y + 24, class: 'wd-title', 'text-anchor': 'middle' }, '⑂ ' + p.id));
-  g.append(svg('text', { x: x + NW / 2, y: y + 42, class: 'wd-sub', 'text-anchor': 'middle' },
-    'on ' + p.on.nodeId + '.' + p.on.field));
+  const g = svg('g', { class: 'wd-node wd-branch' + (ctx.editable ? ' is-editable' : ''), 'data-node': p.id, tabindex: '0' });
+  g.append(svg('rect', { x, y, width: NW, height: NH, rx: 12, class: 'wd-box' }));
+  g.append(svg('text', { x: x + NW / 2, y: y + 29, class: 'wd-title', 'text-anchor': 'middle' }, 'Choose a path'));
+  g.append(svg('text', { x: x + NW / 2, y: y + 51, class: 'wd-sub', 'text-anchor': 'middle' },
+    ctx.editable ? branchDescription(p) : 'on ' + p.on.nodeId + '.' + p.on.field));
+  if (ctx.editable) drawNodeActions(g, x, y, p.id, false, !ctx.canRemove || ctx.canRemove(p.id));
   c.shapes.push(g);
   c.boxes.set(p.id, { x, y, w: NW, h: NH });
   note(c, x, y, NW, NH);
@@ -221,9 +260,45 @@ function placeSeq(c, seq, cx, y, ctx) {
       // plain "pass" case — the interesting transitions should be visible.
       const label = lay.p.kind === 'step' ? edgeLabel(lay.p) : null;
       arrow(c, cx, from, cx, to, label);
+      if (ctx.editable && lay.p.kind !== 'stop' && (!ctx.canInsert || ctx.canInsert(lay.p.id))) {
+        insertButton(c, lay.p.id, cx, from + VG / 2);
+      }
     }
     cursor += lay.h + VG;
   });
+}
+
+function drawNodeActions(group, x, y, id, replace, remove) {
+  if (!replace && !remove) return;
+  const actions = svg('g', { class: 'wd-node-actions' });
+  let ax = x + NW - 13;
+  if (remove) {
+    actions.append(actionButton(ax, y + 13, '×', 'wd-remove', id, 'Remove from path'));
+    ax -= 25;
+  }
+  if (replace) actions.append(actionButton(ax, y + 13, '↻', 'wd-replace', id, 'Replace step'));
+  group.append(actions);
+}
+
+function drawLoopRemove(group, x, y, id, allowed) {
+  if (!allowed) return;
+  const actions = svg('g', { class: 'wd-node-actions wd-loop-actions' });
+  actions.append(actionButton(x, y, '×', 'wd-remove', id, 'Remove loop'));
+  group.append(actions);
+}
+
+function actionButton(x, y, text, cls, id, label) {
+  const g = svg('g', { class: `wd-node-action ${cls}`, [`data-${cls.replace('wd-', '')}`]: id, tabindex: '0', 'aria-label': label });
+  g.append(svg('circle', { cx: x, cy: y, r: 9, class: 'wd-action-circle' }));
+  g.append(svg('text', { x, y: y + 3.5, class: 'wd-action-text', 'text-anchor': 'middle' }, text));
+  return g;
+}
+
+function insertButton(c, id, x, y) {
+  const g = svg('g', { class: 'wd-insert', 'data-insert': id, tabindex: '0', 'aria-label': 'Add a step here' });
+  g.append(svg('circle', { cx: x, cy: y, r: 10, class: 'wd-insert-circle' }));
+  g.append(svg('text', { x, y: y + 4, class: 'wd-insert-plus', 'text-anchor': 'middle' }, '+'));
+  c.shapes.push(g);
 }
 
 function edgeLabel(n) {
@@ -284,10 +359,35 @@ export function renderDiagram(host, tree, ctx) {
   for (const s of c.shapes) root.append(s);
 
   host.replaceChildren(root);
+  let canvasOffset = 0;
+  if (ctx.panReserve) {
+    // A scroll container can only pan across content that exists. Reserve one
+    // drawer width after the SVG so even its rightmost card can move fully into
+    // the visible workspace when the inspector overlays the canvas.
+    const stage = document.createElement('div');
+    stage.className = 'wf-pan-stage';
+    const rootWidth = contentW * zoom;
+    canvasOffset = Math.max(0, (host.clientWidth - rootWidth) / 2);
+    stage.style.width = `${canvasOffset + rootWidth + ctx.panReserve}px`;
+    stage.style.height = `${height * zoom}px`;
+    root.style.marginLeft = `${canvasOffset}px`;
+    root.style.marginRight = '0';
+    root.replaceWith(stage);
+    stage.append(root);
+  }
   // The trunk is centred on a canvas that is usually wider than its pane, so
   // without this the view opens on empty space beside the first step.
-  const trunkCx = (MARGIN + seq.w / 2 - minX) * zoom;
+  const trunkCx = canvasOffset + (MARGIN + seq.w / 2 - minX) * zoom;
   host.scrollLeft = Math.max(0, trunkCx - host.clientWidth / 2);
+  if (ctx.focusCase) {
+    const target = [...root.querySelectorAll('[data-case]')]
+      .find((node) => node.getAttribute('data-case') === ctx.focusCase);
+    if (target) {
+      const targetBox = target.getBoundingClientRect();
+      const hostBox = host.getBoundingClientRect();
+      host.scrollLeft += targetBox.left + targetBox.width / 2 - hostBox.left - hostBox.width / 2;
+    }
+  }
 
   if (ctx.onNode) {
     root.querySelectorAll('[data-node]').forEach((n) => {
@@ -307,6 +407,30 @@ export function renderDiagram(host, tree, ctx) {
       n.addEventListener('click', (e) => {
         e.stopPropagation();
         ctx.onCase(n.getAttribute('data-case'));
+      });
+    });
+  }
+  if (ctx.onInsert) {
+    root.querySelectorAll('[data-insert]').forEach((node) => {
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        ctx.onInsert(node.getAttribute('data-insert'));
+      });
+    });
+  }
+  if (ctx.onReplace) {
+    root.querySelectorAll('[data-replace]').forEach((node) => {
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        ctx.onReplace(node.getAttribute('data-replace'));
+      });
+    });
+  }
+  if (ctx.onRemove) {
+    root.querySelectorAll('[data-remove]').forEach((node) => {
+      node.addEventListener('click', (event) => {
+        event.stopPropagation();
+        ctx.onRemove(node.getAttribute('data-remove'));
       });
     });
   }

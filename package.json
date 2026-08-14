@@ -2,6 +2,22 @@
   "name": "ticketloop",
   "version": "0.1.0",
   "description": "A local, subscription-powered Claude or Codex agent that watches your tracker and runs a configurable dev-cycle loop with a quota and history dashboard.",
+  "keywords": [
+    "coding-agent",
+    "claude-code",
+    "codex",
+    "linear",
+    "workflow-automation",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/the-good-pixel/ticketloop#readme",
+  "bugs": {
+    "url": "https://github.com/the-good-pixel/ticketloop/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/the-good-pixel/ticketloop.git"
+  },
   "type": "module",
   "bin": {
     "ticketloop": "./bin/ticketloop.mjs"
@@ -9,11 +25,32 @@
   "scripts": {
     "start": "tsx src/cli.ts",
     "dev": "tsx watch src/cli.ts watch",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "smoke": "tsx scripts/smoke-workflows.ts && tsx scripts/smoke-support.ts",
+    "check": "npm run typecheck && node --check src/web/app.js && node --check src/web/catalog.js && node --check src/web/wfdiagram.js && npm run smoke",
+    "test": "npm run check",
+    "prepack": "npm run check"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "docs/assets/",
+    "README.md",
+    "SETUP.md",
+    "LICENSE",
+    "SECURITY.md",
+    "SUPPORTED_PLATFORMS.md",
+    "UPGRADING.md",
+    "CHANGELOG.md",
+    "ticketloop.config.example.yml"
+  ],
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
+  "os": [
+    "darwin",
+    "linux"
+  ],
   "dependencies": {
     "yaml": "^2.5.1"
   },
@@ -22,5 +59,8 @@
     "typescript": "^5.6.3",
     "@types/node": "^22.9.0"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }

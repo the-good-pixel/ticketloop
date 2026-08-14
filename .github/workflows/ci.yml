@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Node ${{ matrix.node }} · ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm run check
+
+  package:
+    name: Packed install
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - run: npm ci
+      - name: Pack and install the release artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_file=$(npm pack --ignore-scripts --silent)
+          install_root="$RUNNER_TEMP/ticketloop-install"
+          npm install --silent --prefix "$install_root" "$GITHUB_WORKSPACE/$package_file"
+          actual=$(PATH="$install_root/node_modules/.bin:$PATH" ticketloop --version)
+          expected=$(node -p "require('./package.json').version")
+          test "$actual" = "$expected"
+          mkdir "$RUNNER_TEMP/first-run"
+          cd "$RUNNER_TEMP/first-run"
+          PATH="$install_root/node_modules/.bin:$PATH" ticketloop init
+          test -f ticketloop.config.yml
+      - run: npm audit --omit=dev

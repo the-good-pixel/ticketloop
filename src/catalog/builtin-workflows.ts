@@ -9,7 +9,7 @@
 // external wait must suspend, not route back to a clean `fix`).
 
 import { BUILTIN_STEP_REFS as S } from './builtin-steps.js'
-import type { Phase, StepNode, Workflow } from './types.js'
+import { isBranchNode, type Phase, type StepNode, type Workflow } from './types.js'
 
 // The change path is shared by KIND=change and KIND=bug (bug just reproduces
 // first). Node ids must be workflow-unique, so each variant gets a prefix.
@@ -173,4 +173,36 @@ export const STANDARD_WORKFLOW: Workflow = {
   },
 }
 
-export const BUILTIN_WORKFLOWS: Workflow[] = [STANDARD_WORKFLOW]
+// Published workflows are immutable. Version 2 closes both triage fail-open
+// paths without changing runs already pinned to standard@1.
+export const STANDARD_WORKFLOW_V2: Workflow = structuredClone(STANDARD_WORKFLOW)
+STANDARD_WORKFLOW_V2.version = 2
+
+const v2Decision = STANDARD_WORKFLOW_V2.phases.find((phase) => isBranchNode(phase) && phase.id === 'route-decision')
+const v2Kind = STANDARD_WORKFLOW_V2.phases.find((phase) => isBranchNode(phase) && phase.id === 'route-kind')
+if (!v2Decision || !isBranchNode(v2Decision) || !v2Kind || !isBranchNode(v2Kind)) {
+  throw new Error('standard workflow triage branches are missing')
+}
+
+v2Decision.branch.default = [
+  {
+    id: 'stop-triage-failed-decision',
+    stop: 'skipped',
+    reported: true,
+    note: 'Triage failed: DECISION was missing or invalid.',
+  },
+]
+// `eligible` is the normal happy path. Keep the default fail-closed for a
+// missing or unknown DECISION, while letting a valid eligible result continue
+// to the KIND branch.
+v2Decision.branch.cases.eligible = []
+v2Kind.branch.default = [
+  {
+    id: 'stop-triage-failed-kind',
+    stop: 'skipped',
+    reported: true,
+    note: 'Triage failed: KIND was missing or invalid.',
+  },
+]
+
+export const BUILTIN_WORKFLOWS: Workflow[] = [STANDARD_WORKFLOW, STANDARD_WORKFLOW_V2]

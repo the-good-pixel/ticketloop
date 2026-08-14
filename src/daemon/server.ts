@@ -25,13 +25,6 @@ import {
 } from '../catalog/store.js'
 import { compileWorkflow } from '../catalog/compile.js'
 import { planForProject, DEFAULT_WORKFLOW_REF } from '../commands/catalog.js'
-import {
-  exportBundle,
-  importBundle,
-  inspectBundle,
-  parseBundle,
-  serializeBundle,
-} from '../catalog/bundle.js'
 import type { CatalogStep, Workflow } from '../catalog/types.js'
 import { ALL_PERMISSIONS } from '../catalog/types.js'
 import { log } from '../logger.js'
@@ -43,6 +36,38 @@ const MIME: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.svg': 'image/svg+xml',
+}
+
+/**
+ * Seed a project workflow with the project-specific settings that previously
+ * lived in `projects[].stages`. The visual draft then owns the same custom
+ * instructions people were already running; saving it does not reset them to
+ * the template defaults.
+ */
+function applyProjectStageOverrides(workflow: Workflow, project: ProjectConfig): Workflow {
+  const copy = structuredClone(workflow)
+  const applyStep = (node: any) => {
+    if (!node?.step) return
+    const stepId = String(node.step).split('@')[0] as keyof NonNullable<ProjectConfig['stages']>
+    const stage = project.stages?.[stepId]
+    node.overrides = { ...(stage || {}), ...(node.overrides || {}), enabled: true }
+  }
+  const visit = (phases: any[]) => {
+    for (const phase of phases || []) {
+      if (phase.step) applyStep(phase)
+      if (phase.loop) {
+        applyStep(phase.loop.repair)
+        for (const gate of phase.loop.gates || []) applyStep(gate)
+      }
+      if (phase.branch) {
+        for (const route of Object.values(phase.branch.cases || {})) visit(route as any[])
+        if (Array.isArray(phase.branch.default)) visit(phase.branch.default)
+      }
+    }
+  }
+  visit(copy.phases)
+  for (const node of copy.finally || []) applyStep(node)
+  return copy
 }
 
 export interface ServerHooks {
@@ -74,6 +99,7 @@ export interface ServerHooks {
 // always resolve to the latest of that tier; the dated/specific IDs pin a version.
 const MODELS: Record<string, { label: string; value: string }[]> = {
   claude: [
+    { label: 'Opus 4.8', value: 'claude-opus-4-8' },
     { label: 'Opus (latest)', value: 'opus' },
     { label: 'Sonnet (latest)', value: 'sonnet' },
     { label: 'Haiku (latest)', value: 'haiku' },
@@ -219,6 +245,9 @@ function buildCatalogView(cfg: Config) {
     projects,
     permissions: ALL_PERMISSIONS,
     defaultWorkflow: DEFAULT_WORKFLOW_REF,
+    defaultProvider: cfg.runner.defaultProvider,
+    models: MODELS,
+    efforts: EFFORTS,
   }
 }
 
@@ -482,9 +511,16 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
       // Clone a built-in (or any version) into the user catalog, ready to edit.
       if (path === '/api/catalog/clone' && req.method === 'POST') {
         readBody(req).then((body) => {
-          const b = body as { kind: 'step' | 'workflow'; ref: string; newId?: string }
+          const b = body as { kind: 'step' | 'workflow'; ref: string; newId?: string; project?: string }
           const cat = loadCatalog()
-          const copy = b.kind === 'step' ? cloneStep(cat, b.ref, b.newId) : cloneWorkflow(cat, b.ref, b.newId)
+          let copy: CatalogStep | Workflow = b.kind === 'step'
+            ? cloneStep(cat, b.ref, b.newId)
+            : cloneWorkflow(cat, b.ref, b.newId)
+          if (b.kind === 'workflow' && b.project) {
+            const project = cfg.projects.find((item) => item.name === b.project)
+            if (!project) return json(res, { error: `unknown project "${b.project}"` })
+            copy = applyProjectStageOverrides(copy as Workflow, project)
+          }
           json(res, { draft: copy, ref: formatRef(copy) })
         }).catch((e) => json(res, { error: String(e instanceof Error ? e.message : e) }))
         return
@@ -493,15 +529,22 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
       // assigns the next free version rather than trusting the client's.
       if (path === '/api/catalog/save' && req.method === 'POST') {
         readBody(req).then((body) => {
-          const b = body as { kind: 'step' | 'workflow'; draft: CatalogStep | Workflow }
+          const b = body as { kind: 'step' | 'workflow'; draft: CatalogStep | Workflow; project?: string }
           try {
             const cat = loadCatalog()
             const kind = b.kind === 'step' ? 'steps' : 'workflows'
             const draft: any = { ...b.draft, builtin: false }
             draft.version = nextVersion(cat, kind as 'steps' | 'workflows', draft.id)
-            if (b.kind === 'workflow') {
+            if (b.kind === 'step') {
+              if (!String(draft.id || '').trim()) return json(res, { error: 'The step is missing an id.' })
+              if (!String(draft.name || '').trim()) return json(res, { error: 'The step is missing a name.' })
+              if (!String(draft.instruction || '').trim()) return json(res, { error: 'The default instruction cannot be empty.' })
+              draft.instruction = String(draft.instruction).trim()
+            } else {
               // Never save a workflow that could not run.
-              const plan = compileWorkflow(loadCatalog(), draft as Workflow, { config: cfg })
+              const project = b.project ? cfg.projects.find((item) => item.name === b.project) : undefined
+              if (b.project && !project) return json(res, { error: `unknown project "${b.project}"` })
+              const plan = compileWorkflow(loadCatalog(), draft as Workflow, { config: cfg, project })
               const errors = plan.diagnostics.filter((d) => d.level === 'error')
               if (errors.length) return json(res, { error: errors.map((e) => e.message).join('; ') })
             }
@@ -543,44 +586,6 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
                 ? `Project "${b.project}" still runs engine: legacy, so this workflow is not what executes. Switch it to the workflow engine under Projects.`
                 : undefined,
           })
-        }).catch((e) => serverError(res, e))
-        return
-      }
-      // ---- Sharing: export a bundle, inspect one, then accept it ----------
-      if (path === '/api/catalog/export' && req.method === 'POST') {
-        readBody(req).then((body) => {
-          const b = body as { id: string; name?: string; stepRefs?: string[]; workflowRefs?: string[] }
-          try {
-            const bundle = exportBundle(loadCatalog(), b)
-            json(res, { yaml: serializeBundle(bundle), manifest: bundle.manifest })
-          } catch (e) {
-            json(res, { error: String(e instanceof Error ? e.message : e) })
-          }
-        }).catch((e) => serverError(res, e))
-        return
-      }
-      if (path === '/api/catalog/inspect' && req.method === 'POST') {
-        readBody(req).then((body) => {
-          const { yaml } = body as { yaml: string }
-          try {
-            const bundle = parseBundle(yaml)
-            json(res, { manifest: bundle.manifest, trust: inspectBundle(loadCatalog(), bundle) })
-          } catch (e) {
-            json(res, { error: String(e instanceof Error ? e.message : e) })
-          }
-        }).catch((e) => serverError(res, e))
-        return
-      }
-      if (path === '/api/catalog/import' && req.method === 'POST') {
-        readBody(req).then((body) => {
-          const { yaml, acceptChecksumMismatch } = body as { yaml: string; acceptChecksumMismatch?: boolean }
-          try {
-            const result = importBundle(loadCatalog(), parseBundle(yaml), { acceptChecksumMismatch })
-            log.info(`imported catalog bundle: ${result.written.join(', ') || '(nothing new)'}`)
-            json(res, { ok: true, ...result })
-          } catch (e) {
-            json(res, { error: String(e instanceof Error ? e.message : e) })
-          }
         }).catch((e) => serverError(res, e))
         return
       }
@@ -671,6 +676,21 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
 
 /** Sanitized config for the UI: globals read-only, projects editable, NO keys. */
 function buildConfigView(cfg: Config) {
+  const catalog = loadCatalog()
+  const latestWorkflows = new Map<string, { ref: string; id: string; version: number; name: string; builtin: boolean }>()
+  for (const [ref, entry] of catalog.workflows) {
+    const workflow = entry.item
+    const current = latestWorkflows.get(workflow.id)
+    if (!current || workflow.version > current.version) {
+      latestWorkflows.set(workflow.id, {
+        ref,
+        id: workflow.id,
+        version: workflow.version,
+        name: workflow.name,
+        builtin: entry.scope === 'builtin',
+      })
+    }
+  }
   return {
     // globals — editable from the dashboard's Settings card except provider
     // auth and server settings, which are config-file-only.
@@ -690,6 +710,10 @@ function buildConfigView(cfg: Config) {
     defaultInstructions: DEFAULT_INSTRUCTIONS,
     models: MODELS,
     efforts: EFFORTS,
+    workflows: [...latestWorkflows.values()].sort((a, b) => {
+      if (a.builtin !== b.builtin) return a.builtin ? 1 : -1
+      return a.name.localeCompare(b.name)
+    }),
     tooling: tooling(cfg),
     projects: cfg.projects.map((p) => {
       const tc = resolveTracker(cfg, p)

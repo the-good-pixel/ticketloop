@@ -11,7 +11,7 @@ import {
   fsyncSync,
   closeSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { DATA_DIR, USAGE_LOG, RUNS_LOG } from './paths.js'
 import type { RunRecord, UsageEvent } from './types.js'
 
@@ -167,6 +167,9 @@ export function abortStaleRuns(): number {
 
 /** Write via temp file + fsync + rename so a crash never leaves a torn file. */
 export function atomicWrite(path: string, data: string): void {
+  // Several first-run state files are written before any run record exists.
+  // Make the destination here so every atomic writer is safe on a clean home.
+  mkdirSync(dirname(path), { recursive: true })
   const tmp = path + '.tmp'
   const fd = openSync(tmp, 'w')
   try {
