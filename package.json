@@ -20,7 +20,7 @@
   },
   "type": "module",
   "bin": {
-    "ticketloop": "./bin/ticketloop.mjs"
+    "ticketloop": "bin/ticketloop.mjs"
   },
   "scripts": {
     "start": "tsx src/cli.ts",
