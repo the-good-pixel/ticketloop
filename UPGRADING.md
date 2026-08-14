@@ -13,7 +13,7 @@ Ticketloop is pre-1.0 software. Read [CHANGELOG.md](CHANGELOG.md) before every u
 ticketloop pause
 # Stop the foreground process or user service.
 cp -R ~/.ticketloop ~/.ticketloop.backup
-npm install --global ticketloop@latest
+npm install --global @the-good-pixel/ticketloop@latest
 ticketloop --version
 ticketloop doctor
 ticketloop workflow validate
@@ -29,7 +29,7 @@ Config migrations run when a config is loaded and are saved on the next dashboar
 Stop the daemon, reinstall the exact prior npm version, and restore the backup only if the newer version changed local state incompatibly:
 
 ```bash
-npm install --global ticketloop@0.1.0
+npm install --global @the-good-pixel/ticketloop@0.1.0
 ```
 
 Do not run old and new versions against the same state directory at the same time.

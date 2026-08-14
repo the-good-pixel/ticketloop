@@ -19,7 +19,7 @@ Claude Code and Codex CLI are alternatives. Both may be installed, and each work
 ## 2. Install and run the offline demo
 
 ```bash
-npm install --global ticketloop
+npm install --global @the-good-pixel/ticketloop
 ticketloop --version
 ticketloop doctor
 ticketloop demo
@@ -157,7 +157,7 @@ The support bundle is designed for a public issue, but review the JSON before up
 See [UPGRADING.md](UPGRADING.md) before updating.
 
 ```bash
-npm install --global ticketloop@latest
+npm install --global @the-good-pixel/ticketloop@latest
 npm uninstall --global ticketloop
 ```
 
