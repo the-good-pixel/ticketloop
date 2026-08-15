@@ -249,7 +249,7 @@ function errorResult(model: string, msg: string): AgentResult {
 
 const MOCK_TEXTS: Record<string, string> = {
   // Overwritten below with a KIND derived from the ticket in the prompt.
-  triage: 'DECISION: eligible\nTriage complete.',
+  triage: 'DECISION: eligible\nREASON: mock triage.',
   answer:
     'The 15-minute expiry comes from the access-JWT TTL in auth/session; the ' +
     'rolling refresh cookie keeps you signed in past it. See auth/session.go.\n' +
@@ -318,8 +318,16 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
   // produce distinct PRs the engine can parse into rec.prs.
   let text = MOCK_TEXTS[kind] || 'ok'
   // Test hook: make triage classify the ticket as "no action needed".
-  if (kind === 'triage') text = `DECISION: eligible\nKIND: ${mockTriageKind(o.prompt)}\nTriage complete.`
-  if (kind === 'triage' && process.env.TICKETLOOP_MOCK_TRIAGE_NOACTION) text = 'DECISION: no-action'
+  if (kind === 'triage') {
+    const k = mockTriageKind(o.prompt)
+    text = `DECISION: eligible\nKIND: ${k}\nREASON: latest comment asks for ${k} work on this ticket.`
+  }
+  // Test hooks: exercise both triage early-exits, each WITH a reason so the
+  // run record's summary can be asserted on.
+  if (kind === 'triage' && process.env.TICKETLOOP_MOCK_TRIAGE_NOACTION)
+    text = 'DECISION: no-action\nREASON: latest comment "UAT passed, ready for PROD" is a sign-off with no new ask.'
+  if (kind === 'triage' && process.env.TICKETLOOP_MOCK_TRIAGE_INELIGIBLE)
+    text = 'DECISION: ineligible\nREASON: the fix requires a DB migration under db/migrations, which is off-limits.'
   if (kind === 'ship') {
     const repo = o.cwd.split('/').pop() || 'demo-app'
     const n = 100 + (repo.length % 90)

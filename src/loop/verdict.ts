@@ -53,3 +53,17 @@ export function parseRouteField(text: string, field: string): string | undefined
   const m = (text || '').match(re)
   return m ? m[1].trim().toLowerCase() : undefined
 }
+
+// A route step routes on a value, but the value alone never explains itself.
+// "skipped — ineligible" tells a user nothing they could act on. This reads the
+// one-line REASON a route step states alongside its decision, so the run record
+// can say WHY it stopped. Last wins, matching parseResult: a model may think
+// aloud before concluding.
+const MAX_REASON = 300
+export function parseRouteReason(text: string): string | undefined {
+  const matches = [...(text || '').matchAll(/^[ \t]*REASON:[ \t]*(.+)$/gim)]
+  if (!matches.length) return undefined
+  const reason = matches[matches.length - 1][1].trim()
+  if (!reason) return undefined
+  return reason.length > MAX_REASON ? `${reason.slice(0, MAX_REASON - 1).trimEnd()}…` : reason
+}

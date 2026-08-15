@@ -16,6 +16,7 @@ import type { AgentResult } from '../runner/index.js'
 import type { Tracker } from '../adapters/tracker/tracker.js'
 import { makeRepo, type Repo } from '../adapters/repo/github.js'
 import { appendRun, appendUsage, getRun } from '../store.js'
+import { parseRouteReason } from './verdict.js'
 import { classifyKind } from './classify.js'
 import { runWorkflow } from './interpreter.js'
 import { planForProject } from '../commands/catalog.js'
@@ -339,19 +340,28 @@ export async function processTicket(
     // Only skip when triage EXPLICITLY says ineligible. A missing/oddly-formatted
     // decision defaults to eligible (real safety is the exclude guardrail + PR
     // review, not this soft filter) — so a stray answer never wrongly skips.
-    const eligible = ctx.mock || !/DECISION:\s*ineligible/i.test(triage.text)
+    // Mock mode honors an explicit ineligible too: the mock only emits one when a
+    // test asks for it, so forcing eligible here just made the branch untestable
+    // (and diverged from the workflow engine, which has always honored it).
+    const eligible = !/DECISION:\s*ineligible/i.test(triage.text)
     const kind = parseKind(triage.text) || classifyKind(ticket) // question | data | change | bug
 
     // No action needed: the latest activity is a sign-off / approval / ack, or an
     // ask the loop can't do (deploy to prod). Skip WITHOUT running any pipeline —
     // this is what stops sign-offs re-triggering a doomed "no file changes" run.
+    // The REASON triage gave. Without it the user sees only the word "skipped"
+    // and has to re-read the ticket to guess what the model concluded.
+    const triageReason = parseRouteReason(triage.text)
     if (/DECISION:\s*no[-\s]?action/i.test(triage.text)) {
-      finish(rec, 'skipped', 'No action required (triage: latest activity is a sign-off / approval / not a request).')
+      finish(rec, 'skipped', triageReason
+        ? `No action required — ${triageReason}`
+        : 'No action required (triage: latest activity is a sign-off / approval / not a request).')
       return rec
     }
 
     if (!eligible) {
-      finish(rec, 'skipped', `Triage: ineligible. ${firstLine(triage.text)}`)
+      // firstLine used to be "DECISION: ineligible" — the decision restated, never a reason.
+      finish(rec, 'skipped', `Triage: ineligible${triageReason ? ` — ${triageReason}` : '.'}`)
       return rec
     }
 
@@ -767,6 +777,9 @@ function finish(rec: RunRecord, outcome: RunRecord['outcome'], note: string) {
   rec.endedAt = Date.now()
   const last = rec.stages[rec.stages.length - 1]
   if (last && last.status === 'running') endStage(rec, last, 'ok')
+  // Every outcome carries its reason, not just the failing ones (see the same
+  // change in interpreter.ts — both engines must record history identically).
+  rec.summary = note
   rec.error = outcome === 'failed' || outcome === 'blocked' || outcome === 'waiting-provider' ? note : rec.error
   log.info(`  = ${rec.ticket}: ${outcome} — ${note}`)
   appendRun(rec)

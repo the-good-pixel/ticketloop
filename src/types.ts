@@ -356,6 +356,11 @@ export interface RunRecord {
   startedAt: number
   endedAt?: number
   outcome: RunOutcome
+  // Why the run ended the way it did, in one line, for EVERY outcome — not just
+  // failures. `error` only ever held the failure cases, so a skipped ticket lost
+  // its explanation entirely and the dashboard had nothing to show but the word
+  // "skipped".
+  summary?: string
   stages: StageRecord[]
   prUrl?: string // first/primary PR — existing UI + history keep working
   prs?: PrRecord[] // populated on multi-repo runs
