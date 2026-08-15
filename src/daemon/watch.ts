@@ -231,6 +231,25 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     saveState(state)
   }
 
+  // Both providers refresh together, on one timer, deliberately OUTSIDE the
+  // scan. Scanning stops while the daemon is paused, so quota tied to scanning
+  // would freeze both meters for the whole pause — the stale-card problem again.
+  // The floor keeps a short tracker poll interval from turning into a hot loop
+  // against either provider; polling costs no quota, but it is still a request.
+  const QUOTA_MIN_INTERVAL_MS = 60_000
+  let lastQuotaRefresh = 0
+  let quotaInflight: Promise<void> | null = null
+  async function refreshQuota(force = false): Promise<void> {
+    if (opts.mock) return
+    if (quotaInflight) return quotaInflight
+    if (!force && Date.now() - lastQuotaRefresh < QUOTA_MIN_INTERVAL_MS) return
+    quotaInflight = refreshProviderQuotaSnapshots(cfg)
+      .then(() => { lastQuotaRefresh = Date.now() })
+      .catch((e) => log.debug(`quota refresh failed: ${String(e)}`))
+      .finally(() => { quotaInflight = null })
+    return quotaInflight
+  }
+
   // A scan LAUNCHES runs into each project's free slots (fire-and-forget) and
   // returns — it does NOT await them. Projects run concurrently; within a
   // project, `maxParallel` (default 1) caps how many of its tickets run at once.
@@ -242,7 +261,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     scanning = true
     let launched = 0
     try {
-      if (!opts.mock) await refreshProviderQuotaSnapshots(cfg)
+      await refreshQuota()
       for (const project of cfg.projects) {
         const jobs = await selectJobs(project, slotsFree(project))
         for (const job of jobs) {
@@ -310,7 +329,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     const key = resolveTrackerKey(project, tc)
     const tracker = makeTracker(tc, key)
     const p = (async () => {
-      if (!opts.mock) await refreshProviderQuotaSnapshots(cfg)
+      await refreshQuota(true) // a manual retry deserves a current answer, not a cached one
       const t = await tracker.getTicket(identifier).catch(() => null)
       if (!t) {
         log.error(`retry: ticket ${identifier} not found in ${project.name}`)
@@ -432,16 +451,26 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     return
   }
 
+  // Fill both meters before the first scan, so a daemon that starts paused still
+  // shows current quota instead of an empty card.
+  await refreshQuota(true)
+
   // initial scan
   await scanNow()
 
   const timer = setInterval(scanNow, cfg.tracker.pollIntervalSec * 1000)
+  // Keeps both meters current while the daemon is paused, when scanNow never
+  // runs. refreshQuota's own floor makes the overlap with scanNow a no-op — and
+  // is also why this ticks at HALF the floor: ticking at exactly the floor would
+  // land each tick a hair under it, skip, and halve the real refresh rate.
+  const quotaTimer = setInterval(() => { void refreshQuota() }, QUOTA_MIN_INTERVAL_MS / 2)
   let shuttingDown = false
   const shutdown = () => {
     if (shuttingDown) return
     shuttingDown = true
     running = false
     clearInterval(timer)
+    clearInterval(quotaTimer)
     srv?.close()
     // Kill any in-flight coding-agent children so nothing keeps editing/pushing after
     // we exit (they're detached process groups and won't get our signal).

@@ -269,7 +269,11 @@ export interface ProviderQuotaSnapshot {
   windows: ProviderQuotaWindow[]
   limitReached: boolean
   reachedType?: string | null
-  source: 'provider-status' | 'provider-error'
+  // 'provider-status' = we asked the provider and it answered, so `fetchedAt` is
+  // when we asked. 'local-cache' = a fallback read of something the provider's
+  // own CLI left on disk, so `fetchedAt` is only as fresh as that file.
+  // 'unpolled' = placeholder for a provider we have never successfully read.
+  source: 'provider-status' | 'provider-error' | 'local-cache' | 'unpolled'
 }
 
 export type ProviderFailureKind =
