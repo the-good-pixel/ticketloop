@@ -74,7 +74,7 @@ export async function runCodex(o: RunAgentOpts): Promise<AgentResult> {
   return new Promise((resolve) => {
     const child = spawn(provider.bin, args, { cwd: o.cwd, env, stdio: ['pipe', 'pipe', 'pipe'], detached: true })
     const pgid = child.pid || 0
-    const inflightKey = pgid ? registerChild(pgid, { model }) : ''
+    const inflightKey = pgid ? registerChild(pgid, { model, ticketKey: o.ticketKey }) : ''
     const reap = () => { if (pgid) unregisterChild(pgid, inflightKey) }
     let settled = false
     let timedOut = false

@@ -303,6 +303,7 @@ export type RunOutcome =
   | 'partial' // multi-repo: ≥1 PR opened AND ≥1 repo failed to ship
   | 'merged'
   | 'skipped' // did not qualify
+  | 'cancelled' // a human stopped this run on purpose (not a failure, never retried)
   | 'blocked' // hit a safety guardrail
   | 'waiting-provider' // provider reported exhausted quota; resume when available
   | 'waiting-approval' // a human must approve something (a deploy, a merge)

@@ -60,7 +60,8 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
 - `src/daemon/watch.ts` — the scheduler: `selectJob` (one candidate per project),
   `runJob`, `scanNow` (**launches one run per free project, in parallel**), retry hook.
   `src/daemon/server.ts` — dashboard HTTP + JSON API. `src/daemon/control.ts` — the
-  cross-process pause switch (system + per-ticket).
+  cross-process control file: the pause switch (system + per-ticket), the
+  **never-process** marks, and one-shot **stop** requests.
 - `src/runner/claude.ts` — spawns `claude -p`, parses usage, enforces auth-mode safety;
   holds the mock runner. `src/runner/children.ts` — orphan reaping.
 - `src/adapters/tracker/*` — `Tracker` interface + `linear` / `mock`. `src/adapters/repo/
@@ -118,6 +119,16 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
   fetched); the off-limits `exclude` guardrail (`scanRepos`) runs every fix iteration over
   all repos. **Never auto-merge** unless a project's own instruction explicitly says to.
 - **Parallelism**: at most **one run per project**, many projects at once (`activeRuns`).
+- **Pause, stop and never-process are three different things.** A *pause* lets the
+  current step finish and keeps the checkpoint, so the ticket resumes. A *stop*
+  kills that ticket's agent process group AND trips the same stage boundary (a
+  stop landing between steps has no child to kill, and without the boundary check
+  the run would quietly finish the whole workflow); it deletes the checkpoint,
+  records `cancelled`, and is never retried. *Never-process* removes the ticket
+  from the candidate set permanently — it is checked in `selectJobs` BEFORE the
+  new-activity test, because a mark that a new comment could undo would not solve
+  the problem it exists for. Stop and never-process are independent; either, or
+  both together.
 - **A displayed quota number must carry an honest age.** Every snapshot's
   `fetchedAt` is when we asked the provider, never when some other tool happened
   to write a file. A failed poll keeps the last reading *with its original

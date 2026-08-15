@@ -676,6 +676,7 @@ async function stage(
     mock: ctx.mock,
     mockKind: MOCK_KIND[name],
     env,
+    ticketKey: `${project.name}:${ticket.identifier}`,
   })
 
   // Guard: never let CLI-error text or an echoed prompt be treated as a real

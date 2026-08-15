@@ -108,7 +108,7 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
     // Track this child's process group so it can be killed on shutdown / reaped
     // on the next startup if the daemon dies.
     const pgid = child.pid || 0
-    const inflightKey = pgid ? registerChild(pgid, { model }) : ''
+    const inflightKey = pgid ? registerChild(pgid, { model, ticketKey: o.ticketKey }) : ''
     const reap = () => {
       if (pgid) unregisterChild(pgid, inflightKey)
     }

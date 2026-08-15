@@ -1,16 +1,27 @@
-import type { Config, ProjectConfig } from '../types.js'
+import type { Config, ProjectConfig, RunRecord } from '../types.js'
 import { makeEngineCtx, processTicket } from '../loop/engine.js'
 import { resolveTracker, saveConfig, validateProject } from '../config.js'
 import { makeTracker } from '../adapters/tracker/tracker.js'
 import { resolveTrackerKey, setCredential } from '../credentials.js'
 import { startServer } from './server.js'
-import { readJson, writeJson, abortStaleRuns, pruneUsage, CorruptStateError } from '../store.js'
+import { readJson, writeJson, abortStaleRuns, pruneUsage, appendRun, getRun, readRuns, CorruptStateError } from '../store.js'
 import { DAEMON_STATE } from '../paths.js'
 import { assertAuthSafe } from '../runner/index.js'
-import { sweepOrphans, killAllChildren } from '../runner/children.js'
+import { sweepOrphans, killAllChildren, killChildrenFor } from '../runner/children.js'
 import { latestHumanActivity } from '../loop/context.js'
 import { deleteCheckpoint } from '../loop/checkpoint.js'
-import { isPaused, pausedTickets, setTicketPaused } from './control.js'
+import {
+  cancelRequestedTickets,
+  clearCancel,
+  ignoredTickets,
+  isCancelRequested,
+  isIgnored,
+  isPaused,
+  requestCancel,
+  pausedTickets,
+  setTicketIgnored,
+  setTicketPaused,
+} from './control.js'
 import { log } from '../logger.js'
 import { renameSync } from 'node:fs'
 import { refreshProviderQuotaSnapshots } from '../providerQuota.js'
@@ -145,6 +156,10 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         state.set(sKey, { marker, attempts: 0, lastOutcome: 'adopted' })
         continue
       }
+      // Never-process: checked FIRST, and ahead of the new-activity test, because
+      // the whole point of the mark is that fresh comments must not wake the
+      // ticket. A pause says "later"; this says "not at all".
+      if (isIgnored(sKey)) continue
       const prev = state.get(sKey)
       // Process when: never seen, OR a genuinely NEW human comment arrived (newest
       // timestamp advanced), OR the last run failed / was interrupted mid-run and
@@ -171,6 +186,68 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     return picked
   }
 
+  // The newest run record for a ticket. Needed on the crash path, where the run
+  // threw (its agent was killed) and runJob never received the record.
+  function latestRunFor(sKey: string): RunRecord | undefined {
+    const project = sKey.slice(0, sKey.indexOf(':'))
+    const ticket = sKey.slice(sKey.indexOf(':') + 1)
+    const hit = readRuns().find((r) => r.ticket === ticket && r.project === project)
+    return hit ? getRun(hit.id) : undefined
+  }
+
+  // A stopped run is finished, deliberately. Unlike a pause it keeps no
+  // checkpoint (you stopped it because it should not have been running, so there
+  // is nothing to resume) and unlike a failure it is never retried — `attempts`
+  // is reset and the marker is recorded as handled, so the same ask cannot pick
+  // it straight back up on the next scan.
+  function settleCancelled(sKey: string, marker: string, rec?: RunRecord): void {
+    clearCancel(sKey)
+    deleteCheckpoint(sKey)
+    // The engine sees a stop as a pause (it halts at the same boundary) or as a
+    // crash (the agent was killed). Neither is what happened, and both would
+    // offer the user a Continue button for a run they deliberately ended — so
+    // the record is corrected to say who stopped it and why.
+    if (rec) {
+      rec.outcome = 'cancelled'
+      rec.summary = 'Stopped by request.'
+      rec.error = undefined
+      rec.resumeAt = undefined
+      appendRun(rec)
+    }
+    state.set(sKey, { marker, attempts: 0, lastOutcome: 'cancelled' })
+    saveState(state)
+    log.info(`  ✋ ${sKey}: stopped by request`)
+  }
+
+  /**
+   * Stop a ticket now, and/or never process it again.
+   *
+   * The stop is immediate by design: pausing waits for the current step to end,
+   * which can be many minutes of a model working on something already judged
+   * wrong. This kills that ticket's agent process group and leaves other
+   * projects' runs alone.
+   */
+  function stopTicket(ticketKey: string, opts: { ignore?: boolean; reason?: string } = {}): {
+    stopped: boolean
+    killed: number
+    ignored: boolean
+  } {
+    if (opts.ignore) setTicketIgnored(ticketKey, true, opts.reason)
+    const wasRunning = activeRuns.has(ticketKey)
+    let killed = 0
+    if (wasRunning) {
+      // Record the intent BEFORE killing: runJob reads it to tell a deliberate
+      // stop apart from a genuine crash.
+      requestCancel(ticketKey)
+      killed = killChildrenFor(ticketKey)
+      log.info(`✋ stop requested for ${ticketKey}${killed ? ` — killed ${killed} agent process group(s)` : ''}`)
+    }
+    // A queued-but-not-running ticket needs no kill; the ignore mark (or the
+    // pause) is what keeps it from starting.
+    if (!wasRunning && opts.ignore) log.info(`🚫 ${ticketKey} marked never-process`)
+    return { stopped: wasRunning, killed, ignored: !!opts.ignore }
+  }
+
   // Run one job to completion and fold its outcome back into per-ticket state.
   // Called fire-and-forget from scanNow (one per project, concurrently).
   async function runJob(job: Job): Promise<void> {
@@ -189,14 +266,25 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         reprocess: job.reprocess,
         trackerKey: job.key,
         marker: job.marker,
-        isPaused: () => isPaused(sKey), // system- or ticket-level pause at each stage boundary
+        // System- or ticket-level pause at each stage boundary — and a stop, which
+        // must also halt there. Killing the agent covers a stop that lands mid-step,
+        // but a stop landing BETWEEN steps has no child to kill; without this the
+        // run would calmly carry on to the next step and finish the whole workflow.
+        isPaused: () => isPaused(sKey) || isCancelRequested(sKey),
       })
     } catch (e) {
+      // A stop request kills the agent mid-step, which surfaces here as a crash.
+      // It is not a failure and must not be retried, so it is checked first.
+      if (isCancelRequested(sKey)) return settleCancelled(sKey, job.marker, latestRunFor(sKey))
       log.error(`[${job.project.name}] ${job.ticket.identifier} crashed: ${String(e)}`)
       state.set(sKey, { marker: job.marker, attempts, lastOutcome: 'failed' })
       saveState(state)
       return
     }
+
+    // The run may also have ended "cleanly" after the kill (a step that swallowed
+    // the signal, or a stop that landed between steps). Same treatment.
+    if (isCancelRequested(sKey)) return settleCancelled(sKey, job.marker, rec)
 
     if (rec.outcome === 'paused') {
       // Not an attempt — the run checkpointed and will resume when unpaused.
@@ -376,6 +464,8 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       // every in-flight run (across projects, and within a parallel project)
       activeRuns: [...activeRuns.values()].map((a) => ({ project: a.project, ticket: a.ticket })),
       pausedTickets: pausedTickets(),
+      ignoredTickets: ignoredTickets(),
+      stoppingTickets: cancelRequestedTickets(),
       resumableTickets: resumableTickets(),
       // first active kept for the legacy single-run widgets
       activeTicket: activeRuns.values().next().value?.ticket,
@@ -441,6 +531,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       }
     },
     retryTicket,
+    stopTicket,
   })
 
   if (opts.once) {

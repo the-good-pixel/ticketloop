@@ -521,6 +521,7 @@ async function invoke(
       step.capabilities.externalEffects.includes('tracker-comment') && s.trackerKey && ctx.cfg.tracker.type === 'linear'
         ? { LINEAR_API_KEY: s.trackerKey }
         : undefined,
+    ticketKey: `${s.project.name}:${s.ticket.identifier}`,
   })
 
   if (!res.isError && looksLikeGarbage(res.text)) {
