@@ -57,7 +57,7 @@ export interface InterpCtx {
 type Signal =
   | { type: 'continue' }
   | { type: 'stop'; terminal: TerminalClass; outcome?: RunOutcome; note?: string; reported?: boolean }
-  | { type: 'suspend'; reason: string; nodeId: string; provider?: AgentProvider; resumeAt?: number }
+  | { type: 'suspend'; reason: string; nodeId: string; detail?: string; provider?: AgentProvider; resumeAt?: number }
   | { type: 'repair'; loopId: string; detail: string }
   | { type: 'exit-loop'; loopId?: string }
 
@@ -180,7 +180,12 @@ export async function runWorkflow(
     await runFinally(ctx, s, 'waiting')
     rec.resumeAt = signal.resumeAt
     if (signal.provider) rec.waitingProvider = signal.provider
-    finish(s, (signal.reason as RunOutcome) || 'waiting-external', `Waiting at "${signal.nodeId}".`)
+    rec.waitReason = signal.detail
+    finish(
+      s,
+      (signal.reason as RunOutcome) || 'waiting-external',
+      signal.detail || `Waiting at "${signal.nodeId}".`,
+    )
     return rec
   }
   const terminal: TerminalClass =
@@ -602,7 +607,12 @@ function applyTransition(
         note: `"${node.id}" ended the run: ${reason || firstLine(text) || result}`,
       }
     case 'suspend':
-      return { type: 'suspend', reason: waitingReason(node, reason), nodeId: node.id }
+      return {
+        type: 'suspend',
+        reason: waitingReason(node, reason),
+        nodeId: node.id,
+        detail: reason || firstLine(text),
+      }
     case 'exit-loop':
       return { type: 'exit-loop', loopId: node.loopId }
     case 'repair':

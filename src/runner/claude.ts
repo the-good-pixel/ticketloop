@@ -293,6 +293,7 @@ function mockTriageKind(prompt: string): string {
 let mockVerifyFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFIES) || 0
 let mockReviewFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_REVIEWS) || 0
 let mockShipFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_SHIPS) || 0
+let mockShipWaitsLeft = Number(process.env.TICKETLOOP_MOCK_WAIT_SHIPS) || 0
 let mockDeployFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_DEPLOYS) || 0
 let mockDeployWaitsLeft = Number(process.env.TICKETLOOP_MOCK_WAIT_DEPLOYS) || 0
 let mockVerifyDevFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFYDEV) || 0
@@ -341,9 +342,12 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
         totalTokens: inp + cacheRead, costUsd: 0, provider: 'claude', model, isError: true,
       }
     }
-    // TICKETLOOP_MOCK_FAIL_SHIPS=N: first N ships open the PR but report red CI,
-    // so you can watch ship route back to fix.
-    if (mockShipFailsLeft > 0) {
+    // TICKETLOOP_MOCK_WAIT_SHIPS=N: first N ships preserve the open PR while an
+    // external CI service is unavailable, so resume can revalidate it later.
+    if (mockShipWaitsLeft > 0) {
+      mockShipWaitsLeft--
+      text = `Pushed, opened ${url}\nCI is unavailable.\nVERDICT: wait — GitHub Actions is unavailable`
+    } else if (mockShipFailsLeft > 0) {
       mockShipFailsLeft--
       text = `Pushed, opened ${url}\nCI: the build check is RED.\nVERDICT: fail — CI build failing on the PR`
     } else {

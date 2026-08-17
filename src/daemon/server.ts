@@ -85,7 +85,7 @@ export interface ServerHooks {
     pausedTickets?: string[]
     ignoredTickets?: { ticketKey: string; at: number; reason?: string }[]
     stoppingTickets?: string[]
-    resumableTickets?: { key: string; outcome: string; attempts: number }[]
+    resumableTickets?: { key: string; outcome: string; attempts: number; canResume: boolean }[]
   }
   // project setup (UI-driven); these persist config / credentials on disk
   saveProject: (p: ProjectConfig) => { ok: true } | { error: string }
@@ -93,7 +93,7 @@ export interface ServerHooks {
   setKey: (project: string, key: string) => { ok: true } | { error: string }
   // Edit the global (non-project) settings from the dashboard.
   saveSettings: (patch: Record<string, unknown>) => { ok: true } | { error: string }
-  // Re-run a failed/paused ticket now; `fresh` discards its resume checkpoint.
+  // Continue a resumable ticket now; `fresh` discards its resume checkpoint.
   retryTicket: (ticketKey: string, fresh: boolean) => { ok: true } | { error: string }
   // Stop a ticket's run immediately (kills its agent), and/or mark it
   // never-process. Both are independent — either, or both together.

@@ -115,7 +115,10 @@ const state = {
   expandedTickets: new Set(), // ticket keys currently expanded (their run list)
   detailCache: new Map(), // id -> RunRecord (full)
   runsById: new Map(),
+  resumable: new Map(), // ticket key -> daemon resume state
+  systemPaused: false,
 };
+const retryPending = new Set();
 
 const OUTCOME_LABELS = {
   answered: 'Answer posted',
@@ -141,6 +144,52 @@ function outcomeLabel(outcome) {
   return OUTCOME_LABELS[outcome] || outcome || 'Unknown';
 }
 
+function isManualWait(outcome) {
+  return outcome === 'waiting-approval' || outcome === 'waiting-deployment' || outcome === 'waiting-external';
+}
+
+function waitTitle(outcome) {
+  if (outcome === 'waiting-deployment') return 'Deployment has not started';
+  if (outcome === 'waiting-approval') return 'A person needs to approve the next step';
+  return 'An external service is blocking progress';
+}
+
+function renderWaitNotice(run, ticketKey) {
+  const notice = el('section', 'wait-notice');
+  notice.appendChild(el('span', 'wait-notice-mark', '!'));
+  const copy = el('div', 'wait-notice-copy');
+  copy.appendChild(el('strong', null, waitTitle(run.outcome)));
+  copy.appendChild(el('p', null, run.waitReason || run.summary || run.error || 'The run is waiting for an external condition.'));
+
+  const resumeState = state.resumable.get(ticketKey);
+  const actions = el('div', 'wait-notice-actions');
+  if (resumeState?.canResume) {
+    const pending = retryPending.has(ticketKey);
+    const resume = el('button', 'btn btn-wait btn-sm', pending ? 'Starting…' : state.systemPaused ? 'Resume all first' : 'Continue run');
+    resume.type = 'button';
+    resume.disabled = pending || state.systemPaused;
+    resume.title = state.systemPaused
+      ? 'Ticket processing is paused at the system level'
+      : 'Recheck the external step from the saved checkpoint';
+    resume.addEventListener('click', (event) => {
+      event.stopPropagation();
+      doRetry(ticketKey, false);
+    });
+    actions.appendChild(resume);
+    actions.appendChild(el('span', 'wait-notice-help', 'Completed code steps stay saved. The external step is checked again.'));
+  } else {
+    actions.appendChild(el('span', 'wait-notice-legacy', 'No safe checkpoint'));
+    actions.appendChild(el(
+      'span',
+      'wait-notice-help',
+      'This older wait lost its checkpoint. Complete the external step manually; do not restart the whole ticket.',
+    ));
+  }
+  copy.appendChild(actions);
+  notice.appendChild(copy);
+  return notice;
+}
+
 let connOk = true;
 function setConn(ok) {
   connOk = ok;
@@ -149,6 +198,8 @@ function setConn(ok) {
 
 // ---- rendering: header/status ----
 function renderStatus(s) {
+  state.systemPaused = !!s.paused;
+  state.resumable = new Map((s.resumableTickets || []).map((item) => [item.key, item]));
   $('#statusDot').classList.toggle('running', !!s.running);
   $('#statusDot').classList.toggle('paused', !!s.paused);
   $('#statusDot').title = s.paused ? 'loop paused' : s.running ? 'loop running' : 'loop idle';
@@ -273,10 +324,11 @@ function renderTicketGroup(g) {
 
   // At-a-glance: the latest run's progress.
   main.appendChild(renderStageTracker(latest.stages));
-  if (latest.error) main.appendChild(el('div', 'run-error', latest.error));
+  if (isManualWait(latest.outcome)) main.appendChild(renderWaitNotice(latest, g.key));
+  else if (latest.error) main.appendChild(el('div', 'run-error', latest.error));
 
   // Resume / Restart act on the TICKET (they continue its latest work).
-  if (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked' || latest.outcome === 'waiting-provider') {
+  if (!isManualWait(latest.outcome) && (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked' || latest.outcome === 'waiting-provider')) {
     const actions = el('div', 'run-actions');
     const resume = el('button', 'btn btn-ghost btn-sm', '▶ Continue run');
     resume.title = 'Continue this run from its checkpoint (already-done steps are reused)';
@@ -393,7 +445,10 @@ function renderHistoryRun(r) {
   main.appendChild(timing);
 
   const summary = r.summary || r.error;
-  if (summary) main.appendChild(el('p', 'history-run-summary' + (r.error ? ' is-error' : ''), summary));
+  if (!isManualWait(r.outcome) && summary)
+    main.appendChild(el('p', 'history-run-summary' + (r.error ? ' is-error' : ''), summary));
+  if (isManualWait(r.outcome))
+    main.appendChild(renderWaitNotice(r, (r.project || '') + ':' + (r.ticket || '')));
 
   const flow = el('div', 'history-run-flow');
   flow.appendChild(el('span', 'history-flow-label', 'Work'));
@@ -718,14 +773,22 @@ async function doTicketPause(ticketKey, paused) {
   }
 }
 
-// Resume (fresh=false) or restart-fresh (fresh=true) a failed/paused ticket now.
+// Resume (fresh=false) or restart-fresh (fresh=true) a resumable ticket now.
 async function doRetry(ticketKey, fresh) {
+  if (retryPending.has(ticketKey)) return;
+  retryPending.add(ticketKey);
+  if (activeView === 'history') renderHistoryFeed();
   try {
-    const r = await api('/api/retry', { method: 'POST', body: JSON.stringify({ ticketKey, fresh }) });
-    pauseNote = r && r.error ? r.error : '';
-    await poll();
+    await mutate('/api/retry', { method: 'POST', body: JSON.stringify({ ticketKey, fresh }) });
+    pauseNote = '';
+    toast(fresh ? 'Starting a new run' : 'Continuing from the saved checkpoint');
   } catch (e) {
-    setConn(false);
+    pauseNote = e.message || String(e);
+    toast(pauseNote);
+  } finally {
+    retryPending.delete(ticketKey);
+    if (activeView === 'history') fetchHistory('filter');
+    else await poll();
   }
 }
 
@@ -791,7 +854,8 @@ async function doPauseToggle() {
   btn.disabled = true;
   try {
     await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused: !paused }) });
-    await poll();
+    if (activeView === 'history') await fetchHistory('filter');
+    else await poll();
   } catch (e) {
     setConn(false);
   } finally {
@@ -820,6 +884,7 @@ const hist = {
   ctrl: null, // AbortController for the in-flight request
   paging: false,
   debounce: null,
+  status: null,
 };
 
 function newFilters() {
@@ -905,10 +970,15 @@ async function fetchHistory(mode) {
   }
   try {
     const qs = filtersToQuery(hist.filters).toString();
-    const data = await api('/api/history' + (qs ? '?' + qs : ''), { signal: ctrl.signal });
+    const [data, status] = await Promise.all([
+      api('/api/history' + (qs ? '?' + qs : ''), { signal: ctrl.signal }),
+      api('/api/status', { signal: ctrl.signal }),
+    ]);
     if (seq !== hist.seq) return; // superseded
     hist.runs = Array.isArray(data.runs) ? data.runs : [];
     hist.total = Number(data.total) || 0;
+    hist.status = status;
+    renderStatus(status);
     hist.loaded = true;
   } catch (e) {
     if (seq !== hist.seq || (e && e.name === 'AbortError')) return;

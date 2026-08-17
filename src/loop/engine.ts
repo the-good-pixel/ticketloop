@@ -58,7 +58,15 @@ export class ProviderUnavailableError extends Error {
 
 // Outcomes whose checkpoint we KEEP so the ticket can resume where it stopped.
 // Everything else (success, skipped) deletes the checkpoint — the work is done.
-const RESUMABLE_OUTCOMES = new Set(['failed', 'blocked', 'paused', 'waiting-provider'])
+const RESUMABLE_OUTCOMES = new Set([
+  'failed',
+  'blocked',
+  'paused',
+  'waiting-provider',
+  'waiting-approval',
+  'waiting-deployment',
+  'waiting-external',
+])
 
 // Per-run mutable context: the run record, its resume checkpoint, and the live
 // pause predicate. Threaded into every stage() so stages can replay from cache
@@ -264,6 +272,7 @@ export async function processTicket(
     rec.outcome = 'running'
     rec.endedAt = undefined
     rec.error = undefined
+    rec.waitReason = undefined
     rec.resumes = (rec.resumes || 0) + 1
     rec.ticketTitle = ticket.title // keep in sync if it was renamed
     rec.ticketUrl = ticket.url

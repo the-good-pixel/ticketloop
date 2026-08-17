@@ -9,7 +9,7 @@ import { DAEMON_STATE } from '../paths.js'
 import { assertAuthSafe } from '../runner/index.js'
 import { sweepOrphans, killAllChildren, killChildrenFor } from '../runner/children.js'
 import { latestHumanActivity } from '../loop/context.js'
-import { deleteCheckpoint } from '../loop/checkpoint.js'
+import { deleteCheckpoint, loadCheckpoint } from '../loop/checkpoint.js'
 import {
   cancelRequestedTickets,
   clearCancel,
@@ -28,6 +28,7 @@ import { refreshProviderQuotaSnapshots } from '../providerQuota.js'
 import type { AgentProvider } from '../types.js'
 
 const MAX_ATTEMPTS = 3 // stop retrying a failing ticket after this many tries
+const MANUAL_WAIT_OUTCOMES = new Set(['waiting-approval', 'waiting-deployment', 'waiting-external'])
 
 // Per-ticket state: `marker` is the newest-human-comment timestamp last
 // processed (re-run when it advances), `attempts` counts consecutive failures.
@@ -297,6 +298,10 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         waitingProvider: rec.waitingProvider,
         resumeAt: rec.resumeAt,
       })
+    } else if (MANUAL_WAIT_OUTCOMES.has(rec.outcome)) {
+      // External waits are not failures and must not hot-loop. Keep them
+      // visible for an explicit Continue once the outside condition changes.
+      state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: rec.outcome })
     } else if (rec.outcome === 'blocked') {
       // A safety guardrail needs a human or new ticket activity, not retries.
       state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: 'blocked' })
@@ -395,6 +400,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     const identifier = ticketKey.slice(idx + 1)
     const project = cfg.projects.find((p) => p.name === projectName)
     if (!project) return { error: `unknown project "${projectName}"` }
+    if (isPaused()) return { error: 'Ticket processing is paused. Resume all before continuing a run.' }
     if (activeRuns.has(ticketKey)) return { error: `${identifier} is already running.` }
     if (slotsFree(project) <= 0) {
       const busy = [...activeRuns.values()].filter((a) => a.project === project.name).map((a) => a.ticket)
@@ -403,9 +409,16 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         error: `Project "${project.name}" is at its parallel limit (${cap}) — running ${busy.join(', ')}. Try again once one finishes${cap === 1 ? ', or raise "max parallel tickets" for this project' : ''}.`,
       }
     }
+    const prev = state.get(ticketKey)
+    if (!fresh && prev && MANUAL_WAIT_OUTCOMES.has(prev.lastOutcome) && !loadCheckpoint(ticketKey)) {
+      return {
+        error:
+          'This wait was recorded before safe resume checkpoints were available. ' +
+          'Complete the external step manually; do not restart the whole ticket.',
+      }
+    }
     setTicketPaused(ticketKey, false)
     if (fresh) deleteCheckpoint(ticketKey)
-    const prev = state.get(ticketKey)
     if (prev) {
       state.set(ticketKey, { ...prev, attempts: 0 }) // clear the give-up cap
       saveState(state)
@@ -435,10 +448,15 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
   }
 
   // Failed or paused tickets the user can resume/restart from the dashboard.
-  function resumableTickets(): { key: string; outcome: string; attempts: number }[] {
+  function resumableTickets(): { key: string; outcome: string; attempts: number; canResume: boolean }[] {
     return [...state.entries()]
-      .filter(([, v]) => v.lastOutcome === 'failed' || v.lastOutcome === 'paused' || v.lastOutcome === 'waiting-provider')
-      .map(([key, v]) => ({ key, outcome: v.lastOutcome, attempts: v.attempts }))
+      .filter(([, v]) =>
+        v.lastOutcome === 'failed' ||
+        v.lastOutcome === 'paused' ||
+        v.lastOutcome === 'waiting-provider' ||
+        MANUAL_WAIT_OUTCOMES.has(v.lastOutcome),
+      )
+      .map(([key, v]) => ({ key, outcome: v.lastOutcome, attempts: v.attempts, canResume: !!loadCheckpoint(key) }))
   }
 
   // Persist UI edits: mutate the LIVE cfg (so the next scan sees them) + write YAML.

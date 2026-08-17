@@ -367,6 +367,9 @@ export interface RunRecord {
   prs?: PrRecord[] // populated on multi-repo runs
   commentUrl?: string
   error?: string
+  // The external condition named after `VERDICT: wait`. Kept separate from the
+  // outcome so History can explain what a person is waiting for and what to do.
+  waitReason?: string
   waitingProvider?: AgentProvider
   resumeAt?: number
   totalTokens: number

@@ -75,7 +75,24 @@ function runFile(id: string): string {
 
 /** A run with per-stage `detail` stripped — small enough for list payloads. */
 function lite(rec: RunRecord): RunRecord {
-  return { ...rec, stages: rec.stages.map((s) => ({ ...s, detail: undefined })) }
+  return {
+    ...rec,
+    waitReason: rec.waitReason || waitReasonFromStages(rec),
+    stages: rec.stages.map((s) => ({ ...s, detail: undefined })),
+  }
+}
+
+// Older waiting records predate `waitReason`. Recover the model's final wait
+// reason while the full record is in memory, before stage detail is stripped.
+function waitReasonFromStages(rec: RunRecord): string | undefined {
+  if (!rec.outcome.startsWith('waiting')) return undefined
+  for (let i = rec.stages.length - 1; i >= 0; i--) {
+    const detail = rec.stages[i].detail || ''
+    const matches = [...detail.matchAll(/^\s*VERDICT:\s*wait(?:\s*[—-]\s*(.+))?\s*$/gim)]
+    const reason = matches.at(-1)?.[1]?.trim()
+    if (reason) return reason
+  }
+  return undefined
 }
 
 function ensureIndex(): Map<string, RunRecord> {
