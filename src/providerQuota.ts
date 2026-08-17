@@ -118,11 +118,34 @@ function windowName(duration?: number, fallback?: string): string {
   return fallback || 'usage'
 }
 
-function normalizeCodex(result: any, cfg: Config): ProviderQuotaSnapshot {
+// Codex reports several DISTINCT limits at once: a plan-wide one plus per-model
+// ones (e.g. limitId `codex_bengalfox`, limitName "GPT-5.3-Codex-Spark"). They
+// routinely share a window length, so naming a row by its duration alone
+// produced two rows both labelled "weekly" with no way to tell them apart.
+// Qualify by the limit's own identity, but only when there IS more than one —
+// a single limit reads better as plain "weekly".
+function limitLabel(bucket: any, rootLimitId?: string): string | undefined {
+  if (bucket?.limitName) return String(bucket.limitName)
+  // The plan-wide bucket has no name of its own; it is the one whose id matches
+  // the top-level limit. Saying "all models" beats echoing the raw id.
+  if (bucket?.limitId && bucket.limitId === rootLimitId) return 'all models'
+  return bucket?.limitId ? String(bucket.limitId) : undefined
+}
+
+// Exported so a mock script can feed it recorded provider payloads — the shape
+// of this response changes on OpenAI's schedule, not ours.
+export function normalizeCodex(result: any, cfg: Config): ProviderQuotaSnapshot {
   const root = result?.rateLimits ?? result ?? {}
   const byLimitId = result?.rateLimitsByLimitId ?? root.rateLimitsByLimitId
   const buckets = byLimitId && typeof byLimitId === 'object' && Object.keys(byLimitId).length
-    ? Object.entries(byLimitId).map(([limitId, value]: [string, any]) => ({ limitId, ...value }))
+    ? Object.entries(byLimitId)
+        .map(([limitId, value]: [string, any]) => ({ limitId, ...value }))
+        // Object key order is the provider's to change; sorting keeps the card's
+        // rows from swapping places between polls. Plan-wide limit first — it is
+        // the one that gates everything — then the per-model ones by name.
+        .sort((a, b) =>
+          (a.limitId === root.limitId ? 0 : 1) - (b.limitId === root.limitId ? 0 : 1) ||
+          String(a.limitId).localeCompare(String(b.limitId)))
     : [root]
   const windows: ProviderQuotaWindow[] = []
   let reachedType: string | null = root.rateLimitReachedType ?? null
@@ -132,8 +155,10 @@ function normalizeCodex(result: any, cfg: Config): ProviderQuotaSnapshot {
     reachedType ||= bucket.rateLimitReachedType ?? null
     for (const [key, window] of [['primary', bucket.primary], ['secondary', bucket.secondary]] as const) {
       if (!window || typeof window.usedPercent !== 'number') continue
+      const base = windowName(window.windowDurationMins, bucket.limitName || bucket.limitId || key)
+      const label = buckets.length > 1 ? limitLabel(bucket, root.limitId) : undefined
       windows.push({
-        name: windowName(window.windowDurationMins, bucket.limitName || bucket.limitId || key),
+        name: label ? `${base} · ${label}` : base,
         usedPercent: window.usedPercent,
         windowDurationMins: window.windowDurationMins,
         resetsAt: typeof window.resetsAt === 'number' ? window.resetsAt * 1000 : undefined,
