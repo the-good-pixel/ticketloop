@@ -49,12 +49,29 @@
   <div id="viewHistory" class="view" hidden>
     <div id="historyError" class="warnings setup-error" hidden></div>
 
+    <header class="history-hero">
+      <div>
+        <span class="history-kicker">Run archive</span>
+        <h1>Ticket history</h1>
+        <p>Trace every ticket from first step to final outcome.</p>
+      </div>
+      <div class="history-legend" aria-label="How to read run cards">
+        <span><i class="history-legend-mark history-legend-ticket"></i>Ticket</span>
+        <span><i class="history-legend-mark history-legend-result"></i>Outcome</span>
+        <span><i class="history-legend-mark history-legend-work"></i>Work</span>
+      </div>
+    </header>
+
     <form id="historyFilters" class="history-filters" role="search" autocomplete="off">
       <div class="hf-toggle-row">
-        <button type="button" id="hFilterToggle" class="btn btn-ghost btn-sm hf-toggle" aria-expanded="true">Filters</button>
+        <button type="button" id="hFilterToggle" class="btn btn-ghost btn-sm hf-toggle" aria-expanded="true">Show filters</button>
       </div>
 
       <div id="hFilterBody" class="hf-body">
+        <div class="hf-heading">
+          <span>Find a run</span>
+          <span>Use <kbd>/</kbd> to search</span>
+        </div>
         <div class="hf-row hf-row-top">
           <div class="hf-search">
             <span class="hf-search-ico" aria-hidden="true">🔍</span>
@@ -124,7 +141,10 @@
     </form>
 
     <div class="history-meta">
-      <span id="historyCount" class="muted" aria-live="polite"></span>
+      <div>
+        <span class="history-results-label">Results</span>
+        <strong id="historyCount" aria-live="polite"></strong>
+      </div>
       <div class="history-meta-actions">
         <button type="button" id="hExpandAll" class="btn btn-ghost btn-sm">Expand all</button>
         <button type="button" id="hRefresh" class="btn btn-ghost btn-sm">↻ Refresh</button>

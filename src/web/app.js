@@ -35,6 +35,17 @@ function fmtClock(ms) {
   return d.toLocaleString();
 }
 
+function fmtHistoryDate(ms) {
+  if (!ms) return 'Unknown date';
+  return new Date(ms).toLocaleString([], {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function fmtRelative(ms) {
   if (!ms) return '';
   const diff = Date.now() - ms;
@@ -121,6 +132,7 @@ const OUTCOME_LABELS = {
   'waiting-deployment': 'Waiting for deployment',
   'waiting-external': 'Waiting on another system',
   paused: 'Paused',
+  cancelled: 'Stopped',
   failed: 'Needs attention',
   running: 'Running',
 };
@@ -345,6 +357,76 @@ function renderRun(r) {
   if (state.expanded.has(r.id)) {
     li.appendChild(renderDetail(r.id));
   }
+  return li;
+}
+
+// History needs a complete identity and outcome at a glance. The Activity
+// renderer omits those fields because each run sits inside a ticket card.
+function renderHistoryRun(r) {
+  const li = el('li', 'run history-run');
+  li.dataset.id = r.id;
+  li.dataset.outcome = r.outcome || 'skipped';
+
+  const head = el('div', 'history-run-head');
+  const main = el('div', 'history-run-main');
+
+  const identity = el('div', 'history-run-identity');
+  if (r.project) identity.appendChild(el('span', 'history-project', r.project));
+  const ticket = el(r.ticketUrl ? 'a' : 'span', 'history-ticket-key', r.ticket || 'Unknown ticket');
+  if (r.ticketUrl) {
+    ticket.href = r.ticketUrl;
+    ticket.target = '_blank';
+    ticket.rel = 'noopener';
+    ticket.title = 'Open ' + (r.ticket || 'ticket');
+  }
+  identity.appendChild(ticket);
+  main.appendChild(identity);
+
+  main.appendChild(el('h2', 'history-run-title', r.ticketTitle || '(untitled ticket)'));
+
+  const timing = el('div', 'history-run-timing');
+  const started = el('time', null, fmtHistoryDate(r.startedAt));
+  started.dateTime = new Date(r.startedAt).toISOString();
+  timing.appendChild(started);
+  timing.appendChild(el('span', null, fmtDuration(r.startedAt, r.endedAt) + ' elapsed'));
+  if (r.resumes) timing.appendChild(el('span', null, 'Resumed ' + r.resumes + '×'));
+  main.appendChild(timing);
+
+  const summary = r.summary || r.error;
+  if (summary) main.appendChild(el('p', 'history-run-summary' + (r.error ? ' is-error' : ''), summary));
+
+  const flow = el('div', 'history-run-flow');
+  flow.appendChild(el('span', 'history-flow-label', 'Work'));
+  flow.appendChild(renderStageTracker(r.stages));
+  main.appendChild(flow);
+  head.appendChild(main);
+
+  const side = el('div', 'history-run-side');
+  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome)));
+
+  const metrics = el('div', 'history-run-metrics');
+  const tokenMetric = el('span');
+  tokenMetric.appendChild(el('small', null, 'Tokens'));
+  tokenMetric.appendChild(el('strong', null, fmtTokens(r.totalTokens)));
+  metrics.appendChild(tokenMetric);
+  const costMetric = el('span');
+  costMetric.appendChild(el('small', null, 'Cost'));
+  costMetric.appendChild(el('strong', null, fmtMoney(r.costUsd)));
+  metrics.appendChild(costMetric);
+  side.appendChild(metrics);
+
+  const open = state.expanded.has(r.id);
+  const expand = el('button', 'history-expand', open ? 'Hide details' : 'View details');
+  expand.type = 'button';
+  expand.setAttribute('aria-expanded', String(open));
+  expand.setAttribute('aria-label', (open ? 'Hide details for ' : 'View details for ') + (r.ticket || 'this run'));
+  expand.appendChild(el('span', 'history-expand-arrow', '↓'));
+  expand.addEventListener('click', () => toggleExpand(r.id));
+  side.appendChild(expand);
+  head.appendChild(side);
+  li.appendChild(head);
+
+  if (open) li.appendChild(renderDetail(r.id));
   return li;
 }
 
@@ -1034,7 +1116,8 @@ function renderHistoryChips() {
     }));
   }
   const n = chips.length;
-  $('#hFilterToggle').textContent = n ? 'Filters (' + n + ')' : 'Filters';
+  const filterOpen = !$('#hFilterBody').classList.contains('is-collapsed');
+  $('#hFilterToggle').textContent = (filterOpen ? 'Hide filters' : 'Show filters') + (n ? ' (' + n + ')' : '');
   if (!n) {
     box.hidden = true;
     return;
@@ -1073,15 +1156,16 @@ function renderHistorySkeleton() {
   const feed = $('#historyFeed');
   const frag = document.createDocumentFragment();
   for (let i = 0; i < 3; i++) {
-    const li = el('li', 'run skel');
-    const head = el('div', 'run-head');
-    const main = el('div', 'run-main');
-    main.appendChild(el('div', 'skel-bar skel-w60'));
+    const li = el('li', 'run history-run skel');
+    const head = el('div', 'history-run-head');
+    const main = el('div', 'history-run-main');
     main.appendChild(el('div', 'skel-bar skel-w35'));
+    main.appendChild(el('div', 'skel-bar skel-w60'));
     main.appendChild(el('div', 'skel-bar skel-w80'));
     head.appendChild(main);
-    const side = el('div', 'run-side');
+    const side = el('div', 'history-run-side');
     side.appendChild(el('div', 'skel-bar skel-pill'));
+    side.appendChild(el('div', 'skel-bar skel-w80'));
     head.appendChild(side);
     li.appendChild(head);
     frag.appendChild(li);
@@ -1093,7 +1177,7 @@ function renderHistorySkeleton() {
 function renderHistoryFeed() {
   const feed = $('#historyFeed');
   const frag = document.createDocumentFragment();
-  hist.runs.forEach((r) => frag.appendChild(renderRun(r)));
+  hist.runs.forEach((r) => frag.appendChild(renderHistoryRun(r)));
   feed.replaceChildren(frag);
 }
 
@@ -1114,8 +1198,8 @@ function renderHistoryCount() {
   const noun = hist.total === 1 ? ' run' : ' runs';
   const start = f.offset + 1;
   const end = Math.min(f.offset + f.limit, hist.total);
-  node.textContent = hist.total.toLocaleString() + noun + (hasActiveFilters(f) ? ' match' : '') +
-    ' · showing ' + start.toLocaleString() + '–' + end.toLocaleString();
+  node.textContent = start.toLocaleString() + '–' + end.toLocaleString() + ' of ' +
+    hist.total.toLocaleString() + noun + (hasActiveFilters(f) ? ' found' : '');
 }
 
 function renderHistoryEmpty() {
@@ -1300,6 +1384,8 @@ function bindHistory() {
     const body = $('#hFilterBody');
     const open = body.classList.toggle('is-collapsed') === false;
     $('#hFilterToggle').setAttribute('aria-expanded', String(open));
+    const n = document.querySelectorAll('#hChips .filter-chip').length;
+    $('#hFilterToggle').textContent = (open ? 'Hide filters' : 'Show filters') + (n ? ' (' + n + ')' : '');
   });
 
   $('#hRefresh').addEventListener('click', async () => {
