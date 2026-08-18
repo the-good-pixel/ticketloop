@@ -12,6 +12,7 @@ import { assertAuthSafe } from '../runner/index.js'
 import { resolveTracker, DEFAULT_INSTRUCTIONS } from '../config.js'
 import { hasCredential, resolveTrackerKey } from '../credentials.js'
 import { isPaused, setPaused, setTicketPaused, setTicketIgnored, pausedTickets } from './control.js'
+import { WORKTREE_SYSTEM_STEPS } from '../loop/workspace.js'
 import {
   cloneStep,
   cloneWorkflow,
@@ -301,6 +302,10 @@ function previewPlan(cfg: Config, b: { workflow?: Workflow; ref?: string; projec
         runOn: f.runOn,
         enabled: f.settings.enabled,
       })),
+      // Harness actions are not editable workflow data, but they are still part
+      // of what every compiled workflow does. Expose them so templates and
+      // project workflows never hide the deterministic worktree lifecycle.
+      systemSteps: WORKTREE_SYSTEM_STEPS,
     }
   } catch (e) {
     return { error: String(e instanceof Error ? e.message : e) }

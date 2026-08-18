@@ -61,6 +61,26 @@ export interface Workspace {
   useWorktree: boolean
 }
 
+/** Display contracts for the worktree lifecycle enforced by both engines. */
+export const WORKTREE_SETUP_STEP = {
+  id: 'create-worktree',
+  name: 'Create worktree',
+  timing: 'Before repository work',
+  description: 'When a workflow first needs a writable repository, Ticketloop creates an isolated worktree and branch from the current base. Resumes reattach the same worktree.',
+  locked: true,
+} as const
+
+export const WORKTREE_CLEANUP_STEP = {
+  id: 'remove-worktree',
+  name: 'Remove worktree',
+  timing: 'After delivered work',
+  description: 'After an export is delivered or every changed repository has a pull request, Ticketloop removes the isolated worktree and keeps branches that still back pull requests.',
+  runOn: ['exported', 'pr-opened', 'pr-opened-with-findings', 'deployed', 'merged'],
+  locked: true,
+} as const
+
+export const WORKTREE_SYSTEM_STEPS = [WORKTREE_SETUP_STEP, WORKTREE_CLEANUP_STEP] as const
+
 /**
  * Remove an isolated workspace after its useful state exists somewhere durable.
  * The caller decides when that is true: data exports are already delivered, or
