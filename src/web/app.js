@@ -130,27 +130,31 @@ const OUTCOME_LABELS = {
   merged: 'Merged',
   skipped: 'No action needed',
   blocked: 'Safety block',
-  'waiting-provider': 'Waiting for model quota',
-  'waiting-approval': 'Waiting for approval',
-  'waiting-deployment': 'Waiting for deployment',
-  'waiting-external': 'Waiting on another system',
+  waiting: 'Waiting',
   paused: 'Paused',
   cancelled: 'Stopped',
   failed: 'Needs attention',
   running: 'Running',
 };
 
-function outcomeLabel(outcome) {
+function outcomeLabel(outcome, blocker) {
+  if (outcome === 'waiting') {
+    if (blocker?.kind === 'provider') return 'Waiting for model quota';
+    if (blocker?.kind === 'approval') return 'Waiting for approval';
+    if (blocker?.kind === 'deployment') return 'Waiting for deployment';
+    if (blocker?.kind === 'external') return 'Waiting on another system';
+  }
   return OUTCOME_LABELS[outcome] || outcome || 'Unknown';
 }
 
-function isManualWait(outcome) {
-  return outcome === 'waiting-approval' || outcome === 'waiting-deployment' || outcome === 'waiting-external';
+function isWaiting(run) {
+  return run?.outcome === 'waiting';
 }
 
-function waitTitle(outcome) {
-  if (outcome === 'waiting-deployment') return 'Deployment has not started';
-  if (outcome === 'waiting-approval') return 'A person needs to approve the next step';
+function waitTitle(blocker) {
+  if (blocker?.kind === 'provider') return 'Waiting for model quota';
+  if (blocker?.kind === 'deployment') return 'Deployment has not started';
+  if (blocker?.kind === 'approval') return 'A person needs to approve the next step';
   return 'An external service is blocking progress';
 }
 
@@ -158,12 +162,17 @@ function renderWaitNotice(run, ticketKey) {
   const notice = el('section', 'wait-notice');
   notice.appendChild(el('span', 'wait-notice-mark', '!'));
   const copy = el('div', 'wait-notice-copy');
-  copy.appendChild(el('strong', null, waitTitle(run.outcome)));
-  copy.appendChild(el('p', null, run.waitReason || run.summary || run.error || 'The run is waiting for an external condition.'));
+  const blocker = run.blocker || { kind: 'external', resume: 'manual' };
+  copy.appendChild(el('strong', null, waitTitle(blocker)));
+  copy.appendChild(el('p', null, blocker.reason || run.summary || run.error || 'The run is waiting for an external condition.'));
 
   const resumeState = state.resumable.get(ticketKey);
   const actions = el('div', 'wait-notice-actions');
-  if (resumeState?.canResume) {
+  if (blocker.resume === 'automatic' && resumeState?.canResume) {
+    actions.appendChild(el('span', 'wait-notice-legacy', 'Automatic resume'));
+    const when = blocker.resumeAt ? ' after ' + fmtClock(blocker.resumeAt) : ' when capacity is available';
+    actions.appendChild(el('span', 'wait-notice-help', 'Ticketloop will continue' + when + '.'));
+  } else if (resumeState?.canResume) {
     const pending = retryPending.has(ticketKey);
     const resume = el('button', 'btn btn-wait btn-sm', pending ? 'Starting…' : state.systemPaused ? 'Resume all first' : 'Continue run');
     resume.type = 'button';
@@ -176,7 +185,7 @@ function renderWaitNotice(run, ticketKey) {
       doRetry(ticketKey, false);
     });
     actions.appendChild(resume);
-    actions.appendChild(el('span', 'wait-notice-help', 'Completed code steps stay saved. The external step is checked again.'));
+    actions.appendChild(el('span', 'wait-notice-help', 'Completed code steps stay saved. The blocking step is checked again.'));
   } else {
     actions.appendChild(el('span', 'wait-notice-legacy', 'No safe checkpoint'));
     actions.appendChild(el(
@@ -324,11 +333,11 @@ function renderTicketGroup(g) {
 
   // At-a-glance: the latest run's progress.
   main.appendChild(renderStageTracker(latest.stages));
-  if (isManualWait(latest.outcome)) main.appendChild(renderWaitNotice(latest, g.key));
+  if (isWaiting(latest)) main.appendChild(renderWaitNotice(latest, g.key));
   else if (latest.error) main.appendChild(el('div', 'run-error', latest.error));
 
   // Resume / Restart act on the TICKET (they continue its latest work).
-  if (!isManualWait(latest.outcome) && (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked' || latest.outcome === 'waiting-provider')) {
+  if (!isWaiting(latest) && (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked')) {
     const actions = el('div', 'run-actions');
     const resume = el('button', 'btn btn-ghost btn-sm', '▶ Continue run');
     resume.title = 'Continue this run from its checkpoint (already-done steps are reused)';
@@ -348,7 +357,7 @@ function renderTicketGroup(g) {
   head.appendChild(main);
 
   const side = el('div', 'run-side');
-  side.appendChild(el('span', 'badge badge-' + (latest.outcome || 'skipped'), outcomeLabel(latest.outcome)));
+  side.appendChild(el('span', 'badge badge-' + (latest.outcome || 'skipped'), outcomeLabel(latest.outcome, latest.blocker)));
   const metrics = el('div', 'run-metrics');
   metrics.appendChild(el('span', null, fmtTokens(g.totalTokens) + ' tok'));
   metrics.appendChild(el('span', null, fmtMoney(g.costUsd)));
@@ -391,7 +400,7 @@ function renderRun(r) {
 
   // side column
   const side = el('div', 'run-side');
-  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome)));
+  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome, r.blocker)));
   const metrics = el('div', 'run-metrics');
   metrics.appendChild(el('span', null, fmtTokens(r.totalTokens) + ' tok'));
   metrics.appendChild(el('span', null, fmtMoney(r.costUsd)));
@@ -445,9 +454,9 @@ function renderHistoryRun(r) {
   main.appendChild(timing);
 
   const summary = r.summary || r.error;
-  if (!isManualWait(r.outcome) && summary)
+  if (!isWaiting(r) && summary)
     main.appendChild(el('p', 'history-run-summary' + (r.error ? ' is-error' : ''), summary));
-  if (isManualWait(r.outcome))
+  if (isWaiting(r))
     main.appendChild(renderWaitNotice(r, (r.project || '') + ':' + (r.ticket || '')));
 
   const flow = el('div', 'history-run-flow');
@@ -457,7 +466,7 @@ function renderHistoryRun(r) {
   head.appendChild(main);
 
   const side = el('div', 'history-run-side');
-  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome)));
+  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome, r.blocker)));
 
   const metrics = el('div', 'history-run-metrics');
   const tokenMetric = el('span');

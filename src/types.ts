@@ -305,13 +305,22 @@ export type RunOutcome =
   | 'skipped' // did not qualify
   | 'cancelled' // a human stopped this run on purpose (not a failure, never retried)
   | 'blocked' // hit a safety guardrail
-  | 'waiting-provider' // provider reported exhausted quota; resume when available
-  | 'waiting-approval' // a human must approve something (a deploy, a merge)
-  | 'waiting-deployment' // a deployment is queued/in flight; resume when it lands
-  | 'waiting-external' // some other external condition must change first
+  | 'waiting' // workflow suspended until the structured blocker changes
   | 'paused' // pause requested mid-run; checkpointed, resume to continue
   | 'failed'
   | 'running'
+
+export type WaitKind = 'provider' | 'approval' | 'deployment' | 'external'
+export type WaitResume = 'automatic' | 'manual'
+
+export interface WaitBlocker {
+  kind: WaitKind
+  reason: string
+  resume: WaitResume
+  provider?: AgentProvider
+  resumeAt?: number
+  artifactKey?: string
+}
 
 export interface StageRecord {
   stage: StageName
@@ -367,8 +376,9 @@ export interface RunRecord {
   prs?: PrRecord[] // populated on multi-repo runs
   commentUrl?: string
   error?: string
-  // The external condition named after `VERDICT: wait`. Kept separate from the
-  // outcome so History can explain what a person is waiting for and what to do.
+  blocker?: WaitBlocker
+  // Legacy waiting fields. Reads normalize them into `blocker`; keep the
+  // optional shape so old run files remain compatible without an eager rewrite.
   waitReason?: string
   waitingProvider?: AgentProvider
   resumeAt?: number

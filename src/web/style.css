@@ -648,7 +648,7 @@ body {
   background: color-mix(in srgb, var(--amber) 15%, transparent);
   border-color: color-mix(in srgb, var(--amber) 40%, transparent);
 }
-.badge-waiting-provider {
+.badge-waiting {
   color: var(--amber);
   background: color-mix(in srgb, var(--amber) 15%, transparent);
   border-color: color-mix(in srgb, var(--amber) 40%, transparent);
@@ -2647,14 +2647,6 @@ a.history-ticket-key:hover {
   color: var(--grey);
   background: color-mix(in srgb, var(--grey) 15%, transparent);
   border-color: color-mix(in srgb, var(--grey) 35%, transparent);
-}
-
-.badge-waiting-approval,
-.badge-waiting-deployment,
-.badge-waiting-external {
-  color: var(--amber);
-  background: color-mix(in srgb, var(--amber) 15%, transparent);
-  border-color: color-mix(in srgb, var(--amber) 40%, transparent);
 }
 
 /* ---- History: skeleton rows ---- */

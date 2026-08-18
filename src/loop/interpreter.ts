@@ -18,6 +18,8 @@ import type {
   StageName,
   StageRecord,
   Ticket,
+  WaitBlocker,
+  WaitKind,
 } from '../types.js'
 import type { Artifact, StepResult, TerminalClass } from '../catalog/types.js'
 import type {
@@ -45,6 +47,7 @@ import {
   type Workspace,
 } from './workspace.js'
 import { type Checkpoint, saveCheckpoint } from './checkpoint.js'
+import { legacyWaitKind } from '../waiting.js'
 
 export interface InterpCtx {
   cfg: Config
@@ -57,7 +60,7 @@ export interface InterpCtx {
 type Signal =
   | { type: 'continue' }
   | { type: 'stop'; terminal: TerminalClass; outcome?: RunOutcome; note?: string; reported?: boolean }
-  | { type: 'suspend'; reason: string; nodeId: string; detail?: string; provider?: AgentProvider; resumeAt?: number }
+  | { type: 'suspend'; blocker: WaitBlocker; nodeId: string }
   | { type: 'repair'; loopId: string; detail: string }
   | { type: 'exit-loop'; loopId?: string }
 
@@ -178,14 +181,8 @@ export async function runWorkflow(
   // --- Resolve the terminal --------------------------------------------------
   if (signal.type === 'suspend') {
     await runFinally(ctx, s, 'waiting')
-    rec.resumeAt = signal.resumeAt
-    if (signal.provider) rec.waitingProvider = signal.provider
-    rec.waitReason = signal.detail
-    finish(
-      s,
-      (signal.reason as RunOutcome) || 'waiting-external',
-      signal.detail || `Waiting at "${signal.nodeId}".`,
-    )
+    rec.blocker = signal.blocker
+    finish(s, 'waiting', signal.blocker.reason || `Waiting at "${signal.nodeId}".`)
     return rec
   }
   const terminal: TerminalClass =
@@ -195,7 +192,11 @@ export async function runWorkflow(
   // is reported as partial, never as a clean success.
   const cls: TerminalClass = terminal === 'success' && s.degraded ? 'partial' : terminal
   if (!explicit?.reported) await runFinally(ctx, s, cls)
-  finish(s, resolveOutcome(s, cls, explicit?.outcome), withRouteReason(s, explicit?.note || describeOutcome(s, cls)))
+  const note = withRouteReason(s, explicit?.note || describeOutcome(s, cls))
+  if (cls === 'waiting' && !rec.blocker) {
+    rec.blocker = { kind: 'external', reason: note, resume: 'manual' }
+  }
+  finish(s, resolveOutcome(s, cls, explicit?.outcome), note)
   return rec
 }
 
@@ -381,7 +382,7 @@ async function runStepNode(
   const key = checkpointKey(s.plan, node.id, iteration)
   const res = await invoke(ctx, s, node, key, iteration)
   if ('signal' in res) return res.signal
-  return applyResult(ctx, s, node, res.text, res.result, res.reason)
+  return applyResult(ctx, s, node, res.text, res.result, res.reason, res.blockerKind)
 }
 
 /** Ship-like steps: one invocation per changed repo, each with its own key. */
@@ -403,7 +404,7 @@ async function runPerRepo(
     return applyTransition(s, node, 'skip', '')
   }
 
-  let worst: { result: StepResult; reason: string; text: string } | undefined
+  let worst: { result: StepResult; reason: string; text: string; blockerKind?: WaitKind } | undefined
   for (const repo of s.dirty) {
     const key = checkpointKey(s.plan, node.id, iteration, repo.name)
     const res = await invoke(ctx, s, node, key, iteration, repo)
@@ -419,20 +420,27 @@ async function runPerRepo(
     })
     if (artifact && ok) s.artifacts[node.step.produces.key] = artifact
     storeOutput(s, node, res.text)
-    if (!ok && !worst) worst = { result: res.result === 'pass' ? 'fail' : res.result, reason: res.reason, text: res.text }
+    if (!ok && !worst) {
+      worst = {
+        result: res.result === 'pass' ? 'fail' : res.result,
+        reason: res.reason,
+        text: res.text,
+        blockerKind: res.blockerKind,
+      }
+    }
   }
   const opened = s.prs.filter((p) => p.status === 'opened')
   s.rec.prUrl = opened[0]?.url
   if (s.ws?.multi) s.rec.prs = s.prs
   if (worst) {
     if (opened.length) s.degraded = `${s.prs.length - opened.length} repo(s) failed to ship.`
-    return applyTransition(s, node, worst.result, worst.text, worst.reason)
+    return applyTransition(s, node, worst.result, worst.text, worst.reason, worst.blockerKind)
   }
   return applyTransition(s, node, 'pass', '')
 }
 
 /** Result of one model invocation, or a signal that unwound it. */
-type Invoked = { text: string; result: StepResult; reason: string } | { signal: Signal }
+type Invoked = { text: string; result: StepResult; reason: string; blockerKind?: WaitKind } | { signal: Signal }
 
 async function invoke(
   ctx: InterpCtx,
@@ -480,7 +488,17 @@ async function invoke(
   if (!gate.ok) {
     persist(s)
     return {
-      signal: { type: 'suspend', reason: 'waiting-provider', nodeId: node.id, provider, resumeAt: gate.resetAt },
+      signal: {
+        type: 'suspend',
+        nodeId: node.id,
+        blocker: {
+          kind: 'provider',
+          reason: `${provider} quota is unavailable`,
+          resume: 'automatic',
+          provider,
+          resumeAt: gate.resetAt,
+        },
+      },
     }
   }
 
@@ -542,10 +560,14 @@ async function invoke(
     return {
       signal: {
         type: 'suspend',
-        reason: 'waiting-provider',
         nodeId: node.id,
-        provider: res.provider,
-        resumeAt: limit.retryAt || limit.nextProbeAt,
+        blocker: {
+          kind: 'provider',
+          reason: limit.message || `${res.provider} quota is unavailable`,
+          resume: 'automatic',
+          provider: res.provider,
+          resumeAt: limit.retryAt || limit.nextProbeAt,
+        },
       },
     }
   }
@@ -559,7 +581,10 @@ async function invoke(
 }
 
 /** Turn raw output into a result according to the step's contract. */
-function classify(step: CompiledStepNode['step'], text: string): { result: StepResult; reason: string } {
+function classify(
+  step: CompiledStepNode['step'],
+  text: string,
+): { result: StepResult; reason: string; blockerKind?: WaitKind } {
   if (step.contract === 'verdict') return parseResult(text)
   return { result: 'pass', reason: '' } // non-gates simply complete
 }
@@ -571,6 +596,7 @@ async function applyResult(
   text: string,
   result: StepResult,
   reason: string,
+  blockerKind?: WaitKind,
 ): Promise<Signal> {
   const artifact = extractArtifact(node.step, text, result, s.project.name)
   if (artifact) s.artifacts[node.step.produces.key] = artifact
@@ -585,7 +611,7 @@ async function applyResult(
     const blocked = guardrail(ctx, s)
     if (blocked) return blocked
   }
-  return applyTransition(s, node, result, text, reason)
+  return applyTransition(s, node, result, text, reason, blockerKind)
 }
 
 function applyTransition(
@@ -594,6 +620,7 @@ function applyTransition(
   result: StepResult,
   text: string,
   reason = '',
+  blockerKind?: WaitKind,
 ): Signal {
   const target = node.transitions[result] || 'next'
   switch (target) {
@@ -606,13 +633,18 @@ function applyTransition(
         terminal: result === 'pass' ? 'success' : result === 'wait' ? 'waiting' : 'failed',
         note: `"${node.id}" ended the run: ${reason || firstLine(text) || result}`,
       }
-    case 'suspend':
+    case 'suspend': {
+      const detail = reason || firstLine(text) || `Waiting at "${node.id}".`
       return {
         type: 'suspend',
-        reason: waitingReason(node, reason),
         nodeId: node.id,
-        detail: reason || firstLine(text),
+        blocker: {
+          kind: blockerKind || waitingKind(node),
+          reason: detail,
+          resume: 'manual',
+        },
       }
+    }
     case 'exit-loop':
       return { type: 'exit-loop', loopId: node.loopId }
     case 'repair':
@@ -627,12 +659,9 @@ function applyTransition(
 }
 
 /** Classify WHY a node is waiting, so the dashboard can say what to do. */
-function waitingReason(node: CompiledStepNode, reason: string): RunOutcome {
-  if (node.step.capabilities.externalEffects.includes('deploy-dev')) {
-    return /approv/i.test(reason) ? 'waiting-approval' : 'waiting-deployment'
-  }
-  if (/approv|review|sign[- ]?off/i.test(reason)) return 'waiting-approval'
-  return 'waiting-external'
+function waitingKind(node: CompiledStepNode): WaitKind {
+  if (node.step.capabilities.externalEffects.includes('deploy-dev')) return 'deployment'
+  return 'external'
 }
 
 // ---- workspace + guardrail --------------------------------------------------
@@ -695,15 +724,15 @@ async function runFinally(ctx: InterpCtx, s: State, cls: TerminalClass): Promise
 // ---- outcome mapping --------------------------------------------------------
 
 function resolveOutcome(s: State, cls: TerminalClass, explicit?: RunOutcome): RunOutcome {
-  if (explicit) return explicit
+  if (explicit) return legacyWaitKind(explicit as string) ? 'waiting' : explicit
   const mapping = s.plan.outcomes[cls]
   if (!mapping) return cls === 'success' ? 'pr-opened' : 'failed'
   // An upgraded outcome must be EARNED by a real artifact — never inferred from
   // "the deploy step was enabled".
   for (const [key, outcome] of Object.entries(mapping.whenArtifact || {})) {
-    if (artifactSucceeded(s.artifacts[key])) return outcome
+    if (artifactSucceeded(s.artifacts[key])) return legacyWaitKind(outcome as string) ? 'waiting' : outcome
   }
-  return mapping.default
+  return legacyWaitKind(mapping.default as string) ? 'waiting' : mapping.default
 }
 
 function describeOutcome(s: State, cls: TerminalClass): string {

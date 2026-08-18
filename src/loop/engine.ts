@@ -62,10 +62,7 @@ const RESUMABLE_OUTCOMES = new Set([
   'failed',
   'blocked',
   'paused',
-  'waiting-provider',
-  'waiting-approval',
-  'waiting-deployment',
-  'waiting-external',
+  'waiting',
 ])
 
 // Per-run mutable context: the run record, its resume checkpoint, and the live
@@ -272,7 +269,10 @@ export async function processTicket(
     rec.outcome = 'running'
     rec.endedAt = undefined
     rec.error = undefined
+    rec.blocker = undefined
     rec.waitReason = undefined
+    rec.waitingProvider = undefined
+    rec.resumeAt = undefined
     rec.resumes = (rec.resumes || 0) + 1
     rec.ticketTitle = ticket.title // keep in sync if it was renamed
     rec.ticketUrl = ticket.url
@@ -597,9 +597,14 @@ export async function processTicket(
       return rec
     }
     if (e instanceof ProviderUnavailableError) {
-      rec.waitingProvider = e.provider
-      rec.resumeAt = e.resumeAt
-      finish(rec, 'waiting-provider', `${e.provider} quota is unavailable; resume from "${e.stage}" when the provider allows it.`)
+      rec.blocker = {
+        kind: 'provider',
+        reason: `${e.provider} quota is unavailable; resume from "${e.stage}" when the provider allows it.`,
+        resume: 'automatic',
+        provider: e.provider,
+        resumeAt: e.resumeAt,
+      }
+      finish(rec, 'waiting', rec.blocker.reason)
       return rec
     }
     const msg = String(e)
@@ -790,7 +795,7 @@ function finish(rec: RunRecord, outcome: RunRecord['outcome'], note: string) {
   // Every outcome carries its reason, not just the failing ones (see the same
   // change in interpreter.ts — both engines must record history identically).
   rec.summary = note
-  rec.error = outcome === 'failed' || outcome === 'blocked' || outcome === 'waiting-provider' ? note : rec.error
+  rec.error = outcome === 'failed' || outcome === 'blocked' ? note : rec.error
   log.info(`  = ${rec.ticket}: ${outcome} — ${note}`)
   appendRun(rec)
 }

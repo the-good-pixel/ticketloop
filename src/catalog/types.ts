@@ -7,7 +7,7 @@
 // Nothing here executes anything. Compilation (compile.ts) resolves a workflow
 // into an immutable ExecutionPlan; the interpreter lands in a later phase.
 
-import type { Effort, PermissionMode, RunOutcome, AgentProvider } from '../types.js'
+import type { Effort, PermissionMode, RunOutcome, AgentProvider, WaitKind } from '../types.js'
 
 // ---- Steps -----------------------------------------------------------------
 
@@ -270,7 +270,8 @@ export interface PrArtifact {
 export interface DeploymentArtifact {
   type: 'deployment'
   environment: 'dev'
-  status: 'pending' | 'waiting-approval' | 'live' | 'failed'
+  status: 'pending' | 'live' | 'failed'
+  approvalRequired?: boolean
   url?: string
 }
 
@@ -284,14 +285,8 @@ export type Artifact = PrArtifact | DeploymentArtifact | FileArtifact
 
 // ---- Waiting ---------------------------------------------------------------
 
-export type WaitingReason =
-  | 'waiting-provider'
-  | 'waiting-approval'
-  | 'waiting-deployment'
-  | 'waiting-external'
-
 export interface Suspension {
-  reason: WaitingReason
+  kind: WaitKind
   nodeId: string
   detail: string
   resumeAt?: number

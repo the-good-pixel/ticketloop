@@ -25,10 +25,10 @@ import {
 import { log } from '../logger.js'
 import { renameSync } from 'node:fs'
 import { refreshProviderQuotaSnapshots } from '../providerQuota.js'
-import type { AgentProvider } from '../types.js'
+import type { WaitBlocker } from '../types.js'
+import { legacyWaitKind } from '../waiting.js'
 
 const MAX_ATTEMPTS = 3 // stop retrying a failing ticket after this many tries
-const MANUAL_WAIT_OUTCOMES = new Set(['waiting-approval', 'waiting-deployment', 'waiting-external'])
 
 // Per-ticket state: `marker` is the newest-human-comment timestamp last
 // processed (re-run when it advances), `attempts` counts consecutive failures.
@@ -36,7 +36,9 @@ interface TicketState {
   marker: string
   attempts: number
   lastOutcome: string
-  waitingProvider?: AgentProvider
+  blocker?: WaitBlocker
+  // Legacy provider-wait fields, normalized by loadState().
+  waitingProvider?: WaitBlocker['provider']
   resumeAt?: number
 }
 interface DaemonState {
@@ -46,7 +48,8 @@ interface DaemonState {
 function loadState(): { state: Map<string, TicketState>; recovered: boolean } {
   try {
     const s = readJson<DaemonState>(DAEMON_STATE)
-    return { state: new Map(Object.entries(s?.tickets || {})), recovered: false }
+    const entries = Object.entries(s?.tickets || {}).map(([key, value]) => [key, normalizeTicketState(value)] as const)
+    return { state: new Map(entries), recovered: false }
   } catch (e) {
     // Corrupt state file — do NOT silently reset (that would re-process every
     // ticket → duplicate PRs/comments). Quarantine it, warn loudly, and recover
@@ -64,6 +67,23 @@ function loadState(): { state: Map<string, TicketState>; recovered: boolean } {
       return { state: new Map(), recovered: true }
     }
     throw e
+  }
+}
+
+function normalizeTicketState(value: TicketState): TicketState {
+  const kind = legacyWaitKind(value.lastOutcome)
+  if (!kind) return value
+  return {
+    marker: value.marker,
+    attempts: value.attempts,
+    lastOutcome: 'waiting',
+    blocker: {
+      kind,
+      reason: 'Waiting for the blocking condition to change.',
+      resume: kind === 'provider' ? 'automatic' : 'manual',
+      provider: value.waitingProvider,
+      resumeAt: value.resumeAt,
+    },
   }
 }
 function saveState(m: Map<string, TicketState>) {
@@ -170,13 +190,15 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         !!prev &&
         prev.attempts < MAX_ATTEMPTS &&
         (prev.lastOutcome === 'failed' || prev.lastOutcome === 'running')
-      const needsResume = !!prev && (prev.lastOutcome === 'paused' || prev.lastOutcome === 'waiting-provider')
+      const needsResume =
+        !!prev && (prev.lastOutcome === 'paused' || (prev.lastOutcome === 'waiting' && prev.blocker?.resume === 'automatic'))
       if (!newActivity && !needsRetry && !needsResume) continue
       if (
-        prev?.lastOutcome === 'waiting-provider' &&
-        prev.resumeAt &&
-        prev.resumeAt > Date.now() &&
-        (!prev.waitingProvider || !ctx.governor.canRun(prev.waitingProvider).ok)
+        prev?.lastOutcome === 'waiting' &&
+        prev.blocker?.kind === 'provider' &&
+        prev.blocker.resumeAt &&
+        prev.blocker.resumeAt > Date.now() &&
+        (!prev.blocker.provider || !ctx.governor.canRun(prev.blocker.provider).ok)
       ) continue
       // Individually paused → leave it (a global pause already stopped the scan).
       if (isPaused(sKey)) continue
@@ -212,6 +234,9 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       rec.outcome = 'cancelled'
       rec.summary = 'Stopped by request.'
       rec.error = undefined
+      rec.blocker = undefined
+      rec.waitReason = undefined
+      rec.waitingProvider = undefined
       rec.resumeAt = undefined
       appendRun(rec)
     }
@@ -290,18 +315,17 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
     if (rec.outcome === 'paused') {
       // Not an attempt — the run checkpointed and will resume when unpaused.
       state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: 'paused' })
-    } else if (rec.outcome === 'waiting-provider') {
+    } else if (rec.outcome === 'waiting') {
       state.set(sKey, {
         marker: job.marker,
         attempts: prev?.attempts || 0,
-        lastOutcome: 'waiting-provider',
-        waitingProvider: rec.waitingProvider,
-        resumeAt: rec.resumeAt,
+        lastOutcome: 'waiting',
+        blocker: rec.blocker || {
+          kind: 'external',
+          reason: rec.summary || 'Waiting for an external condition.',
+          resume: 'manual',
+        },
       })
-    } else if (MANUAL_WAIT_OUTCOMES.has(rec.outcome)) {
-      // External waits are not failures and must not hot-loop. Keep them
-      // visible for an explicit Continue once the outside condition changes.
-      state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: rec.outcome })
     } else if (rec.outcome === 'blocked') {
       // A safety guardrail needs a human or new ticket activity, not retries.
       state.set(sKey, { marker: job.marker, attempts: prev?.attempts || 0, lastOutcome: 'blocked' })
@@ -410,7 +434,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       }
     }
     const prev = state.get(ticketKey)
-    if (!fresh && prev && MANUAL_WAIT_OUTCOMES.has(prev.lastOutcome) && !loadCheckpoint(ticketKey)) {
+    if (!fresh && prev?.lastOutcome === 'waiting' && prev.blocker?.resume === 'manual' && !loadCheckpoint(ticketKey)) {
       return {
         error:
           'This wait was recorded before safe resume checkpoints were available. ' +
@@ -448,15 +472,20 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
   }
 
   // Failed or paused tickets the user can resume/restart from the dashboard.
-  function resumableTickets(): { key: string; outcome: string; attempts: number; canResume: boolean }[] {
+  function resumableTickets(): { key: string; outcome: string; attempts: number; canResume: boolean; blocker?: WaitBlocker }[] {
     return [...state.entries()]
       .filter(([, v]) =>
         v.lastOutcome === 'failed' ||
         v.lastOutcome === 'paused' ||
-        v.lastOutcome === 'waiting-provider' ||
-        MANUAL_WAIT_OUTCOMES.has(v.lastOutcome),
+        v.lastOutcome === 'waiting',
       )
-      .map(([key, v]) => ({ key, outcome: v.lastOutcome, attempts: v.attempts, canResume: !!loadCheckpoint(key) }))
+      .map(([key, v]) => ({
+        key,
+        outcome: v.lastOutcome,
+        attempts: v.attempts,
+        canResume: !!loadCheckpoint(key),
+        blocker: v.blocker,
+      }))
   }
 
   // Persist UI edits: mutate the LIVE cfg (so the next scan sees them) + write YAML.

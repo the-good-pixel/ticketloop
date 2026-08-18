@@ -505,7 +505,7 @@ VERDICT: <span class="r">fail</span> — &lt;reason&gt;</div>
         <div class="exit"><span class="oc ok">deployed</span><div class="ex-b">shipped <b>and</b> deploy-dev (+ verify-dev) passed <span>→ live on dev</span></div></div>
         <div class="exit"><span class="oc ok">pr-opened</span><div class="ex-b">every verdict passes, CI green <span>→ clean PR</span></div></div>
         <div class="exit"><span class="oc warn">with-findings</span><div class="ex-b"><b>reached ship</b>, but checks/CI still red at the cap · no-progress <span>→ flagged PR left open</span></div></div>
-        <div class="exit"><span class="oc warn">waiting-provider</span><div class="ex-b"><b>provider quota exhausted</b> <span>→ checkpoint kept; other providers continue</span></div></div>
+        <div class="exit"><span class="oc warn">waiting</span><div class="ex-b"><b>structured blocker</b> — provider, approval, deployment, or external <span>→ checkpoint kept; automatic or manual resume</span></div></div>
         <div class="exit"><span class="oc dead">failed</span><div class="ex-b"><b>failed before ship</b> — verify/review never passed <span>→ ship not reached, no PR</span></div></div>
         <div class="exit"><span class="oc dead">skipped</span><div class="ex-b"><b>no-action</b> — a sign-off / approval / ack <span>→ triage skips, no pipeline</span></div></div>
       </div>

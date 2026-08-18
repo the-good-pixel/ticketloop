@@ -25,8 +25,14 @@ export function parseDeployment(text: string, result: 'pass' | 'fail' | 'wait' |
   if (result === 'skip') return undefined
   const url = (text || '').match(/https?:\/\/\S+/)
   const status: DeploymentArtifact['status'] =
-    result === 'pass' ? 'live' : result === 'fail' ? 'failed' : /approv/i.test(text) ? 'waiting-approval' : 'pending'
-  return { type: 'deployment', environment: 'dev', status, url: url ? trim(url[0]) : undefined }
+    result === 'pass' ? 'live' : result === 'fail' ? 'failed' : 'pending'
+  return {
+    type: 'deployment',
+    environment: 'dev',
+    status,
+    approvalRequired: result === 'wait' && /VERDICT:\s*wait\[approval\]/i.test(text),
+    url: url ? trim(url[0]) : undefined,
+  }
 }
 
 /** The export step's file. Models report it as a path; take the last one named. */

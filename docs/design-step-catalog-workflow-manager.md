@@ -180,7 +180,7 @@ finally:
 
 outcomes:
   success: deployed
-  waiting: waiting-external
+  waiting: waiting
   partial: pr-opened-with-findings
   failed: failed
 ```
@@ -207,7 +207,7 @@ Each workflow node maps those results to transitions:
 - `continue`
 
 Provider quota exhaustion is a harness event, not a model verdict. It always suspends the
-current node as `waiting-provider` and keeps the checkpoint.
+current node with `outcome: waiting` and `blocker.kind: provider`, then keeps the checkpoint.
 
 Typical policies:
 
@@ -227,18 +227,26 @@ The validator rejects undefined transitions or `repair` transitions outside a lo
 Waiting is neither failure nor pause. It means the workflow cannot proceed until a known
 external condition changes.
 
-Runtime outcomes:
+There is one runtime outcome: `waiting`. The reason is structured separately:
 
-- `waiting-provider`
-- `waiting-approval`
-- `waiting-deployment`
-- `waiting-external`
+```yaml
+outcome: waiting
+blocker:
+  kind: provider | approval | deployment | external
+  reason: GitHub Actions returned HTTP 429
+  resume: automatic | manual
+  resumeAt: 1787043600000 # optional epoch milliseconds
+```
+
+Model verdicts name the blocker explicitly (`VERDICT: wait[approval] — <reason>`,
+`wait[deployment]`, or `wait[external]`). Provider waits come from the harness, never from
+free-form model text. This keeps lifecycle state stable without guessing from prose.
 
 A waiting run:
 
 1. Saves the current node, resolved workflow snapshot, artifacts, and workspace.
 2. Releases the project execution slot.
-3. Stores `waitingReason`, optional `resumeAt`, and the responsible provider or artifact.
+3. Stores the structured blocker, optional `resumeAt`, and the responsible provider or artifact.
 4. May execute `finally` nodes configured for `waiting` to post an interim update.
 5. Resumes at the waiting node and follows its `resumePolicy`.
 
@@ -297,7 +305,8 @@ artifacts:
   devDeployment:
     type: deployment
     environment: dev
-    status: waiting-approval
+    status: pending
+    approvalRequired: true
 ```
 
 Artifacts are available to later nodes and final reporting. A `revalidate` step refreshes

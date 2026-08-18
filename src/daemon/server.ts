@@ -4,7 +4,7 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve, extname } from 'node:path'
-import type { Config, ProjectConfig } from '../types.js'
+import type { Config, ProjectConfig, WaitBlocker } from '../types.js'
 import { STAGE_ORDER } from '../types.js'
 import { Governor } from '../governor/governor.js'
 import { readRuns, getRun } from '../store.js'
@@ -28,6 +28,7 @@ import { planForProject, DEFAULT_WORKFLOW_REF } from '../commands/catalog.js'
 import type { CatalogStep, Workflow } from '../catalog/types.js'
 import { ALL_PERMISSIONS } from '../catalog/types.js'
 import { log } from '../logger.js'
+import { legacyWaitKind } from '../waiting.js'
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web')
 
@@ -85,7 +86,7 @@ export interface ServerHooks {
     pausedTickets?: string[]
     ignoredTickets?: { ticketKey: string; at: number; reason?: string }[]
     stoppingTickets?: string[]
-    resumableTickets?: { key: string; outcome: string; attempts: number; canResume: boolean }[]
+    resumableTickets?: { key: string; outcome: string; attempts: number; canResume: boolean; blocker?: WaitBlocker }[]
   }
   // project setup (UI-driven); these persist config / credentials on disk
   saveProject: (p: ProjectConfig) => { ok: true } | { error: string }
@@ -139,7 +140,7 @@ function tooling(cfg: Config) {
   return toolingCache
 }
 
-const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'deployed', 'partial', 'merged', 'skipped', 'cancelled', 'blocked', 'waiting-provider', 'paused', 'failed', 'running']
+const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'deployed', 'partial', 'merged', 'skipped', 'cancelled', 'blocked', 'waiting', 'paused', 'failed', 'running']
 
 function parseDate(v: string | null, endOfDay = false): number | null {
   if (!v) return null
@@ -167,7 +168,12 @@ function queryHistory(p: URLSearchParams) {
 
   let runs = readRuns() // lite summaries from the in-memory index
   if (projects.length) runs = runs.filter((r) => projects.includes(r.project))
-  if (outcomes.length) runs = runs.filter((r) => outcomes.includes(r.outcome))
+  if (outcomes.length) {
+    runs = runs.filter((r) =>
+      outcomes.includes(r.outcome) ||
+      outcomes.some((outcome) => r.outcome === 'waiting' && r.blocker?.kind === legacyWaitKind(outcome)),
+    )
+  }
   if (ticket) runs = runs.filter((r) => r.ticket.toLowerCase().startsWith(ticket))
   if (q) runs = runs.filter((r) => (r.ticketTitle || '').toLowerCase().includes(q) || r.ticket.toLowerCase().includes(q))
   if (from != null) runs = runs.filter((r) => r.startedAt >= from)

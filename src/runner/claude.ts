@@ -346,7 +346,7 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
     // external CI service is unavailable, so resume can revalidate it later.
     if (mockShipWaitsLeft > 0) {
       mockShipWaitsLeft--
-      text = `Pushed, opened ${url}\nCI is unavailable.\nVERDICT: wait — GitHub Actions is unavailable`
+      text = `Pushed, opened ${url}\nCI is unavailable.\nVERDICT: wait[external] — GitHub Actions is unavailable`
     } else if (mockShipFailsLeft > 0) {
       mockShipFailsLeft--
       text = `Pushed, opened ${url}\nCI: the build check is RED.\nVERDICT: fail — CI build failing on the PR`
@@ -373,7 +373,7 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
   // separate, since nothing is wrong with the code.
   if (kind === 'deploy-dev' && mockDeployWaitsLeft > 0) {
     mockDeployWaitsLeft--
-    text = 'Mock deploy-dev: the dev deployment is queued for manual approval.\nVERDICT: wait — awaiting approval'
+    text = 'Mock deploy-dev: the dev deployment is queued for manual approval.\nVERDICT: wait[approval] — awaiting approval'
   } else if (kind === 'deploy-dev' && mockDeployFailsLeft > 0) {
     mockDeployFailsLeft--
     text = 'Mock deploy-dev: the dev pipeline failed to go green.\nVERDICT: fail — injected mock deploy failure'

@@ -166,7 +166,7 @@ export const STANDARD_WORKFLOW: Workflow = {
     // the deploy step enabled.
     success: { default: 'pr-opened', whenArtifact: { devDeployment: 'deployed' } },
     partial: { default: 'partial' },
-    waiting: { default: 'waiting-external' },
+    waiting: { default: 'waiting' },
     failed: { default: 'failed' },
     skipped: { default: 'skipped' },
     blocked: { default: 'blocked' },
