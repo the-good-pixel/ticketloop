@@ -204,7 +204,8 @@ export const BUILTIN_STEPS: CatalogStep[] = [
       'Clean up temporary files, generated artifacts, background processes, containers, or other local resources ' +
       'created by this ticket run, following the project instructions. Stay inside the isolated workspace. Never ' +
       'remove the Git worktree itself, delete its branch, reset or discard tracked changes, or touch another checkout. ' +
-      'Report what you cleaned. If there is nothing to clean, pass without making changes.',
+      'Keep any requested export or other deliverable needed by the final report. Report what you cleaned. If there ' +
+      'is nothing to clean, pass without making changes.',
     defaults: { executionProfile: 'fast', effort: 'low', allowedTools: 'Read,Edit,Bash', enabled: true },
     contract: 'verdict',
     capabilities: { workspace: 'change', mutatesRepo: true, perRepo: 'once', devOnly: false, externalEffects: [] },

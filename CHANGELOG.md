@@ -9,7 +9,7 @@ All notable changes are recorded here. Ticketloop follows semantic versioning, w
 ### Added
 
 - Searchable run History with ticket IDs, project and outcome filters, date filters, sorting, pagination, and clearer run details.
-- An optional LLM cleanup catalog step for project-specific temporary files, processes, and local resources; no built-in workflow enables it.
+- An optional LLM cleanup catalog step for project-specific temporary files, processes, and local resources. The new `standard@3` template uses it; existing project workflow pins are unchanged.
 - Live Claude subscription quota polling alongside Codex quota polling, with the source and age of each reading shown in the dashboard.
 - Immediate Stop and permanent Never process controls, including a visible list where exclusions can be undone.
 - Clear pause progress, per-ticket pause controls, and explanations for skipped or cancelled runs.

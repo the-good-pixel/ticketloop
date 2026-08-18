@@ -571,7 +571,7 @@ Implementation should not start until:
 | 0 — runtime semantics in the current engine | not started (needs its own approved plan) |
 | 1 — runtime types and policy | **done** — `src/catalog/types.ts`, plus `permissions` / `executionProfiles` / `workflow` on config |
 | 2 — catalog schemas, compiler, validator | **done** — `store.ts`, `compile.ts`, `validate.ts`, and the `steps` / `workflows` / `workflow show` / `workflow validate` / `catalog clone` CLI |
-| 3 — standard workflow expressed as data | **done** — `builtin-steps.ts` (14 steps) + `builtin-workflows.ts` (`standard@1` retained for history; fail-closed `standard@2` is current), compiling and validating clean |
+| 3 — standard workflow expressed as data | **done** — `builtin-steps.ts` (15 steps) + `builtin-workflows.ts` (`standard@1`/`@2` retained for history; `standard@3` adds cleanup), compiling and validating clean |
 | 4 — interpreter behind a feature flag | **done** — `src/loop/interpreter.ts`, opt-in per project via `engine: workflow` |
 | 5 — catalog CLI and dashboard | **done** — Workflows view: browse steps/workflows, compiled-plan preview per project, effective profile + required permissions, built-ins protected |
 | 6 — workflow builder | **done** — SVG diagram of the compiled plan (foldable branch cases, fit-to-pane zoom); clone to draft, then edit a node's step/transitions/instruction, a loop's bounds, and the structure itself (move, insert, remove, add gate); continuous validation; save as a new version; assign to a project |

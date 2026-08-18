@@ -61,7 +61,7 @@ export function supportBundleCmd(cfg: Config, configPath: string | null, output?
   const projectAliases = new Map(cfg.projects.map((project, index) => [project.name, `project-${index + 1}`]))
   const projects = cfg.projects.map((project, index) => {
     const tracker = resolveTracker(cfg, project)
-    const workflowRef = project.workflow || 'standard@2'
+    const workflowRef = project.workflow || 'standard@3'
     const workflowEntry = catalog.workflows.get(workflowRef)
     const workflowVersion = Number(workflowRef.slice(workflowRef.lastIndexOf('@') + 1)) || null
     let diagnostics: { errors: string[]; warnings: string[] }
