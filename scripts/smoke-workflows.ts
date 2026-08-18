@@ -25,10 +25,16 @@ async function main(): Promise<void> {
 
   const { loadConfig } = await import('../src/config.js')
   const { makeEngineCtx, processTicket } = await import('../src/loop/engine.js')
+  const { WORKTREE_SETUP_STEP, WORKTREE_CLEANUP_STEP, WORKTREE_SYSTEM_STEPS } = await import('../src/loop/workspace.js')
   const { MockTracker } = await import('../src/adapters/tracker/mock.js')
   const { getStep, loadCatalog } = await import('../src/catalog/store.js')
 
   const { config } = loadConfig()
+  assert.equal(WORKTREE_SETUP_STEP.id, 'create-worktree')
+  assert.equal(WORKTREE_CLEANUP_STEP.id, 'remove-worktree')
+  assert.equal(WORKTREE_CLEANUP_STEP.locked, true)
+  assert.ok(WORKTREE_CLEANUP_STEP.runOn.includes('pr-opened'))
+  assert.deepEqual(WORKTREE_SYSTEM_STEPS.map((step) => step.id), ['create-worktree', 'remove-worktree'])
   const project = {
     name: 'smoke-project',
     repoPath: root,

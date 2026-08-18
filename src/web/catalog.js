@@ -32,6 +32,7 @@ const state = {
   selectionSource: 'project', // project | template | catalog
   draft: null,         // an unsaved workflow being edited
   draftBase: null,     // the ref it was cloned from
+  draftTarget: null,   // template | project — controls naming, save, and assignment
   stepDraft: null,     // an unsaved new version of a catalog step
   stepDraftBase: null, // the published step version it started from
   project: '',         // compile against this project's policy
@@ -137,7 +138,10 @@ function projectName(name) {
 
 function latestStandardTemplate() {
   return state.catalog.workflows
-    .filter((workflow) => workflow.id === 'standard' && workflow.scope === 'builtin')
+    // A user-edited template is an immutable `standard@N` catalog version too.
+    // Keep showing the newest version after it is published; project pins do
+    // not move until the user explicitly switches them.
+    .filter((workflow) => workflow.id === 'standard')
     .sort((a, b) => b.version - a.version)[0];
 }
 
@@ -156,6 +160,7 @@ function selectProject(name) {
   if (hasUnsavedDraft() && !confirm('Discard the unsaved changes and switch project?')) return;
   state.draft = null;
   state.draftBase = null;
+  state.draftTarget = null;
   state.stepDraft = null;
   state.stepDraftBase = null;
   state.project = name;
@@ -188,6 +193,7 @@ function select(sel, source = 'catalog') {
   if (hasUnsavedDraft() && !confirm('Discard the unsaved changes?')) return;
   state.draft = null;
   state.draftBase = null;
+  state.draftTarget = null;
   state.stepDraft = null;
   state.stepDraftBase = null;
   state.selected = sel;
@@ -211,15 +217,25 @@ async function renderMain() {
   $('#wfCloneBtn').hidden = isEditing;
   $('#wfAssignBtn').hidden = isEditing || state.selected.kind !== 'workflow' || currentProject()?.workflow === state.selected.ref;
   $('#wfAssignBtn').textContent = `Switch ${state.project} to this workflow`;
-  $('#wfSaveBtn').textContent = state.stepDraft ? 'Save new default' : `Save for ${state.project}`;
+  $('#wfSaveBtn').textContent = state.stepDraft
+    ? 'Save new default'
+    : state.draftTarget === 'template'
+      ? 'Publish new version'
+      : `Save for ${state.project}`;
   $('#wfDiscardBtn').textContent = state.stepDraft ? 'Cancel editing' : 'Discard changes';
   const banner = $('#wfDraftBanner');
   banner.hidden = !isEditing;
   if (state.draft) {
     banner.replaceChildren();
-    banner.append(el('b', null, `Editing for ${state.project || 'project defaults'}`));
-    banner.append(el('span', null,
-      ` — based on ${friendlyRef(state.draftBase)}. Saving creates a new version and uses it only for ${state.project}.`));
+    if (state.draftTarget === 'template') {
+      banner.append(el('b', null, 'Editing the standard template'));
+      banner.append(el('span', null,
+        ` — based on ${friendlyRef(state.draftBase)}. Publishing creates a new template version; projects stay pinned until explicitly switched.`));
+    } else {
+      banner.append(el('b', null, `Editing for ${state.project || 'project defaults'}`));
+      banner.append(el('span', null,
+        ` — based on ${friendlyRef(state.draftBase)}. Saving creates a new version and uses it only for ${state.project}.`));
+    }
   } else if (state.stepDraft) {
     banner.replaceChildren();
     banner.append(el('b', null, `Editing the default for ${state.stepDraft.name}`));
@@ -350,16 +366,26 @@ async function renderWorkflow() {
   const firstRender = !state.preview;
   const meta = state.draft || state.catalog.workflows.find((w) => w.ref === ref);
   $('#wfTitle').textContent = state.draft
-    ? meta.name
+    ? state.draftTarget === 'template' ? 'Standard template' : meta.name
     : state.selectionSource === 'template'
       ? 'Standard template'
       : `${projectName(state.project)} workflow`;
+  $('#wfViewIntro').textContent = state.draftTarget === 'template' || (!state.draft && state.selectionSource === 'template')
+    ? 'Edit the shared template to publish a new version. Projects stay on their assigned version until you switch them.'
+    : 'Choose a project to view its workflow. Saving an edit creates a new version for that project only.';
   $('#wfSubtitle').textContent = state.draft
-    ? `Draft for ${state.project} · changes not saved`
+    ? state.draftTarget === 'template'
+      ? 'Template draft · publishing creates a new immutable version'
+      : `Draft for ${state.project} · changes not saved`
     : state.selectionSource === 'project'
       ? `${projectName(state.project)} workflow · includes this project's custom instructions`
-      : 'Standard template · choose Edit to make a project copy';
-  $('#wfCloneBtn').textContent = `Edit for ${state.project}`;
+      : 'Shared standard template · projects stay pinned to their assigned version';
+  $('#wfCloneBtn').textContent = state.selectionSource === 'template'
+    ? 'Edit template'
+    : `Edit for ${state.project}`;
+  $('#wfCloneBtn').title = state.selectionSource === 'template'
+    ? 'Create and edit the next immutable standard-template version'
+    : `Create and edit a workflow version for ${state.project}`;
 
   const preview = await post('/api/catalog/preview', {
     workflow: state.draft || undefined,
@@ -389,7 +415,7 @@ async function renderWorkflow() {
   title.append(el('h3', 'wf-h3', state.draft ? 'Editing flow' : 'Workflow map'));
   title.append(el('p', 'wf-canvas-help', state.draft
     ? 'Select any card, route, loop, or ending to edit it.'
-    : 'Select a route to open it. Choose Edit workflow to make changes.'));
+    : `Select a route to open it. Choose ${state.selectionSource === 'template' ? 'Edit template' : 'Edit workflow'} to make changes.`));
   head.append(title);
   const tools = el('div', 'wf-diagram-tools');
   const zoomBtn = (label, delta) => {
@@ -449,6 +475,8 @@ async function renderWorkflow() {
   if (state.draft) enableCanvasPan(canvas);
   body.append(legend());
 
+  renderSystemSteps(body, preview.systemSteps || []);
+
   if (state.draft) return;
 
   // --- finally + outcomes: the parts people forget until a ticket goes silent ---
@@ -471,6 +499,44 @@ async function renderWorkflow() {
 
   const granted = Object.entries(preview.permissions || {}).filter(([, v]) => v).map(([k]) => k);
   body.append(el('p', 'muted', 'Permissions granted here: ' + (granted.join(', ') || 'none')));
+}
+
+/** Locked harness actions are shown with every workflow but never placed in the
+ * editable tree: users should understand the real run without being able to
+ * remove a safety invariant by accident. */
+function renderSystemSteps(body, steps) {
+  if (!steps.length) return;
+  const section = el('section', 'wf-system-steps');
+  const heading = el('div', 'wf-system-head');
+  const copy = el('div');
+  copy.append(el('span', 'wf-system-eyebrow', 'Always enforced by Ticketloop'));
+  copy.append(el('h3', 'wf-h3', 'Worktree lifecycle'));
+  heading.append(copy);
+  heading.append(el('span', 'tag tag-builtin', `${steps.length} locked system steps`));
+  section.append(heading);
+  for (const step of steps) {
+    const card = el('div', 'wf-system-card');
+    const icon = el('span', 'wf-system-icon', step.id === 'create-worktree' ? '+' : '−');
+    icon.setAttribute('aria-hidden', 'true');
+    const detail = el('div');
+    detail.append(el('strong', null, step.name));
+    detail.append(el('span', 'wf-system-timing', step.timing));
+    detail.append(el('p', null, step.description));
+    const outcomeNames = {
+      exported: 'export delivered',
+      'pr-opened': 'PR opened',
+      'pr-opened-with-findings': 'PR opened with findings',
+      deployed: 'deployed',
+      merged: 'merged',
+    };
+    const outcomes = step.runOn
+      ? el('span', 'wf-system-runs',
+          `Runs after: ${step.runOn.map((outcome) => outcomeNames[outcome] || outcome).join(' · ')}`)
+      : el('span', 'wf-system-runs', 'Runs once when needed');
+    card.append(icon, detail, outcomes);
+    section.append(card);
+  }
+  body.append(section);
 }
 
 /** Drag empty canvas space like a design tool. Nodes and controls keep their
@@ -1230,22 +1296,33 @@ async function assignSelected() {
 async function cloneSelected() {
   try {
     const kind = state.selected.kind;
+    const editingTemplate = kind === 'workflow' && state.selectionSource === 'template';
     const currentRef = currentProject()?.workflow || '';
     const currentId = currentRef.split('@')[0];
     const newId = kind === 'workflow'
-      ? (currentId && currentId !== 'standard' && state.selected.ref === currentRef ? currentId : state.project)
+      ? editingTemplate
+        ? state.selected.ref.split('@')[0]
+        : (currentId && currentId !== 'standard' && state.selected.ref === currentRef ? currentId : state.project)
       : undefined;
-    const r = await post('/api/catalog/clone', { kind, ref: state.selected.ref, newId, project: state.project });
+    const r = await post('/api/catalog/clone', {
+      kind,
+      ref: state.selected.ref,
+      newId,
+      project: editingTemplate ? undefined : state.project,
+    });
     if (kind === 'workflow') {
       state.draft = r.draft;
-      state.draft.name = `${projectName(state.project)} workflow`;
-      enableWiredSteps(state.draft);
+      state.draftTarget = editingTemplate ? 'template' : 'project';
+      state.draft.name = editingTemplate ? 'Standard dev cycle' : `${projectName(state.project)} workflow`;
+      if (!editingTemplate) enableWiredSteps(state.draft);
       state.draftBase = state.selected.ref;
       // The full-screen editor should open at a comfortable reading size.
       // Wide workflows remain reachable by scrolling the canvas.
       state.zoom = 1.1;
       await renderMain();
-      toast(`Editing a private draft for ${state.project}`);
+      toast(editingTemplate
+        ? `Editing ${friendlyRef(state.selected.ref)} as a new template version`
+        : `Editing a private draft for ${state.project}`);
     } else {
       state.stepDraft = r.draft;
       state.stepDraftBase = state.selected.ref;
@@ -1282,9 +1359,14 @@ function enableWiredSteps(workflow) {
 async function saveDraft() {
   if (state.stepDraft) return saveStepDraft();
   let saved = null;
+  const editingTemplate = state.draftTarget === 'template';
   try {
-    saved = await post('/api/catalog/save', { kind: 'workflow', draft: state.draft, project: state.project });
-    if (state.project) {
+    saved = await post('/api/catalog/save', {
+      kind: 'workflow',
+      draft: state.draft,
+      project: editingTemplate ? undefined : state.project,
+    });
+    if (!editingTemplate && state.project) {
       // Saving from the visual editor is the explicit point where a project
       // opts into the workflow interpreter. Existing stage settings continue
       // to supply the project's provider, model and instruction overrides.
@@ -1292,10 +1374,13 @@ async function saveDraft() {
     }
     state.draft = null;
     state.draftBase = null;
+    state.draftTarget = null;
     state.selected = { kind: 'workflow', ref: saved.ref };
-    state.selectionSource = 'project';
+    state.selectionSource = editingTemplate ? 'template' : 'project';
     closeNodeEditor();
-    toast(state.project ? `Saved and applied to ${state.project}` : `Saved ${saved.ref}`);
+    toast(editingTemplate
+      ? `Published ${saved.ref}; project assignments were not changed`
+      : `Saved and applied to ${state.project}`);
     await load();
   } catch (e) {
     // Saving and assigning are separate server operations. If project policy
@@ -1304,11 +1389,14 @@ async function saveDraft() {
     if (saved) {
       state.draft = null;
       state.draftBase = null;
+      state.draftTarget = null;
       state.selected = { kind: 'workflow', ref: saved.ref };
-      state.selectionSource = 'project';
+      state.selectionSource = editingTemplate ? 'template' : 'project';
       closeNodeEditor();
       await load();
-      return showError(`Saved ${friendlyRef(saved.ref)}, but could not apply it to ${state.project}: ${e.message}`);
+      return showError(editingTemplate
+        ? `Published ${friendlyRef(saved.ref)}, but could not refresh the catalog: ${e.message}`
+        : `Saved ${friendlyRef(saved.ref)}, but could not apply it to ${state.project}: ${e.message}`);
     }
     showError(e.message);
   }
@@ -1343,6 +1431,7 @@ function discardDraft() {
   if (!state.draft || !confirm('Discard all unsaved workflow changes?')) return;
   state.draft = null;
   state.draftBase = null;
+  state.draftTarget = null;
   state.preview = null;
   state.collapsed.clear();
   state.zoom = null;
@@ -1379,6 +1468,7 @@ $('#wfProject').addEventListener('change', (e) => {
   }
   state.draft = null;
   state.draftBase = null;
+  state.draftTarget = null;
   state.stepDraft = null;
   state.stepDraftBase = null;
   state.project = e.target.value;
