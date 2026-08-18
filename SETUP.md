@@ -92,6 +92,9 @@ runner:
       authMode: subscription
       defaultModel: opus
       defaultEffort: medium
+  # Total runtime can be unlimited, while silent hangs are still stopped.
+  stageTimeoutSec: 0
+  stageIdleTimeoutSec: 1800
 
 tracker:
   type: linear

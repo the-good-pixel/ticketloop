@@ -60,13 +60,21 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
 - `src/daemon/watch.ts` — the scheduler: `selectJob` (one candidate per project),
   `runJob`, `scanNow` (**launches one run per free project, in parallel**), retry hook.
   `src/daemon/server.ts` — dashboard HTTP + JSON API. `src/daemon/control.ts` — the
-  cross-process pause switch (system + per-ticket).
+  cross-process control file: the pause switch (system + per-ticket), the
+  **never-process** marks, and one-shot **stop** requests.
 - `src/runner/claude.ts` — spawns `claude -p`, parses usage, enforces auth-mode safety;
   holds the mock runner. `src/runner/children.ts` — orphan reaping.
 - `src/adapters/tracker/*` — `Tracker` interface + `linear` / `mock`. `src/adapters/repo/
   github.ts` — `Repo` interface (`GitRepo` + `MockRepo`): worktrees, branches, diffs, gh.
 - `src/store.ts` — per-run JSON files + usage log (atomic writes). `src/governor/` —
   quota meters. `src/web/` — dashboard (`app.js` is one file; served static).
+- `src/providerQuota.ts` — subscription quota for BOTH providers, polled the same
+  way: Claude via `GET /api/oauth/usage` (bearer token, no inference, costs
+  nothing), Codex via `codex app-server` → `account/rateLimits/read`. Each answer
+  is stamped `fetchedAt: Date.now()`, persisted to one file that the governor and
+  the dashboard both read. `src/providerAuth.ts` resolves Claude's OAuth token in
+  Claude Code's own order (env → keychain → `.credentials.json`) and **only ever
+  reads it** — refresh tokens rotate, so refreshing here could log the user out.
 - `src/catalog/` — **the step catalog + workflow manager** (the pipeline as DATA).
   `types.ts` = steps, contracts, capabilities, transitions, workflows, artifacts.
   `builtin-steps.ts` / `builtin-workflows.ts` = the seed — today's 14 stages and today's
@@ -111,6 +119,23 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
   fetched); the off-limits `exclude` guardrail (`scanRepos`) runs every fix iteration over
   all repos. **Never auto-merge** unless a project's own instruction explicitly says to.
 - **Parallelism**: at most **one run per project**, many projects at once (`activeRuns`).
+- **Pause, stop and never-process are three different things.** A *pause* lets the
+  current step finish and keeps the checkpoint, so the ticket resumes. A *stop*
+  kills that ticket's agent process group AND trips the same stage boundary (a
+  stop landing between steps has no child to kill, and without the boundary check
+  the run would quietly finish the whole workflow); it deletes the checkpoint,
+  records `cancelled`, and is never retried. *Never-process* removes the ticket
+  from the candidate set permanently — it is checked in `selectJobs` BEFORE the
+  new-activity test, because a mark that a new comment could undo would not solve
+  the problem it exists for. Stop and never-process are independent; either, or
+  both together.
+- **A displayed quota number must carry an honest age.** Every snapshot's
+  `fetchedAt` is when we asked the provider, never when some other tool happened
+  to write a file. A failed poll keeps the last reading *with its original
+  timestamp* — never re-stamped — and anything scraped off disk is marked
+  `source: 'local-cache'` so the dashboard can say so. Quota also refreshes on its
+  own timer in `watch.ts`, **outside `scanNow`**, so a paused daemon does not
+  freeze both meters.
 - **Resume = replay cached stages + reattach the same worktree**, continuing at the
   stage that stopped; already-completed stages keep their old output. A checkpoint is
   keyed by the ticket's latest-human-activity **marker** — new activity invalidates it.

@@ -30,6 +30,7 @@ const DEFAULTS: Config = {
     permissionMode: 'bypass',
     maxTurns: 40,
     stageTimeoutSec: 900,
+    stageIdleTimeoutSec: 1800,
   },
   server: { port: 4317, host: '127.0.0.1' },
   tracker: {
@@ -82,10 +83,16 @@ const DEFAULTS: Config = {
 // wishes (use skill X, run CLI Y, hit MCP Z) belong in the user's override.
 export const DEFAULT_INSTRUCTIONS: Record<StageName, string> = {
   triage:
-    'You are ONLY classifying this ticket. Do NOT answer, explain, or make changes. Output ' +
-    'EXACTLY these two lines and nothing else:\n' +
+    'You are ONLY classifying this ticket. Do NOT answer it or make changes. Output ' +
+    'EXACTLY these three lines and nothing else:\n' +
     'DECISION: eligible        (or: DECISION: ineligible, or: DECISION: no-action)\n' +
-    'KIND: question            (or: KIND: data, or: KIND: change, or: KIND: bug)\n\n' +
+    'KIND: question            (or: KIND: data, or: KIND: change, or: KIND: bug)\n' +
+    'REASON: <one sentence, max ~30 words>\n\n' +
+    'The REASON line is REQUIRED and must be specific enough that a human who never read the ' +
+    'ticket understands the call. Quote or name the actual thing that decided it — the comment ' +
+    'that signed off, the path that is off-limits, the behaviour reported as broken. Write ' +
+    '"Latest comment \'UAT passed, can deploy to PROD\' is a sign-off with no new ask", NOT ' +
+    '"the latest activity is a sign-off". Never restate the DECISION word as the reason.\n\n' +
     'FIRST decide whether ANY action is needed at all:\n' +
     '- DECISION=no-action — nothing to do right now. Use this when the LATEST activity is a ' +
     'sign-off / approval / acknowledgement / status update rather than a request: e.g. "UAT ' +
@@ -274,6 +281,7 @@ function migrateConfig(raw: any): any {
       permissionMode: oldRunner.permissionMode,
       maxTurns: oldRunner.maxTurns,
       stageTimeoutSec: oldRunner.stageTimeoutSec,
+      stageIdleTimeoutSec: oldRunner.stageIdleTimeoutSec,
     }
     const pinClaudeModels = (stages: any) => {
       for (const stage of Object.values(stages || {}) as any[]) {

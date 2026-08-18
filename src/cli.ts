@@ -9,7 +9,7 @@ import { watch } from './daemon/watch.js'
 import { makeEngineCtx, processTicket } from './loop/engine.js'
 import { makeTracker } from './adapters/tracker/tracker.js'
 import { resolveTrackerKey } from './credentials.js'
-import { isPaused, setPaused, setTicketPaused } from './daemon/control.js'
+import { ignoredTickets, isPaused, setPaused, setTicketIgnored, setTicketPaused } from './daemon/control.js'
 import { readJson } from './store.js'
 import { loadCatalog } from './catalog/store.js'
 import {
@@ -32,6 +32,8 @@ interface Flags {
   engine?: string
   out?: string
   positional: string[]
+  forever?: boolean
+  reason?: string
 }
 
 function parse(argv: string[]): { cmd: string; flags: Flags } {
@@ -46,6 +48,8 @@ function parse(argv: string[]): { cmd: string; flags: Flags } {
     else if (a === '--project') flags.project = rest[++i]
     else if (a === '--engine') flags.engine = rest[++i]
     else if (a === '--out' || a === '-o') flags.out = rest[++i]
+    else if (a === '--forever') flags.forever = true
+    else if (a === '--reason') flags.reason = rest[++i]
     else if (a === '--debug') log.setLevel('debug')
     else if (!a.startsWith('--')) flags.positional.push(a)
   }
@@ -65,6 +69,10 @@ Usage:
   ticketloop run [--ticket ID]    Scan once (or one ticket) then exit
   ticketloop pause [ticket]       Pause the whole loop, or one ticket, at the next stage boundary
   ticketloop resume [ticket]      Resume the loop (or one ticket) from where it stopped
+  ticketloop stop <ticket>        Stop a ticket's run NOW (kills the step in progress)
+                                    --forever  also never process this ticket again
+  ticketloop ignore <ticket>      Never process this ticket (does not stop a live run)
+  ticketloop unignore <ticket>    Undo an ignore — the ticket becomes a candidate again
   ticketloop status               Print quota meters + recent runs
   ticketloop steps [<id>@<v>]     List the step catalog, or show one step
   ticketloop workflows            List workflows and which projects use them
@@ -95,9 +103,45 @@ function resolveTicketKey(arg: string): string | null {
     state = null
   }
   if (arg.includes(':')) return arg // explicit "<project>:<ID>" — trust it
-  const keys = Object.keys(state?.tickets || {})
+  // Ignored tickets may never have run, so they can be absent from daemon state.
+  // Searching the marks too keeps `unignore <bare-id>` able to undo `ignore <bare-id>`.
+  const keys = [...Object.keys(state?.tickets || {}), ...ignoredTickets().map((m) => m.ticketKey)]
   const hit = keys.find((k) => k.slice(k.indexOf(':') + 1).toLowerCase() === arg.toLowerCase())
   return hit || null
+}
+
+// Killing a live agent is something only the running daemon can do (it owns the
+// child process groups), so `stop` asks it over the local API. A missing daemon
+// is not an error: there is nothing running to kill, and the control-file mark
+// has already been written.
+type StopAsk = 'stopped' | 'not-running' | 'no-daemon'
+
+async function askDaemonToStop(ticketKey: string, ignore: boolean, configPath?: string): Promise<StopAsk> {
+  let config: ReturnType<typeof loadConfig>['config'] | null = null
+  try {
+    // MUST honor --config: without it we would ask whichever daemon the default
+    // config happens to name, which is a different daemon than the user meant.
+    config = loadConfig(configPath).config
+  } catch {
+    return 'no-daemon'
+  }
+  if (!config) return 'no-daemon'
+  const url = `http://${config.server.host}:${config.server.port}/api/stop`
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticketKey, ignore }),
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!res.ok) return 'no-daemon'
+    const body = (await res.json()) as { stopped?: boolean }
+    // The daemon answered. "Not running" is a different fact from "no daemon" —
+    // reporting both as no-daemon told the user the loop was down when it wasn't.
+    return body.stopped ? 'stopped' : 'not-running'
+  } catch {
+    return 'no-daemon'
+  }
 }
 
 // If another ticket in this ticket's project is mid-run, return its identifier.
@@ -150,6 +194,41 @@ async function main() {
     log.info(paused
       ? '⏸ paused — the daemon stops at the next stage boundary (in-flight work is checkpointed). Run `ticketloop resume` to continue.'
       : '▶ resumed — paused runs continue from their checkpoint on the next scan.')
+    return
+  }
+
+  // Stop / never-process. These also go through the control file, so they work
+  // whether or not a daemon is up — `stop` additionally asks the running daemon
+  // to kill the agent, which only it can do.
+  if (cmd === 'stop' || cmd === 'ignore' || cmd === 'unignore') {
+    const arg = flags.positional[0]
+    if (!arg) {
+      log.error(`${cmd} needs a ticket: \`ticketloop ${cmd} <project>:<ID>\``)
+      process.exit(1)
+    }
+    const sKey = resolveTicketKey(arg)
+    if (!sKey) {
+      log.error(`no known ticket "${arg}" in daemon state. Use "<project>:<ID>" or a live ticket id.`)
+      process.exit(1)
+    }
+    if (cmd === 'unignore') {
+      setTicketIgnored(sKey, false)
+      log.info(`▶ ${sKey} un-ignored — it becomes a candidate again on the next scan.`)
+      return
+    }
+    const forever = cmd === 'ignore' || !!flags.forever
+    if (forever) setTicketIgnored(sKey, true, flags.reason)
+    if (cmd === 'stop') {
+      // Ask the daemon to kill it. Without a daemon there is nothing running,
+      // so the control-file mark is the whole effect.
+      const asked = await askDaemonToStop(sKey, forever, flags.config)
+      const andForever = forever ? ' It will never be processed again.' : ''
+      if (asked === 'stopped') log.info(`✋ stopping ${sKey} now.${andForever}`)
+      else if (asked === 'not-running') log.info(`${sKey} was not running — nothing to stop.${andForever}`)
+      else log.info(`no daemon reachable, so nothing could be killed.${andForever || ` Start one, or run \`ticketloop ignore ${arg}\` to keep it from starting.`}`)
+      return
+    }
+    log.info(`🚫 ${sKey} will never be processed. Undo with \`ticketloop unignore ${arg}\`.`)
     return
   }
 

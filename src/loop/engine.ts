@@ -16,11 +16,12 @@ import type { AgentResult } from '../runner/index.js'
 import type { Tracker } from '../adapters/tracker/tracker.js'
 import { makeRepo, type Repo } from '../adapters/repo/github.js'
 import { appendRun, appendUsage, getRun } from '../store.js'
+import { parseRouteReason } from './verdict.js'
 import { classifyKind } from './classify.js'
 import { runWorkflow } from './interpreter.js'
 import { planForProject } from '../commands/catalog.js'
 import { buildStagePrompt, CHECK_STAGES, POST_STAGES, type PriorOutputs, type StageExtras } from './prompts.js'
-import { reattachWorkspace, scanRepos, setupWorkspace, toWorkspaceCk, type WorkRepo } from './workspace.js'
+import { cleanupWorkspace, reattachWorkspace, scanRepos, setupWorkspace, toWorkspaceCk, type WorkRepo } from './workspace.js'
 // Re-exported for callers that still import it from the engine.
 export { resolveBranch } from './workspace.js'
 import { extractImageUrls, downloadImages, latestHumanActivity } from './context.js'
@@ -57,7 +58,12 @@ export class ProviderUnavailableError extends Error {
 
 // Outcomes whose checkpoint we KEEP so the ticket can resume where it stopped.
 // Everything else (success, skipped) deletes the checkpoint — the work is done.
-const RESUMABLE_OUTCOMES = new Set(['failed', 'blocked', 'paused', 'waiting-provider'])
+const RESUMABLE_OUTCOMES = new Set([
+  'failed',
+  'blocked',
+  'paused',
+  'waiting',
+])
 
 // Per-run mutable context: the run record, its resume checkpoint, and the live
 // pause predicate. Threaded into every stage() so stages can replay from cache
@@ -169,12 +175,7 @@ async function runDataPath(
     return rec
   } finally {
     // Throwaway worktree — nothing to ship; always remove it + its empty branch.
-    if (ws.useWorktree) {
-      for (const r of ws.repos) {
-        ctx.repo.removeWorktree(r.srcPath, r.workdir)
-        ctx.repo.deleteBranch(r.srcPath, r.branch)
-      }
-    }
+    cleanupWorkspace(ctx, ws)
   }
 }
 
@@ -263,6 +264,10 @@ export async function processTicket(
     rec.outcome = 'running'
     rec.endedAt = undefined
     rec.error = undefined
+    rec.blocker = undefined
+    rec.waitReason = undefined
+    rec.waitingProvider = undefined
+    rec.resumeAt = undefined
     rec.resumes = (rec.resumes || 0) + 1
     rec.ticketTitle = ticket.title // keep in sync if it was renamed
     rec.ticketUrl = ticket.url
@@ -339,19 +344,28 @@ export async function processTicket(
     // Only skip when triage EXPLICITLY says ineligible. A missing/oddly-formatted
     // decision defaults to eligible (real safety is the exclude guardrail + PR
     // review, not this soft filter) — so a stray answer never wrongly skips.
-    const eligible = ctx.mock || !/DECISION:\s*ineligible/i.test(triage.text)
+    // Mock mode honors an explicit ineligible too: the mock only emits one when a
+    // test asks for it, so forcing eligible here just made the branch untestable
+    // (and diverged from the workflow engine, which has always honored it).
+    const eligible = !/DECISION:\s*ineligible/i.test(triage.text)
     const kind = parseKind(triage.text) || classifyKind(ticket) // question | data | change | bug
 
     // No action needed: the latest activity is a sign-off / approval / ack, or an
     // ask the loop can't do (deploy to prod). Skip WITHOUT running any pipeline —
     // this is what stops sign-offs re-triggering a doomed "no file changes" run.
+    // The REASON triage gave. Without it the user sees only the word "skipped"
+    // and has to re-read the ticket to guess what the model concluded.
+    const triageReason = parseRouteReason(triage.text)
     if (/DECISION:\s*no[-\s]?action/i.test(triage.text)) {
-      finish(rec, 'skipped', 'No action required (triage: latest activity is a sign-off / approval / not a request).')
+      finish(rec, 'skipped', triageReason
+        ? `No action required — ${triageReason}`
+        : 'No action required (triage: latest activity is a sign-off / approval / not a request).')
       return rec
     }
 
     if (!eligible) {
-      finish(rec, 'skipped', `Triage: ineligible. ${firstLine(triage.text)}`)
+      // firstLine used to be "DECISION: ineligible" — the decision restated, never a reason.
+      finish(rec, 'skipped', `Triage: ineligible${triageReason ? ` — ${triageReason}` : '.'}`)
       return rec
     }
 
@@ -557,12 +571,7 @@ export async function processTicket(
       // Clean up worktrees only on FULL success — branches/PRs carry the work.
       if (ws.useWorktree && prs.length && !failedRepos.length) {
         const shipped = new Set(dirty.map((r) => r.name))
-        for (const r of ws.repos) {
-          ctx.repo.removeWorktree(r.srcPath, r.workdir)
-          // Untouched repo → empty branch; delete it so unused per-ticket
-          // branches don't pile up. Shipped repos keep theirs — the PR needs it.
-          if (!shipped.has(r.name)) ctx.repo.deleteBranch(r.srcPath, r.branch)
-        }
+        cleanupWorkspace(ctx, ws, shipped)
       }
       return rec
     } catch (e) {
@@ -578,9 +587,14 @@ export async function processTicket(
       return rec
     }
     if (e instanceof ProviderUnavailableError) {
-      rec.waitingProvider = e.provider
-      rec.resumeAt = e.resumeAt
-      finish(rec, 'waiting-provider', `${e.provider} quota is unavailable; resume from "${e.stage}" when the provider allows it.`)
+      rec.blocker = {
+        kind: 'provider',
+        reason: `${e.provider} quota is unavailable; resume from "${e.stage}" when the provider allows it.`,
+        resume: 'automatic',
+        provider: e.provider,
+        resumeAt: e.resumeAt,
+      }
+      finish(rec, 'waiting', rec.blocker.reason)
       return rec
     }
     const msg = String(e)
@@ -666,6 +680,7 @@ async function stage(
     mock: ctx.mock,
     mockKind: MOCK_KIND[name],
     env,
+    ticketKey: `${project.name}:${ticket.identifier}`,
   })
 
   // Guard: never let CLI-error text or an echoed prompt be treated as a real
@@ -767,7 +782,10 @@ function finish(rec: RunRecord, outcome: RunRecord['outcome'], note: string) {
   rec.endedAt = Date.now()
   const last = rec.stages[rec.stages.length - 1]
   if (last && last.status === 'running') endStage(rec, last, 'ok')
-  rec.error = outcome === 'failed' || outcome === 'blocked' || outcome === 'waiting-provider' ? note : rec.error
+  // Every outcome carries its reason, not just the failing ones (see the same
+  // change in interpreter.ts — both engines must record history identically).
+  rec.summary = note
+  rec.error = outcome === 'failed' || outcome === 'blocked' ? note : rec.error
   log.info(`  = ${rec.ticket}: ${outcome} — ${note}`)
   appendRun(rec)
 }

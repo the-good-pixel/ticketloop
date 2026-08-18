@@ -18,6 +18,8 @@ import type {
   StageName,
   StageRecord,
   Ticket,
+  WaitBlocker,
+  WaitKind,
 } from '../types.js'
 import type { Artifact, StepResult, TerminalClass } from '../catalog/types.js'
 import type {
@@ -34,9 +36,10 @@ import type { Repo } from '../adapters/repo/github.js'
 import { appendRun, appendUsage } from '../store.js'
 import { log } from '../logger.js'
 import { buildNodePrompt, type PriorOutput } from './nodePrompt.js'
-import { parseResult, parseRouteField } from './verdict.js'
+import { parseResult, parseRouteField, parseRouteReason } from './verdict.js'
 import { artifactSucceeded, extractArtifact, parseCommentUrl } from './artifacts.js'
 import {
+  cleanupWorkspace,
   reattachWorkspace,
   scanRepos,
   setupWorkspace,
@@ -45,6 +48,7 @@ import {
   type Workspace,
 } from './workspace.js'
 import { type Checkpoint, saveCheckpoint } from './checkpoint.js'
+import { legacyWaitKind } from '../waiting.js'
 
 export interface InterpCtx {
   cfg: Config
@@ -57,7 +61,7 @@ export interface InterpCtx {
 type Signal =
   | { type: 'continue' }
   | { type: 'stop'; terminal: TerminalClass; outcome?: RunOutcome; note?: string; reported?: boolean }
-  | { type: 'suspend'; reason: string; nodeId: string; provider?: AgentProvider; resumeAt?: number }
+  | { type: 'suspend'; blocker: WaitBlocker; nodeId: string }
   | { type: 'repair'; loopId: string; detail: string }
   | { type: 'exit-loop'; loopId?: string }
 
@@ -84,6 +88,15 @@ interface State {
   prs: PrRecord[]
   /** Set when the workflow finished, but not cleanly (loop exhausted, ship gaps). */
   degraded?: string
+  /** The REASON the route step gave for the branch it just sent us down. A stop
+   *  node's own note describes the terminal generically ("ineligible"); this is
+   *  the model's specific account of why THIS ticket went there.
+   *
+   *  Cleared as soon as any step runs: once real work starts, how the run ends
+   *  is no longer explained by the routing call. Without that, a triage reason
+   *  would still be glued onto an unrelated terminal ten steps later, such as a
+   *  repair loop exhausting. */
+  routeReason?: string
   iteration: number
   openFindings?: string
   /** Per-loop counters. Shared so a repair sent back from a LATER node (a failed
@@ -169,9 +182,8 @@ export async function runWorkflow(
   // --- Resolve the terminal --------------------------------------------------
   if (signal.type === 'suspend') {
     await runFinally(ctx, s, 'waiting')
-    rec.resumeAt = signal.resumeAt
-    if (signal.provider) rec.waitingProvider = signal.provider
-    finish(s, (signal.reason as RunOutcome) || 'waiting-external', `Waiting at "${signal.nodeId}".`)
+    rec.blocker = signal.blocker
+    finish(s, 'waiting', signal.blocker.reason || `Waiting at "${signal.nodeId}".`)
     return rec
   }
   const terminal: TerminalClass =
@@ -181,8 +193,45 @@ export async function runWorkflow(
   // is reported as partial, never as a clean success.
   const cls: TerminalClass = terminal === 'success' && s.degraded ? 'partial' : terminal
   if (!explicit?.reported) await runFinally(ctx, s, cls)
-  finish(s, resolveOutcome(s, cls, explicit?.outcome), explicit?.note || describeOutcome(s, cls))
+  const note = withRouteReason(s, explicit?.note || describeOutcome(s, cls))
+  if (cls === 'waiting' && !rec.blocker) {
+    rec.blocker = { kind: 'external', reason: note, resume: 'manual' }
+  }
+  const outcome = resolveOutcome(s, cls, explicit?.outcome)
+  finish(s, outcome, note)
+  cleanupCompletedWorkspace(ctx, s, outcome)
   return rec
+}
+
+/**
+ * Deterministic terminal action, deliberately outside workflow data. Cleanup is
+ * an engine invariant: a custom workflow cannot forget it or prompt it away.
+ * Keep resumable and inspectable workspaces; remove only delivered exports or a
+ * fully shipped workspace whose changed branches now live behind open PRs.
+ */
+function cleanupCompletedWorkspace(ctx: InterpCtx, s: State, outcome: RunOutcome): void {
+  if (!s.ws) return
+  if (outcome === 'exported') {
+    cleanupWorkspace(ctx, s.ws)
+    return
+  }
+  if (s.prs.some((p) => p.status === 'failed')) return
+  const durable = new Set(s.prs.filter((p) => p.status === 'opened').map((p) => p.repo))
+  for (const artifact of Object.values(s.artifacts)) {
+    if (artifact.type === 'github-pr' && artifactSucceeded(artifact)) durable.add(artifact.repo)
+  }
+  if (durable.size) cleanupWorkspace(ctx, s.ws, durable)
+}
+
+// A stop node's note names the terminal in general terms ("Triage: ineligible
+// for the automated loop"), which is the part a user can already infer from the
+// outcome badge. The routing REASON is the part they cannot: what about THIS
+// ticket led there. Append it rather than replace, so the note keeps saying
+// which gate stopped the run.
+function withRouteReason(s: State, note: string): string {
+  if (!s.routeReason) return note
+  if (note.toLowerCase().includes(s.routeReason.toLowerCase())) return note
+  return `${note.replace(/\s*[.]?\s*$/, '')} — ${s.routeReason}`
 }
 
 // ---- phase walking ---------------------------------------------------------
@@ -260,13 +309,17 @@ async function runPhase(ctx: InterpCtx, s: State, phase: CompiledPhase): Promise
     case 'branch': {
       const source = s.outputs.get(s.plan.nodes.get(phase.on.nodeId)?.step.produces.key || '')
       const value = source ? parseRouteField(source.text, phase.on.field) : undefined
+      // Capture the routing rationale even when the branch continues — a later
+      // stop still benefits from knowing why the ticket took this path.
+      const reason = source ? parseRouteReason(source.text) : undefined
+      if (reason) s.routeReason = reason
       const chosen = value ? phase.cases[value] : undefined
       if (chosen) {
-        log.info(`  ⑂ ${phase.id}: ${phase.on.field}=${value}`)
+        log.info(`  ⑂ ${phase.id}: ${phase.on.field}=${value}${reason ? ` — ${reason}` : ''}`)
         return runPhases(ctx, s, chosen)
       }
       if (Array.isArray(phase.default)) {
-        log.info(`  ⑂ ${phase.id}: ${phase.on.field}=${value ?? '(unset)'} → default`)
+        log.info(`  ⑂ ${phase.id}: ${phase.on.field}=${value ?? '(unset)'} → default${reason ? ` — ${reason}` : ''}`)
         return runPhases(ctx, s, phase.default)
       }
       if (phase.default === 'stop') return { type: 'stop', terminal: 'skipped', note: `No branch matched ${phase.on.field}.` }
@@ -335,6 +388,9 @@ async function runStepNode(
   node: CompiledStepNode,
   iteration?: number,
 ): Promise<Signal> {
+  // Real work begins here, so the last routing call stops being the explanation
+  // for how this run ends. See State.routeReason.
+  s.routeReason = undefined
   if (!node.settings.enabled) {
     recordSkipped(s, node, 'step disabled')
     return applyTransition(s, node, 'skip', '')
@@ -349,7 +405,7 @@ async function runStepNode(
   const key = checkpointKey(s.plan, node.id, iteration)
   const res = await invoke(ctx, s, node, key, iteration)
   if ('signal' in res) return res.signal
-  return applyResult(ctx, s, node, res.text, res.result, res.reason)
+  return applyResult(ctx, s, node, res.text, res.result, res.reason, res.blockerKind)
 }
 
 /** Ship-like steps: one invocation per changed repo, each with its own key. */
@@ -371,7 +427,7 @@ async function runPerRepo(
     return applyTransition(s, node, 'skip', '')
   }
 
-  let worst: { result: StepResult; reason: string; text: string } | undefined
+  let worst: { result: StepResult; reason: string; text: string; blockerKind?: WaitKind } | undefined
   for (const repo of s.dirty) {
     const key = checkpointKey(s.plan, node.id, iteration, repo.name)
     const res = await invoke(ctx, s, node, key, iteration, repo)
@@ -387,20 +443,27 @@ async function runPerRepo(
     })
     if (artifact && ok) s.artifacts[node.step.produces.key] = artifact
     storeOutput(s, node, res.text)
-    if (!ok && !worst) worst = { result: res.result === 'pass' ? 'fail' : res.result, reason: res.reason, text: res.text }
+    if (!ok && !worst) {
+      worst = {
+        result: res.result === 'pass' ? 'fail' : res.result,
+        reason: res.reason,
+        text: res.text,
+        blockerKind: res.blockerKind,
+      }
+    }
   }
   const opened = s.prs.filter((p) => p.status === 'opened')
   s.rec.prUrl = opened[0]?.url
   if (s.ws?.multi) s.rec.prs = s.prs
   if (worst) {
     if (opened.length) s.degraded = `${s.prs.length - opened.length} repo(s) failed to ship.`
-    return applyTransition(s, node, worst.result, worst.text, worst.reason)
+    return applyTransition(s, node, worst.result, worst.text, worst.reason, worst.blockerKind)
   }
   return applyTransition(s, node, 'pass', '')
 }
 
 /** Result of one model invocation, or a signal that unwound it. */
-type Invoked = { text: string; result: StepResult; reason: string } | { signal: Signal }
+type Invoked = { text: string; result: StepResult; reason: string; blockerKind?: WaitKind } | { signal: Signal }
 
 async function invoke(
   ctx: InterpCtx,
@@ -448,7 +511,17 @@ async function invoke(
   if (!gate.ok) {
     persist(s)
     return {
-      signal: { type: 'suspend', reason: 'waiting-provider', nodeId: node.id, provider, resumeAt: gate.resetAt },
+      signal: {
+        type: 'suspend',
+        nodeId: node.id,
+        blocker: {
+          kind: 'provider',
+          reason: `${provider} quota is unavailable`,
+          resume: 'automatic',
+          provider,
+          resumeAt: gate.resetAt,
+        },
+      },
     }
   }
 
@@ -494,6 +567,7 @@ async function invoke(
       step.capabilities.externalEffects.includes('tracker-comment') && s.trackerKey && ctx.cfg.tracker.type === 'linear'
         ? { LINEAR_API_KEY: s.trackerKey }
         : undefined,
+    ticketKey: `${s.project.name}:${s.ticket.identifier}`,
   })
 
   if (!res.isError && looksLikeGarbage(res.text)) {
@@ -509,10 +583,14 @@ async function invoke(
     return {
       signal: {
         type: 'suspend',
-        reason: 'waiting-provider',
         nodeId: node.id,
-        provider: res.provider,
-        resumeAt: limit.retryAt || limit.nextProbeAt,
+        blocker: {
+          kind: 'provider',
+          reason: limit.message || `${res.provider} quota is unavailable`,
+          resume: 'automatic',
+          provider: res.provider,
+          resumeAt: limit.retryAt || limit.nextProbeAt,
+        },
       },
     }
   }
@@ -526,7 +604,10 @@ async function invoke(
 }
 
 /** Turn raw output into a result according to the step's contract. */
-function classify(step: CompiledStepNode['step'], text: string): { result: StepResult; reason: string } {
+function classify(
+  step: CompiledStepNode['step'],
+  text: string,
+): { result: StepResult; reason: string; blockerKind?: WaitKind } {
   if (step.contract === 'verdict') return parseResult(text)
   return { result: 'pass', reason: '' } // non-gates simply complete
 }
@@ -538,6 +619,7 @@ async function applyResult(
   text: string,
   result: StepResult,
   reason: string,
+  blockerKind?: WaitKind,
 ): Promise<Signal> {
   const artifact = extractArtifact(node.step, text, result, s.project.name)
   if (artifact) s.artifacts[node.step.produces.key] = artifact
@@ -552,7 +634,7 @@ async function applyResult(
     const blocked = guardrail(ctx, s)
     if (blocked) return blocked
   }
-  return applyTransition(s, node, result, text, reason)
+  return applyTransition(s, node, result, text, reason, blockerKind)
 }
 
 function applyTransition(
@@ -561,6 +643,7 @@ function applyTransition(
   result: StepResult,
   text: string,
   reason = '',
+  blockerKind?: WaitKind,
 ): Signal {
   const target = node.transitions[result] || 'next'
   switch (target) {
@@ -573,8 +656,18 @@ function applyTransition(
         terminal: result === 'pass' ? 'success' : result === 'wait' ? 'waiting' : 'failed',
         note: `"${node.id}" ended the run: ${reason || firstLine(text) || result}`,
       }
-    case 'suspend':
-      return { type: 'suspend', reason: waitingReason(node, reason), nodeId: node.id }
+    case 'suspend': {
+      const detail = reason || firstLine(text) || `Waiting at "${node.id}".`
+      return {
+        type: 'suspend',
+        nodeId: node.id,
+        blocker: {
+          kind: blockerKind || waitingKind(node),
+          reason: detail,
+          resume: 'manual',
+        },
+      }
+    }
     case 'exit-loop':
       return { type: 'exit-loop', loopId: node.loopId }
     case 'repair':
@@ -589,12 +682,9 @@ function applyTransition(
 }
 
 /** Classify WHY a node is waiting, so the dashboard can say what to do. */
-function waitingReason(node: CompiledStepNode, reason: string): RunOutcome {
-  if (node.step.capabilities.externalEffects.includes('deploy-dev')) {
-    return /approv/i.test(reason) ? 'waiting-approval' : 'waiting-deployment'
-  }
-  if (/approv|review|sign[- ]?off/i.test(reason)) return 'waiting-approval'
-  return 'waiting-external'
+function waitingKind(node: CompiledStepNode): WaitKind {
+  if (node.step.capabilities.externalEffects.includes('deploy-dev')) return 'deployment'
+  return 'external'
 }
 
 // ---- workspace + guardrail --------------------------------------------------
@@ -657,15 +747,15 @@ async function runFinally(ctx: InterpCtx, s: State, cls: TerminalClass): Promise
 // ---- outcome mapping --------------------------------------------------------
 
 function resolveOutcome(s: State, cls: TerminalClass, explicit?: RunOutcome): RunOutcome {
-  if (explicit) return explicit
+  if (explicit) return legacyWaitKind(explicit as string) ? 'waiting' : explicit
   const mapping = s.plan.outcomes[cls]
   if (!mapping) return cls === 'success' ? 'pr-opened' : 'failed'
   // An upgraded outcome must be EARNED by a real artifact — never inferred from
   // "the deploy step was enabled".
   for (const [key, outcome] of Object.entries(mapping.whenArtifact || {})) {
-    if (artifactSucceeded(s.artifacts[key])) return outcome
+    if (artifactSucceeded(s.artifacts[key])) return legacyWaitKind(outcome as string) ? 'waiting' : outcome
   }
-  return mapping.default
+  return legacyWaitKind(mapping.default as string) ? 'waiting' : mapping.default
 }
 
 function describeOutcome(s: State, cls: TerminalClass): string {
@@ -765,6 +855,10 @@ function finish(s: State, outcome: RunOutcome, note: string): void {
   rec.endedAt = Date.now()
   const last = rec.stages[rec.stages.length - 1]
   if (last && last.status === 'running') endStage(rec, last, 'ok')
+  // Persist the reason for EVERY outcome. `error` only ever covered failures, so
+  // a skipped run kept its explanation in the daemon log and nowhere the user
+  // could see it.
+  rec.summary = note
   if (outcome === 'failed' || outcome === 'blocked' || outcome.startsWith('waiting')) rec.error = note
   log.info(`  = ${rec.ticket}: ${outcome} — ${note}`)
   appendRun(rec)

@@ -166,7 +166,7 @@ export const STANDARD_WORKFLOW: Workflow = {
     // the deploy step enabled.
     success: { default: 'pr-opened', whenArtifact: { devDeployment: 'deployed' } },
     partial: { default: 'partial' },
-    waiting: { default: 'waiting-external' },
+    waiting: { default: 'waiting' },
     failed: { default: 'failed' },
     skipped: { default: 'skipped' },
     blocked: { default: 'blocked' },
@@ -205,4 +205,35 @@ v2Kind.branch.default = [
   },
 ]
 
-export const BUILTIN_WORKFLOWS: Workflow[] = [STANDARD_WORKFLOW, STANDARD_WORKFLOW_V2]
+// Version 3 adds the optional LLM cleanup action to the standard TEMPLATE. It
+// does not rewrite any project's immutable workflow pin: projects on @1/@2 keep
+// running exactly those versions until a user assigns @3.
+export const STANDARD_WORKFLOW_V3: Workflow = structuredClone(STANDARD_WORKFLOW_V2)
+STANDARD_WORKFLOW_V3.version = 3
+STANDARD_WORKFLOW_V3.description =
+  'Triage the ticket, then answer it, export data, or implement a change with a bounded ' +
+  'verify/review repair loop, ship a PR, clean local run resources, and report back on the ticket.'
+
+const v3Kind = STANDARD_WORKFLOW_V3.phases.find((phase) => isBranchNode(phase) && phase.id === 'route-kind')
+if (!v3Kind || !isBranchNode(v3Kind) || !Array.isArray(v3Kind.branch.default)) {
+  throw new Error('standard workflow kind branch is missing')
+}
+
+const cleanupNode = (id: string): StepNode => ({
+  id,
+  step: S.cleanup,
+  // Cleanup is best-effort. A cleanup finding must not send already verified
+  // and shipped product work back through the repair loop.
+  on: { pass: 'next', fail: 'next', wait: 'next', skip: 'next' },
+})
+const beforeTerminal = (phases: Phase[], node: StepNode): void => {
+  const terminal = phases.findIndex((phase) => 'stop' in phase)
+  if (terminal < 0) throw new Error(`standard workflow path for "${node.id}" has no terminal`)
+  phases.splice(terminal, 0, node)
+}
+
+beforeTerminal(v3Kind.branch.cases.data, cleanupNode('data-cleanup'))
+beforeTerminal(v3Kind.branch.cases.bug, cleanupNode('bug-cleanup'))
+beforeTerminal(v3Kind.branch.cases.change, cleanupNode('change-cleanup'))
+
+export const BUILTIN_WORKFLOWS: Workflow[] = [STANDARD_WORKFLOW, STANDARD_WORKFLOW_V2, STANDARD_WORKFLOW_V3]

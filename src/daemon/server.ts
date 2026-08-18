@@ -4,14 +4,14 @@ import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve, extname } from 'node:path'
-import type { Config, ProjectConfig } from '../types.js'
+import type { Config, ProjectConfig, WaitBlocker } from '../types.js'
 import { STAGE_ORDER } from '../types.js'
 import { Governor } from '../governor/governor.js'
 import { readRuns, getRun } from '../store.js'
 import { assertAuthSafe } from '../runner/index.js'
 import { resolveTracker, DEFAULT_INSTRUCTIONS } from '../config.js'
 import { hasCredential, resolveTrackerKey } from '../credentials.js'
-import { isPaused, setPaused, setTicketPaused, pausedTickets } from './control.js'
+import { isPaused, setPaused, setTicketPaused, setTicketIgnored, pausedTickets } from './control.js'
 import {
   cloneStep,
   cloneWorkflow,
@@ -28,6 +28,7 @@ import { planForProject, DEFAULT_WORKFLOW_REF } from '../commands/catalog.js'
 import type { CatalogStep, Workflow } from '../catalog/types.js'
 import { ALL_PERMISSIONS } from '../catalog/types.js'
 import { log } from '../logger.js'
+import { legacyWaitKind } from '../waiting.js'
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web')
 
@@ -83,7 +84,9 @@ export interface ServerHooks {
     activeProject?: string
     activeRuns?: { project: string; ticket: string }[]
     pausedTickets?: string[]
-    resumableTickets?: { key: string; outcome: string; attempts: number }[]
+    ignoredTickets?: { ticketKey: string; at: number; reason?: string }[]
+    stoppingTickets?: string[]
+    resumableTickets?: { key: string; outcome: string; attempts: number; canResume: boolean; blocker?: WaitBlocker }[]
   }
   // project setup (UI-driven); these persist config / credentials on disk
   saveProject: (p: ProjectConfig) => { ok: true } | { error: string }
@@ -91,8 +94,15 @@ export interface ServerHooks {
   setKey: (project: string, key: string) => { ok: true } | { error: string }
   // Edit the global (non-project) settings from the dashboard.
   saveSettings: (patch: Record<string, unknown>) => { ok: true } | { error: string }
-  // Re-run a failed/paused ticket now; `fresh` discards its resume checkpoint.
+  // Continue a resumable ticket now; `fresh` discards its resume checkpoint.
   retryTicket: (ticketKey: string, fresh: boolean) => { ok: true } | { error: string }
+  // Stop a ticket's run immediately (kills its agent), and/or mark it
+  // never-process. Both are independent — either, or both together.
+  stopTicket: (ticketKey: string, opts: { ignore?: boolean; reason?: string }) => {
+    stopped: boolean
+    killed: number
+    ignored: boolean
+  }
 }
 
 // Selectable models for the per-step dropdown. Aliases (opus/sonnet/haiku)
@@ -130,7 +140,7 @@ function tooling(cfg: Config) {
   return toolingCache
 }
 
-const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'deployed', 'partial', 'merged', 'skipped', 'blocked', 'waiting-provider', 'paused', 'failed', 'running']
+const OUTCOMES = ['answered', 'exported', 'pr-opened', 'pr-opened-with-findings', 'deployed', 'partial', 'merged', 'skipped', 'cancelled', 'blocked', 'waiting', 'paused', 'failed', 'running']
 
 function parseDate(v: string | null, endOfDay = false): number | null {
   if (!v) return null
@@ -158,7 +168,12 @@ function queryHistory(p: URLSearchParams) {
 
   let runs = readRuns() // lite summaries from the in-memory index
   if (projects.length) runs = runs.filter((r) => projects.includes(r.project))
-  if (outcomes.length) runs = runs.filter((r) => outcomes.includes(r.outcome))
+  if (outcomes.length) {
+    runs = runs.filter((r) =>
+      outcomes.includes(r.outcome) ||
+      outcomes.some((outcome) => r.outcome === 'waiting' && r.blocker?.kind === legacyWaitKind(outcome)),
+    )
+  }
   if (ticket) runs = runs.filter((r) => r.ticket.toLowerCase().startsWith(ticket))
   if (q) runs = runs.filter((r) => (r.ticketTitle || '').toLowerCase().includes(q) || r.ticket.toLowerCase().includes(q))
   if (from != null) runs = runs.filter((r) => r.startedAt >= from)
@@ -461,6 +476,27 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
         return
       }
       // ---- Pause / resume — system-level (no ticketKey) or per-ticket ----
+      // Stop a run now and/or never process the ticket again. Separate from
+      // /api/pause: a pause is "finish this step, then wait", this is "kill it".
+      if (path === '/api/stop' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const b = body as { ticketKey?: string; ignore?: boolean; reason?: string }
+          if (!b.ticketKey) return json(res, { error: 'ticketKey required' })
+          json(res, hooks.stopTicket(b.ticketKey, { ignore: !!b.ignore, reason: b.reason }))
+        }).catch((e) => serverError(res, e))
+        return
+      }
+      // Clear a never-process mark, making the ticket a normal candidate again.
+      if (path === '/api/unignore' && req.method === 'POST') {
+        readBody(req).then((body) => {
+          const b = body as { ticketKey?: string }
+          if (!b.ticketKey) return json(res, { error: 'ticketKey required' })
+          setTicketIgnored(b.ticketKey, false)
+          log.info(`▶ ${b.ticketKey} un-ignored via dashboard`)
+          json(res, { ok: true, ticketKey: b.ticketKey })
+        }).catch((e) => serverError(res, e))
+        return
+      }
       if (path === '/api/pause' && req.method === 'POST') {
         readBody(req).then((body) => {
           const b = body as { paused?: boolean; ticketKey?: string }
@@ -661,6 +697,8 @@ function buildStatus(cfg: Config, hooks: ServerHooks) {
     activeProject: s.activeProject,
     activeRuns: s.activeRuns ?? [],
     pausedTickets: s.pausedTickets ?? [],
+    ignoredTickets: s.ignoredTickets ?? [],
+    stoppingTickets: s.stoppingTickets ?? [],
     resumableTickets: s.resumableTickets ?? [],
     authMode: cfg.runner.providers[cfg.runner.defaultProvider].authMode,
     provider: cfg.runner.defaultProvider,

@@ -14,6 +14,7 @@ import {
 import { dirname, join } from 'node:path'
 import { DATA_DIR, USAGE_LOG, RUNS_LOG } from './paths.js'
 import type { RunRecord, UsageEvent } from './types.js'
+import { legacyWaitKind } from './waiting.js'
 
 function ensureDir(dir = DATA_DIR) {
   mkdirSync(dir, { recursive: true })
@@ -75,7 +76,43 @@ function runFile(id: string): string {
 
 /** A run with per-stage `detail` stripped — small enough for list payloads. */
 function lite(rec: RunRecord): RunRecord {
-  return { ...rec, stages: rec.stages.map((s) => ({ ...s, detail: undefined })) }
+  const normalized = normalizeRunRecord(rec)
+  return {
+    ...normalized,
+    stages: normalized.stages.map((s) => ({ ...s, detail: undefined })),
+  }
+}
+
+/** Normalize old persisted wait outcomes at the read boundary. */
+export function normalizeRunRecord(rec: RunRecord): RunRecord {
+  const legacyKind = legacyWaitKind(rec.outcome as string)
+  if (!legacyKind && rec.outcome !== 'waiting') return rec
+  const kind = legacyKind || rec.blocker?.kind || 'external'
+  const reason = rec.blocker?.reason || rec.waitReason || waitReasonFromStages(rec) || rec.summary || 'Waiting for an external condition.'
+  return {
+    ...rec,
+    outcome: 'waiting',
+    blocker: rec.blocker || {
+      kind,
+      reason,
+      resume: kind === 'provider' ? 'automatic' : 'manual',
+      provider: rec.waitingProvider,
+      resumeAt: rec.resumeAt,
+    },
+  }
+}
+
+// Older waiting records may only name the reason in the model output. Recover
+// it while the full record is in memory, before stage detail is stripped.
+function waitReasonFromStages(rec: RunRecord): string | undefined {
+  if (rec.outcome !== 'waiting' && !(rec.outcome as string).startsWith('waiting-')) return undefined
+  for (let i = rec.stages.length - 1; i >= 0; i--) {
+    const detail = rec.stages[i].detail || ''
+    const matches = [...detail.matchAll(/^\s*VERDICT:\s*wait(?:\s*[—-]\s*(.+))?\s*$/gim)]
+    const reason = matches.at(-1)?.[1]?.trim()
+    if (reason) return reason
+  }
+  return undefined
 }
 
 function ensureIndex(): Map<string, RunRecord> {
@@ -118,9 +155,10 @@ function migrateLegacyRunsLog(): void {
 
 /** Write/update a run — in place, 1× per call. Named appendRun for callers. */
 export function appendRun(rec: RunRecord): void {
+  const normalized = normalizeRunRecord(rec)
   ensureDir(RUNS_DIR)
-  atomicWrite(runFile(rec.id), JSON.stringify(rec))
-  ensureIndex().set(rec.id, lite(rec))
+  atomicWrite(runFile(normalized.id), JSON.stringify(normalized))
+  ensureIndex().set(normalized.id, lite(normalized))
 }
 
 /** Lightweight run summaries (no stage detail), newest first. */
@@ -134,7 +172,7 @@ export function getRun(id: string): RunRecord | undefined {
   const f = runFile(id)
   if (existsSync(f)) {
     try {
-      return JSON.parse(readFileSync(f, 'utf8')) as RunRecord
+      return normalizeRunRecord(JSON.parse(readFileSync(f, 'utf8')) as RunRecord)
     } catch {
       /* fall through to index */
     }

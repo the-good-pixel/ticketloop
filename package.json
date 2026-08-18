@@ -1,6 +1,6 @@
 {
   "name": "@the-good-pixel/ticketloop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A local, subscription-powered Claude or Codex agent that watches your tracker and runs a configurable dev-cycle loop with a quota and history dashboard.",
   "keywords": [
     "coding-agent",
@@ -26,7 +26,7 @@
     "start": "tsx src/cli.ts",
     "dev": "tsx watch src/cli.ts watch",
     "typecheck": "tsc --noEmit",
-    "smoke": "tsx scripts/smoke-workflows.ts && tsx scripts/smoke-support.ts",
+    "smoke": "tsx scripts/smoke-workflows.ts && tsx scripts/smoke-support.ts && tsx scripts/smoke-watchdog.ts && tsx scripts/smoke-runner-timeout.ts",
     "check": "npm run typecheck && node --check src/web/app.js && node --check src/web/catalog.js && node --check src/web/wfdiagram.js && npm run smoke",
     "test": "npm run check",
     "prepack": "npm run check"

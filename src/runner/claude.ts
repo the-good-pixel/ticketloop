@@ -3,6 +3,7 @@ import { registerChild, unregisterChild } from './children.js'
 import { log } from '../logger.js'
 import type { AgentResult, RunAgentOpts } from './types.js'
 import { classifyKind } from '../loop/classify.js'
+import { createStageWatchdog, stageTimeoutMessage } from './watchdog.js'
 
 // Claude's real "you've hit your limit" signal — the reliable backstop.
 export function isRateLimitText(t: string): boolean {
@@ -108,17 +109,12 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
     // Track this child's process group so it can be killed on shutdown / reaped
     // on the next startup if the daemon dies.
     const pgid = child.pid || 0
-    const inflightKey = pgid ? registerChild(pgid, { model }) : ''
+    const inflightKey = pgid ? registerChild(pgid, { model, ticketKey: o.ticketKey }) : ''
     const reap = () => {
       if (pgid) unregisterChild(pgid, inflightKey)
     }
 
     let settled = false
-    let timedOut = false
-    // stageTimeoutSec <= 0 (or null) = NO wall-clock timeout — coding tasks can
-    // legitimately run for hours. A hung stage then blocks until the daemon is
-    // restarted (which kills the child via the process-group handler).
-    const timeoutMs = (o.runner.stageTimeoutSec ?? 900) * 1000
     const killTree = (sig: NodeJS.Signals) => {
       try {
         if (child.pid) process.kill(-child.pid, sig)
@@ -126,14 +122,15 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
         try { child.kill(sig) } catch { /* already gone */ }
       }
     }
-    const timer =
-      timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true
-            killTree('SIGTERM')
-            setTimeout(() => killTree('SIGKILL'), 3000)
-          }, timeoutMs)
-        : null
+    let forceKillTimer: NodeJS.Timeout | null = null
+    const watchdog = createStageWatchdog(
+      o.runner.stageTimeoutSec ?? 900,
+      o.runner.stageIdleTimeoutSec ?? 1800,
+      () => {
+        killTree('SIGTERM')
+        forceKillTimer = setTimeout(() => killTree('SIGKILL'), 3000)
+      },
+    )
 
     let text = ''
     let usage = {
@@ -150,6 +147,7 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
     let stderr = ''
 
     child.stdout.on('data', (d) => {
+      watchdog.touch()
       buf += d.toString()
       let idx: number
       while ((idx = buf.indexOf('\n')) >= 0) {
@@ -178,23 +176,29 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
         }
       }
     })
-    child.stderr.on('data', (d) => (stderr += d.toString()))
+    child.stderr.on('data', (d) => {
+      watchdog.touch()
+      stderr += d.toString()
+    })
 
     child.on('error', (err) => {
       if (settled) return
       settled = true
-      if (timer) clearTimeout(timer)
+      watchdog.clear()
+      if (forceKillTimer) clearTimeout(forceKillTimer)
       reap()
       resolve(errorResult(model, `failed to spawn "${provider.bin}": ${err.message}`))
     })
     child.on('close', (code) => {
       if (settled) return
       settled = true
-      if (timer) clearTimeout(timer)
+      watchdog.clear()
+      if (forceKillTimer) clearTimeout(forceKillTimer)
       reap()
       if (stderr.trim()) log.debug(`claude stderr: ${stderr.trim().slice(0, 500)}`)
-      if (timedOut) {
-        resolve(errorResult(model, `stage timed out after ${o.runner.stageTimeoutSec ?? 900}s and was killed`))
+      const timeoutKind = watchdog.timedOut()
+      if (timeoutKind) {
+        resolve(errorResult(model, stageTimeoutMessage(timeoutKind, o.runner)))
         return
       }
       // A retry event followed by a successful result is not an exhausted
@@ -249,7 +253,7 @@ function errorResult(model: string, msg: string): AgentResult {
 
 const MOCK_TEXTS: Record<string, string> = {
   // Overwritten below with a KIND derived from the ticket in the prompt.
-  triage: 'DECISION: eligible\nTriage complete.',
+  triage: 'DECISION: eligible\nREASON: mock triage.',
   answer:
     'The 15-minute expiry comes from the access-JWT TTL in auth/session; the ' +
     'rolling refresh cookie keeps you signed in past it. See auth/session.go.\n' +
@@ -276,6 +280,7 @@ const MOCK_TEXTS: Record<string, string> = {
   comment:
     'Updated the submit button label to 立即提交. PR: https://github.com/demo/demo-app/pull/142 — please review.\n' +
     '— 🤖 via ticketloop\nCOMMENT_URL: https://linear.app/demo/issue/DEMO/#comment-mockcomment',
+  cleanup: 'Removed temporary files and stopped local background processes.\nVERDICT: pass',
 }
 
 MOCK_TEXTS.clarify = MOCK_TEXTS.answer
@@ -293,6 +298,7 @@ function mockTriageKind(prompt: string): string {
 let mockVerifyFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFIES) || 0
 let mockReviewFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_REVIEWS) || 0
 let mockShipFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_SHIPS) || 0
+let mockShipWaitsLeft = Number(process.env.TICKETLOOP_MOCK_WAIT_SHIPS) || 0
 let mockDeployFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_DEPLOYS) || 0
 let mockDeployWaitsLeft = Number(process.env.TICKETLOOP_MOCK_WAIT_DEPLOYS) || 0
 let mockVerifyDevFailsLeft = Number(process.env.TICKETLOOP_MOCK_FAIL_VERIFYDEV) || 0
@@ -318,8 +324,16 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
   // produce distinct PRs the engine can parse into rec.prs.
   let text = MOCK_TEXTS[kind] || 'ok'
   // Test hook: make triage classify the ticket as "no action needed".
-  if (kind === 'triage') text = `DECISION: eligible\nKIND: ${mockTriageKind(o.prompt)}\nTriage complete.`
-  if (kind === 'triage' && process.env.TICKETLOOP_MOCK_TRIAGE_NOACTION) text = 'DECISION: no-action'
+  if (kind === 'triage') {
+    const k = mockTriageKind(o.prompt)
+    text = `DECISION: eligible\nKIND: ${k}\nREASON: latest comment asks for ${k} work on this ticket.`
+  }
+  // Test hooks: exercise both triage early-exits, each WITH a reason so the
+  // run record's summary can be asserted on.
+  if (kind === 'triage' && process.env.TICKETLOOP_MOCK_TRIAGE_NOACTION)
+    text = 'DECISION: no-action\nREASON: latest comment "UAT passed, ready for PROD" is a sign-off with no new ask.'
+  if (kind === 'triage' && process.env.TICKETLOOP_MOCK_TRIAGE_INELIGIBLE)
+    text = 'DECISION: ineligible\nREASON: the fix requires a DB migration under db/migrations, which is off-limits.'
   if (kind === 'ship') {
     const repo = o.cwd.split('/').pop() || 'demo-app'
     const n = 100 + (repo.length % 90)
@@ -333,9 +347,12 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
         totalTokens: inp + cacheRead, costUsd: 0, provider: 'claude', model, isError: true,
       }
     }
-    // TICKETLOOP_MOCK_FAIL_SHIPS=N: first N ships open the PR but report red CI,
-    // so you can watch ship route back to fix.
-    if (mockShipFailsLeft > 0) {
+    // TICKETLOOP_MOCK_WAIT_SHIPS=N: first N ships preserve the open PR while an
+    // external CI service is unavailable, so resume can revalidate it later.
+    if (mockShipWaitsLeft > 0) {
+      mockShipWaitsLeft--
+      text = `Pushed, opened ${url}\nCI is unavailable.\nVERDICT: wait[external] — GitHub Actions is unavailable`
+    } else if (mockShipFailsLeft > 0) {
       mockShipFailsLeft--
       text = `Pushed, opened ${url}\nCI: the build check is RED.\nVERDICT: fail — CI build failing on the PR`
     } else {
@@ -361,7 +378,7 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
   // separate, since nothing is wrong with the code.
   if (kind === 'deploy-dev' && mockDeployWaitsLeft > 0) {
     mockDeployWaitsLeft--
-    text = 'Mock deploy-dev: the dev deployment is queued for manual approval.\nVERDICT: wait — awaiting approval'
+    text = 'Mock deploy-dev: the dev deployment is queued for manual approval.\nVERDICT: wait[approval] — awaiting approval'
   } else if (kind === 'deploy-dev' && mockDeployFailsLeft > 0) {
     mockDeployFailsLeft--
     text = 'Mock deploy-dev: the dev pipeline failed to go green.\nVERDICT: fail — injected mock deploy failure'

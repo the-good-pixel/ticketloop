@@ -98,6 +98,9 @@ export interface RunnerConfig {
   // kill a stage's coding-agent subprocess after this many seconds (prevents hangs
   // from freezing the loop). Default 900 (15 min).
   stageTimeoutSec?: number
+  // kill a live stage that produces no stdout/stderr for this many seconds.
+  // This remains active when stageTimeoutSec=0 allows unlimited total runtime.
+  stageIdleTimeoutSec?: number
 }
 
 export interface ServerConfig {
@@ -269,7 +272,11 @@ export interface ProviderQuotaSnapshot {
   windows: ProviderQuotaWindow[]
   limitReached: boolean
   reachedType?: string | null
-  source: 'provider-status' | 'provider-error'
+  // 'provider-status' = we asked the provider and it answered, so `fetchedAt` is
+  // when we asked. 'local-cache' = a fallback read of something the provider's
+  // own CLI left on disk, so `fetchedAt` is only as fresh as that file.
+  // 'unpolled' = placeholder for a provider we have never successfully read.
+  source: 'provider-status' | 'provider-error' | 'local-cache' | 'unpolled'
 }
 
 export type ProviderFailureKind =
@@ -299,14 +306,24 @@ export type RunOutcome =
   | 'partial' // multi-repo: ≥1 PR opened AND ≥1 repo failed to ship
   | 'merged'
   | 'skipped' // did not qualify
+  | 'cancelled' // a human stopped this run on purpose (not a failure, never retried)
   | 'blocked' // hit a safety guardrail
-  | 'waiting-provider' // provider reported exhausted quota; resume when available
-  | 'waiting-approval' // a human must approve something (a deploy, a merge)
-  | 'waiting-deployment' // a deployment is queued/in flight; resume when it lands
-  | 'waiting-external' // some other external condition must change first
+  | 'waiting' // workflow suspended until the structured blocker changes
   | 'paused' // pause requested mid-run; checkpointed, resume to continue
   | 'failed'
   | 'running'
+
+export type WaitKind = 'provider' | 'approval' | 'deployment' | 'external'
+export type WaitResume = 'automatic' | 'manual'
+
+export interface WaitBlocker {
+  kind: WaitKind
+  reason: string
+  resume: WaitResume
+  provider?: AgentProvider
+  resumeAt?: number
+  artifactKey?: string
+}
 
 export interface StageRecord {
   stage: StageName
@@ -352,11 +369,20 @@ export interface RunRecord {
   startedAt: number
   endedAt?: number
   outcome: RunOutcome
+  // Why the run ended the way it did, in one line, for EVERY outcome — not just
+  // failures. `error` only ever held the failure cases, so a skipped ticket lost
+  // its explanation entirely and the dashboard had nothing to show but the word
+  // "skipped".
+  summary?: string
   stages: StageRecord[]
   prUrl?: string // first/primary PR — existing UI + history keep working
   prs?: PrRecord[] // populated on multi-repo runs
   commentUrl?: string
   error?: string
+  blocker?: WaitBlocker
+  // Legacy waiting fields. Reads normalize them into `blocker`; keep the
+  // optional shape so old run files remain compatible without an eager rewrite.
+  waitReason?: string
   waitingProvider?: AgentProvider
   resumeAt?: number
   totalTokens: number

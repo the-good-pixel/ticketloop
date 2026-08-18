@@ -180,7 +180,7 @@ finally:
 
 outcomes:
   success: deployed
-  waiting: waiting-external
+  waiting: waiting
   partial: pr-opened-with-findings
   failed: failed
 ```
@@ -207,7 +207,7 @@ Each workflow node maps those results to transitions:
 - `continue`
 
 Provider quota exhaustion is a harness event, not a model verdict. It always suspends the
-current node as `waiting-provider` and keeps the checkpoint.
+current node with `outcome: waiting` and `blocker.kind: provider`, then keeps the checkpoint.
 
 Typical policies:
 
@@ -227,18 +227,26 @@ The validator rejects undefined transitions or `repair` transitions outside a lo
 Waiting is neither failure nor pause. It means the workflow cannot proceed until a known
 external condition changes.
 
-Runtime outcomes:
+There is one runtime outcome: `waiting`. The reason is structured separately:
 
-- `waiting-provider`
-- `waiting-approval`
-- `waiting-deployment`
-- `waiting-external`
+```yaml
+outcome: waiting
+blocker:
+  kind: provider | approval | deployment | external
+  reason: GitHub Actions returned HTTP 429
+  resume: automatic | manual
+  resumeAt: 1787043600000 # optional epoch milliseconds
+```
+
+Model verdicts name the blocker explicitly (`VERDICT: wait[approval] — <reason>`,
+`wait[deployment]`, or `wait[external]`). Provider waits come from the harness, never from
+free-form model text. This keeps lifecycle state stable without guessing from prose.
 
 A waiting run:
 
 1. Saves the current node, resolved workflow snapshot, artifacts, and workspace.
 2. Releases the project execution slot.
-3. Stores `waitingReason`, optional `resumeAt`, and the responsible provider or artifact.
+3. Stores the structured blocker, optional `resumeAt`, and the responsible provider or artifact.
 4. May execute `finally` nodes configured for `waiting` to post an interim update.
 5. Resumes at the waiting node and follows its `resumePolicy`.
 
@@ -297,7 +305,8 @@ artifacts:
   devDeployment:
     type: deployment
     environment: dev
-    status: waiting-approval
+    status: pending
+    approvalRequired: true
 ```
 
 Artifacts are available to later nodes and final reporting. A `revalidate` step refreshes
@@ -562,7 +571,7 @@ Implementation should not start until:
 | 0 — runtime semantics in the current engine | not started (needs its own approved plan) |
 | 1 — runtime types and policy | **done** — `src/catalog/types.ts`, plus `permissions` / `executionProfiles` / `workflow` on config |
 | 2 — catalog schemas, compiler, validator | **done** — `store.ts`, `compile.ts`, `validate.ts`, and the `steps` / `workflows` / `workflow show` / `workflow validate` / `catalog clone` CLI |
-| 3 — standard workflow expressed as data | **done** — `builtin-steps.ts` (14 steps) + `builtin-workflows.ts` (`standard@1` retained for history; fail-closed `standard@2` is current), compiling and validating clean |
+| 3 — standard workflow expressed as data | **done** — `builtin-steps.ts` (15 steps) + `builtin-workflows.ts` (`standard@1`/`@2` retained for history; `standard@3` adds cleanup), compiling and validating clean |
 | 4 — interpreter behind a feature flag | **done** — `src/loop/interpreter.ts`, opt-in per project via `engine: workflow` |
 | 5 — catalog CLI and dashboard | **done** — Workflows view: browse steps/workflows, compiled-plan preview per project, effective profile + required permissions, built-ins protected |
 | 6 — workflow builder | **done** — SVG diagram of the compiled plan (foldable branch cases, fit-to-pane zoom); clone to draft, then edit a node's step/transitions/instruction, a loop's bounds, and the structure itself (move, insert, remove, add gate); continuous validation; save as a new version; assign to a project |

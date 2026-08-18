@@ -7,10 +7,12 @@
 
 import { log } from '../logger.js'
 import type { StepResult } from '../catalog/types.js'
+import type { WaitKind } from '../types.js'
 
 export interface ParsedResult {
   result: StepResult
   reason: string
+  blockerKind?: WaitKind
 }
 
 // Synonyms the models actually emit, mapped to the four results.
@@ -29,16 +31,21 @@ const SKIP = /^(skip|skipped|n\/?a|not[-\s]?applicable)$/i
  * backstops, not this line.
  */
 export function parseResult(text: string): ParsedResult {
-  const matches = [...(text || '').matchAll(/VERDICT:\s*([a-z/\\-]+)\b(.*)/gi)]
+  const matches = [
+    ...(text || '').matchAll(
+      /VERDICT:\s*([a-z/\\-]+)(?:\[(provider|approval|deployment|external)\])?(.*)/gi,
+    ),
+  ]
   if (!matches.length) {
     log.warn('gate emitted no VERDICT line — treating as pass (fail-open)')
     return { result: 'pass', reason: '' }
   }
   const last = matches[matches.length - 1]
   const word = last[1]
-  const reason = (last[2] || '').replace(/^\s*[—:-]\s*/, '').trim()
+  const blockerKind = last[2] as WaitKind | undefined
+  const reason = (last[3] || '').replace(/^\s*[—:-]\s*/, '').trim()
   if (PASS.test(word)) return { result: 'pass', reason }
-  if (WAIT.test(word)) return { result: 'wait', reason }
+  if (WAIT.test(word)) return { result: 'wait', reason, blockerKind }
   if (SKIP.test(word)) return { result: 'skip', reason }
   if (FAIL.test(word)) return { result: 'fail', reason }
   // An unrecognized word is a real answer we cannot read. Treat it as a failure
@@ -52,4 +59,18 @@ export function parseRouteField(text: string, field: string): string | undefined
   const re = new RegExp(`${field}:\\s*([\\w./-]+)`, 'i')
   const m = (text || '').match(re)
   return m ? m[1].trim().toLowerCase() : undefined
+}
+
+// A route step routes on a value, but the value alone never explains itself.
+// "skipped — ineligible" tells a user nothing they could act on. This reads the
+// one-line REASON a route step states alongside its decision, so the run record
+// can say WHY it stopped. Last wins, matching parseResult: a model may think
+// aloud before concluding.
+const MAX_REASON = 300
+export function parseRouteReason(text: string): string | undefined {
+  const matches = [...(text || '').matchAll(/^[ \t]*REASON:[ \t]*(.+)$/gim)]
+  if (!matches.length) return undefined
+  const reason = matches[matches.length - 1][1].trim()
+  if (!reason) return undefined
+  return reason.length > MAX_REASON ? `${reason.slice(0, MAX_REASON - 1).trimEnd()}…` : reason
 }

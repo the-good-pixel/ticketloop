@@ -10,6 +10,10 @@ export interface RunAgentOpts {
   mock?: boolean
   mockKind?: string
   env?: Record<string, string>
+  /** "<project>:<identifier>" of the run this call belongs to. Recorded against
+   *  the spawned process group so a stop request can kill THIS ticket's agent
+   *  without touching other projects' runs. */
+  ticketKey?: string
 }
 
 export interface AgentResult {

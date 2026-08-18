@@ -35,6 +35,17 @@ function fmtClock(ms) {
   return d.toLocaleString();
 }
 
+function fmtHistoryDate(ms) {
+  if (!ms) return 'Unknown date';
+  return new Date(ms).toLocaleString([], {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 function fmtRelative(ms) {
   if (!ms) return '';
   const diff = Date.now() - ms;
@@ -104,7 +115,15 @@ const state = {
   expandedTickets: new Set(), // ticket keys currently expanded (their run list)
   detailCache: new Map(), // id -> RunRecord (full)
   runsById: new Map(),
+  resumable: new Map(), // ticket key -> daemon resume state
+  systemPaused: false,
 };
+const retryPending = new Set();
+
+let lastStatus = null;
+let lastActivity = [];
+let systemPausePending = null;
+const ticketPausePending = new Map();
 
 const OUTCOME_LABELS = {
   answered: 'Answer posted',
@@ -116,17 +135,73 @@ const OUTCOME_LABELS = {
   merged: 'Merged',
   skipped: 'No action needed',
   blocked: 'Safety block',
-  'waiting-provider': 'Waiting for model quota',
-  'waiting-approval': 'Waiting for approval',
-  'waiting-deployment': 'Waiting for deployment',
-  'waiting-external': 'Waiting on another system',
+  waiting: 'Waiting',
   paused: 'Paused',
+  cancelled: 'Stopped by you',
   failed: 'Needs attention',
   running: 'Running',
 };
 
-function outcomeLabel(outcome) {
+function outcomeLabel(outcome, blocker) {
+  if (outcome === 'waiting') {
+    if (blocker?.kind === 'provider') return 'Waiting for model quota';
+    if (blocker?.kind === 'approval') return 'Waiting for approval';
+    if (blocker?.kind === 'deployment') return 'Waiting for deployment';
+    if (blocker?.kind === 'external') return 'Waiting on another system';
+  }
   return OUTCOME_LABELS[outcome] || outcome || 'Unknown';
+}
+
+function isWaiting(run) {
+  return run?.outcome === 'waiting';
+}
+
+function waitTitle(blocker) {
+  if (blocker?.kind === 'provider') return 'Waiting for model quota';
+  if (blocker?.kind === 'deployment') return 'Deployment has not started';
+  if (blocker?.kind === 'approval') return 'A person needs to approve the next step';
+  return 'An external service is blocking progress';
+}
+
+function renderWaitNotice(run, ticketKey) {
+  const notice = el('section', 'wait-notice');
+  notice.appendChild(el('span', 'wait-notice-mark', '!'));
+  const copy = el('div', 'wait-notice-copy');
+  const blocker = run.blocker || { kind: 'external', resume: 'manual' };
+  copy.appendChild(el('strong', null, waitTitle(blocker)));
+  copy.appendChild(el('p', null, blocker.reason || run.summary || run.error || 'The run is waiting for an external condition.'));
+
+  const resumeState = state.resumable.get(ticketKey);
+  const actions = el('div', 'wait-notice-actions');
+  if (blocker.resume === 'automatic' && resumeState?.canResume) {
+    actions.appendChild(el('span', 'wait-notice-legacy', 'Automatic resume'));
+    const when = blocker.resumeAt ? ' after ' + fmtClock(blocker.resumeAt) : ' when capacity is available';
+    actions.appendChild(el('span', 'wait-notice-help', 'Ticketloop will continue' + when + '.'));
+  } else if (resumeState?.canResume) {
+    const pending = retryPending.has(ticketKey);
+    const resume = el('button', 'btn btn-wait btn-sm', pending ? 'Starting…' : state.systemPaused ? 'Resume all first' : 'Continue run');
+    resume.type = 'button';
+    resume.disabled = pending || state.systemPaused;
+    resume.title = state.systemPaused
+      ? 'Ticket processing is paused at the system level'
+      : 'Recheck the external step from the saved checkpoint';
+    resume.addEventListener('click', (event) => {
+      event.stopPropagation();
+      doRetry(ticketKey, false);
+    });
+    actions.appendChild(resume);
+    actions.appendChild(el('span', 'wait-notice-help', 'Completed code steps stay saved. The blocking step is checked again.'));
+  } else {
+    actions.appendChild(el('span', 'wait-notice-legacy', 'No safe checkpoint'));
+    actions.appendChild(el(
+      'span',
+      'wait-notice-help',
+      'This older wait lost its checkpoint. Complete the external step manually; do not restart the whole ticket.',
+    ));
+  }
+  copy.appendChild(actions);
+  notice.appendChild(copy);
+  return notice;
 }
 
 let connOk = true;
@@ -137,15 +212,32 @@ function setConn(ok) {
 
 // ---- rendering: header/status ----
 function renderStatus(s) {
+  lastStatus = s;
+  const paused = systemPausePending == null ? !!s.paused : systemPausePending;
+  state.systemPaused = paused;
+  state.resumable = new Map((s.resumableTickets || []).map((item) => [item.key, item]));
   $('#statusDot').classList.toggle('running', !!s.running);
-  $('#statusDot').classList.toggle('paused', !!s.paused);
-  $('#statusDot').title = s.paused ? 'loop paused' : s.running ? 'loop running' : 'loop idle';
+  $('#statusDot').classList.toggle('paused', paused);
+  $('#statusDot').title = paused ? 'ticket processing paused' : s.running ? 'ticket processing running' : 'ticket processing idle';
   const pauseBtn = $('#pauseBtn');
   if (pauseBtn) {
-    pauseBtn.textContent = s.paused ? '▶ Resume' : '⏸ Pause';
-    pauseBtn.classList.toggle('is-paused', !!s.paused);
-    pauseBtn.dataset.paused = s.paused ? '1' : '';
+    const pending = systemPausePending != null;
+    pauseBtn.textContent = pending
+      ? paused ? 'Pausing…' : 'Resuming…'
+      : paused ? '▶ Resume all' : '⏸ Pause all';
+    pauseBtn.classList.toggle('is-paused', paused);
+    pauseBtn.classList.toggle('is-pending', pending);
+    pauseBtn.dataset.paused = paused ? '1' : '';
+    pauseBtn.disabled = pending;
+    pauseBtn.setAttribute('aria-pressed', String(paused));
+    pauseBtn.setAttribute('aria-busy', String(pending));
+    pauseBtn.title = pending
+      ? paused ? 'Sending pause request…' : 'Resuming ticket processing…'
+      : paused
+        ? 'Resume ticket processing'
+        : 'Pause new work now; active steps finish at their next safe boundary';
   }
+  renderGlobalPauseState(s, paused);
   const mode = s.authMode === 'api' ? 'API' : 'subscription';
   $('#planBadge').textContent = (s.provider || 'claude') + ' · ' + mode;
 
@@ -161,6 +253,27 @@ function renderStatus(s) {
   } else {
     warnBox.hidden = true;
   }
+}
+
+function renderGlobalPauseState(status, paused) {
+  const box = $('#pauseState');
+  if (!box) return;
+  if (!paused) {
+    box.hidden = true;
+    return;
+  }
+
+  const activeCount = Array.isArray(status.activeRuns) ? status.activeRuns.length : 0;
+  const pending = systemPausePending === true;
+  const finishing = activeCount > 0;
+  $('#pauseStateTitle').textContent = pending || finishing
+    ? 'Pause requested'
+    : 'Ticket processing is paused';
+  $('#pauseStateDetail').textContent = finishing
+    ? activeCount + ' active ' + (activeCount === 1 ? 'run is' : 'runs are') + ' finishing the current step. No new tickets will start.'
+    : 'No new tickets will start until you resume processing.';
+  box.classList.toggle('is-finishing', finishing);
+  box.hidden = false;
 }
 
 // ---- rendering: quota meter card ----
@@ -193,7 +306,13 @@ function renderProviderQuota(snapshot) {
     row.appendChild(reset);
     node.appendChild(row);
   });
-  if (snapshot.fetchedAt) node.appendChild(el('div', 'meter-resets', 'Provider status · as of ' + fmtRelative(snapshot.fetchedAt)));
+  if (snapshot.fetchedAt) {
+    const cached = snapshot.source === 'local-cache';
+    const origin = cached ? 'Cached from Claude Code' : 'Polled from provider';
+    node.appendChild(el('div', 'meter-resets' + (cached ? ' is-stale' : ''), origin + ' · as of ' + fmtRelative(snapshot.fetchedAt)));
+  } else {
+    node.appendChild(el('div', 'meter-resets is-stale', 'Not polled yet'));
+  }
   return node;
 }
 
@@ -201,6 +320,14 @@ function renderUsage(u) {
   const grid = $('#quotaGrid');
   grid.replaceChildren();
   (u.providers || []).forEach((snapshot) => grid.appendChild(renderProviderQuota(snapshot)));
+}
+
+function appendWhy(main, run) {
+  if (run.error) {
+    main.appendChild(el('div', 'run-error', run.error));
+  } else if (run.summary) {
+    main.appendChild(el('div', 'run-why', run.summary));
+  }
 }
 
 // ---- rendering: stage tracker (compact pills) ----
@@ -261,10 +388,11 @@ function renderTicketGroup(g) {
 
   // At-a-glance: the latest run's progress.
   main.appendChild(renderStageTracker(latest.stages));
-  if (latest.error) main.appendChild(el('div', 'run-error', latest.error));
+  if (isWaiting(latest)) main.appendChild(renderWaitNotice(latest, g.key));
+  else appendWhy(main, latest);
 
   // Resume / Restart act on the TICKET (they continue its latest work).
-  if (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked' || latest.outcome === 'waiting-provider') {
+  if (!isWaiting(latest) && (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked')) {
     const actions = el('div', 'run-actions');
     const resume = el('button', 'btn btn-ghost btn-sm', '▶ Continue run');
     resume.title = 'Continue this run from its checkpoint (already-done steps are reused)';
@@ -284,7 +412,7 @@ function renderTicketGroup(g) {
   head.appendChild(main);
 
   const side = el('div', 'run-side');
-  side.appendChild(el('span', 'badge badge-' + (latest.outcome || 'skipped'), outcomeLabel(latest.outcome)));
+  side.appendChild(el('span', 'badge badge-' + (latest.outcome || 'skipped'), outcomeLabel(latest.outcome, latest.blocker)));
   const metrics = el('div', 'run-metrics');
   metrics.appendChild(el('span', null, fmtTokens(g.totalTokens) + ' tok'));
   metrics.appendChild(el('span', null, fmtMoney(g.costUsd)));
@@ -322,12 +450,12 @@ function renderRun(r) {
   if (r.resumes) sub.appendChild(el('span', null, '↻ resumed ' + r.resumes + '×'));
   main.appendChild(sub);
   main.appendChild(renderStageTracker(r.stages));
-  if (r.error) main.appendChild(el('div', 'run-error', r.error));
+  appendWhy(main, r);
   head.appendChild(main);
 
   // side column
   const side = el('div', 'run-side');
-  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome)));
+  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome, r.blocker)));
   const metrics = el('div', 'run-metrics');
   metrics.appendChild(el('span', null, fmtTokens(r.totalTokens) + ' tok'));
   metrics.appendChild(el('span', null, fmtMoney(r.costUsd)));
@@ -345,6 +473,79 @@ function renderRun(r) {
   if (state.expanded.has(r.id)) {
     li.appendChild(renderDetail(r.id));
   }
+  return li;
+}
+
+// History needs a complete identity and outcome at a glance. The Activity
+// renderer omits those fields because each run sits inside a ticket card.
+function renderHistoryRun(r) {
+  const li = el('li', 'run history-run');
+  li.dataset.id = r.id;
+  li.dataset.outcome = r.outcome || 'skipped';
+
+  const head = el('div', 'history-run-head');
+  const main = el('div', 'history-run-main');
+
+  const identity = el('div', 'history-run-identity');
+  if (r.project) identity.appendChild(el('span', 'history-project', r.project));
+  const ticket = el(r.ticketUrl ? 'a' : 'span', 'history-ticket-key', r.ticket || 'Unknown ticket');
+  if (r.ticketUrl) {
+    ticket.href = r.ticketUrl;
+    ticket.target = '_blank';
+    ticket.rel = 'noopener';
+    ticket.title = 'Open ' + (r.ticket || 'ticket');
+  }
+  identity.appendChild(ticket);
+  main.appendChild(identity);
+
+  main.appendChild(el('h2', 'history-run-title', r.ticketTitle || '(untitled ticket)'));
+
+  const timing = el('div', 'history-run-timing');
+  const started = el('time', null, fmtHistoryDate(r.startedAt));
+  started.dateTime = new Date(r.startedAt).toISOString();
+  timing.appendChild(started);
+  timing.appendChild(el('span', null, fmtDuration(r.startedAt, r.endedAt) + ' elapsed'));
+  if (r.resumes) timing.appendChild(el('span', null, 'Resumed ' + r.resumes + '×'));
+  main.appendChild(timing);
+
+  const summary = r.summary || r.error;
+  if (!isWaiting(r) && summary)
+    main.appendChild(el('p', 'history-run-summary' + (r.error ? ' is-error' : ''), summary));
+  if (isWaiting(r))
+    main.appendChild(renderWaitNotice(r, (r.project || '') + ':' + (r.ticket || '')));
+
+  const flow = el('div', 'history-run-flow');
+  flow.appendChild(el('span', 'history-flow-label', 'Work'));
+  flow.appendChild(renderStageTracker(r.stages));
+  main.appendChild(flow);
+  head.appendChild(main);
+
+  const side = el('div', 'history-run-side');
+  side.appendChild(el('span', 'badge badge-' + (r.outcome || 'skipped'), outcomeLabel(r.outcome, r.blocker)));
+
+  const metrics = el('div', 'history-run-metrics');
+  const tokenMetric = el('span');
+  tokenMetric.appendChild(el('small', null, 'Tokens'));
+  tokenMetric.appendChild(el('strong', null, fmtTokens(r.totalTokens)));
+  metrics.appendChild(tokenMetric);
+  const costMetric = el('span');
+  costMetric.appendChild(el('small', null, 'Cost'));
+  costMetric.appendChild(el('strong', null, fmtMoney(r.costUsd)));
+  metrics.appendChild(costMetric);
+  side.appendChild(metrics);
+
+  const open = state.expanded.has(r.id);
+  const expand = el('button', 'history-expand', open ? 'Hide details' : 'View details');
+  expand.type = 'button';
+  expand.setAttribute('aria-expanded', String(open));
+  expand.setAttribute('aria-label', (open ? 'Hide details for ' : 'View details for ') + (r.ticket || 'this run'));
+  expand.appendChild(el('span', 'history-expand-arrow', '↓'));
+  expand.addEventListener('click', () => toggleExpand(r.id));
+  side.appendChild(expand);
+  head.appendChild(side);
+  li.appendChild(head);
+
+  if (open) li.appendChild(renderDetail(r.id));
   return li;
 }
 
@@ -583,9 +784,12 @@ function runningStageName(run) {
 
 let pauseNote = ''; // transient warning shown after a ticket resume that can't run yet
 
+const stopping = new Set();
+
 function renderLiveMonitor(status, activity) {
   const box = $('#liveMonitor');
   status = status || {};
+  lastActivity = Array.isArray(activity) ? activity : [];
   const live = isLive(status, activity);
   if (!live && !pauseNote) {
     box.hidden = true;
@@ -596,7 +800,7 @@ function renderLiveMonitor(status, activity) {
   // Parallel runs: one row per active run (one per project). Fall back to the
   // running runs in the activity feed if the daemon didn't report activeRuns.
   const runs = Array.isArray(status.activeRuns) && status.activeRuns.length
-    ? status.activeRuns.map((a) => ({ project: a.project, ticket: a.ticket, run: findRunByTicket(activity, a.ticket) }))
+    ? status.activeRuns.map((a) => ({ project: a.project, ticket: a.ticket, run: findRunByTicket(activity, a.ticket, a.project) }))
     : (Array.isArray(activity) ? activity : [])
         .filter((r) => r && r.outcome === 'running')
         .map((r) => ({ project: r.project, ticket: r.ticket, run: r }));
@@ -605,51 +809,213 @@ function renderLiveMonitor(status, activity) {
   if (pauseNote) box.appendChild(el('div', 'live-note', pauseNote));
   if (runs.length > 1) box.appendChild(el('div', 'live-head mono', runs.length + ' running in parallel'));
 
+  const pausedTickets = new Set(Array.isArray(status.pausedTickets) ? status.pausedTickets : []);
   runs.forEach(({ project, ticket, run }) => {
     const step = runningStageName(run) || '…';
+    const ticketKey = project + ':' + ticket;
+    const pending = ticketPausePending.get(ticketKey);
+    const globallyPaused = !!status.paused || systemPausePending === true;
+    const pauseRequested = globallyPaused || pausedTickets.has(ticketKey) || pending === true;
     const row = el('div', 'live-row');
+    row.classList.toggle('is-pause-requested', pauseRequested);
     const dot = el('span', 'live-dot');
     dot.setAttribute('aria-hidden', 'true');
     row.appendChild(dot);
-    row.appendChild(el('span', 'live-label', 'Processing'));
+    row.appendChild(el('span', 'live-label', pending === true
+      ? 'Pausing…'
+      : pending === false
+        ? 'Resuming…'
+        : pauseRequested ? 'Pause requested' : 'Processing'));
     const who = project && ticket ? project + ' · ' + ticket : project || ticket;
     if (who) row.appendChild(el('span', 'live-ticket', who));
-    row.appendChild(el('span', 'live-step-chip', step));
-    const btn = el('button', 'btn btn-ghost btn-sm live-pause', '⏸');
-    btn.title = 'Pause this ticket at its next stage boundary';
-    btn.addEventListener('click', () => doTicketPause(project + ':' + ticket, true));
+    row.appendChild(el('span', 'live-step-chip', pauseRequested ? 'Finishing ' + step : step));
+    const btn = el('button', 'btn btn-ghost btn-sm live-pause', pauseRequested ? 'Cancel pause' : '⏸ Pause');
+    btn.disabled = pending != null || globallyPaused;
+    btn.title = globallyPaused
+      ? 'All ticket processing is paused; use Resume all in the header'
+      : pauseRequested
+        ? 'Let this ticket continue after its current step'
+        : 'Pause this ticket after its current step finishes';
+    btn.addEventListener('click', () => doTicketPause(ticketKey, !pauseRequested));
     row.appendChild(btn);
+
+    const stop = el('button', 'btn btn-ghost btn-sm live-stop', stopping.has(ticketKey) ? 'Stopping…' : '✋ Stop');
+    stop.disabled = stopping.has(ticketKey);
+    stop.title = 'Stop this run immediately, discarding the step in progress';
+    stop.addEventListener('click', () => openStopDialog(ticketKey));
+    row.appendChild(stop);
     box.appendChild(row);
   });
 
   box.hidden = false;
 }
 
-// Pause/resume a single ticket; surface the one-per-project warning inline.
-async function doTicketPause(ticketKey, paused) {
+function openStopDialog(ticketKey) {
+  const wrap = el('div', 'overlay');
+  const card = el('div', 'modal');
+
+  const head = el('div', 'modal-head');
+  head.appendChild(el('h2', null, 'Stop ' + ticketKey + '?'));
+  const close = el('button', 'icon-btn', '\u00d7');
+  close.setAttribute('aria-label', 'Close');
+  close.addEventListener('click', () => wrap.remove());
+  head.appendChild(close);
+  card.appendChild(head);
+
+  const body = el('div', 'modal-body');
+  body.appendChild(el('p', 'stop-note',
+    'The step running right now is killed and its work is discarded. Any branch or worktree already created is left in place for you to inspect.'));
+  const label = el('label', 'stop-check');
+  const cb = el('input');
+  cb.type = 'checkbox';
+  label.appendChild(cb);
+  label.appendChild(el('span', null, 'Also never process this ticket again'));
+  body.appendChild(label);
+  body.appendChild(el('p', 'stop-note',
+    'New comments will not wake it. Clear the mark from the "Never processed" list to undo.'));
+  card.appendChild(body);
+
+  const foot = el('div', 'modal-foot');
+  const actions = el('div', 'modal-actions');
+  const cancel = el('button', 'btn btn-ghost', 'Keep running');
+  cancel.addEventListener('click', () => wrap.remove());
+  const confirm = el('button', 'btn btn-danger', 'Stop now');
+  confirm.addEventListener('click', () => {
+    wrap.remove();
+    doStop(ticketKey, cb.checked);
+  });
+  actions.appendChild(cancel);
+  actions.appendChild(confirm);
+  foot.appendChild(actions);
+  card.appendChild(foot);
+
+  wrap.appendChild(card);
+  wrap.addEventListener('click', (e) => { if (e.target === wrap) wrap.remove(); });
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key !== 'Escape') return;
+    document.removeEventListener('keydown', esc);
+    wrap.remove();
+  });
+  document.body.appendChild(wrap);
+  confirm.focus();
+}
+
+async function doStop(ticketKey, ignore) {
+  stopping.add(ticketKey);
+  renderLiveMonitor(lastStatus || {}, lastActivity);
   try {
-    const r = await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused, ticketKey }) });
-    pauseNote = r && r.warning ? r.warning : '';
+    const r = await mutate('/api/stop', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticketKey, ignore }),
+    });
+    toast(r && r.stopped
+      ? (ignore ? 'Stopped · will not be processed again' : 'Stopped')
+      : (ignore ? 'Marked never-process' : 'Nothing was running for that ticket'));
     await poll();
   } catch (e) {
+    toast('Could not stop that ticket');
+    setConn(false);
+  } finally {
+    stopping.delete(ticketKey);
+    renderLiveMonitor(lastStatus || {}, lastActivity);
+  }
+}
+
+async function doUnignore(ticketKey) {
+  try {
+    await mutate('/api/unignore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticketKey }),
+    });
+    toast(ticketKey + ' will be processed again');
+    await poll();
+  } catch (e) {
+    toast('Could not clear that mark');
     setConn(false);
   }
 }
 
-// Resume (fresh=false) or restart-fresh (fresh=true) a failed/paused ticket now.
-async function doRetry(ticketKey, fresh) {
+function renderIgnored(status) {
+  const box = $('#ignoredBox');
+  if (!box) return;
+  const marks = Array.isArray(status && status.ignoredTickets) ? status.ignoredTickets : [];
+  box.replaceChildren();
+  if (!marks.length) {
+    box.hidden = true;
+    return;
+  }
+  box.appendChild(el('div', 'ignored-head', 'Never processed (' + marks.length + ')'));
+  marks.forEach((m) => {
+    const row = el('div', 'ignored-row');
+    row.appendChild(el('span', 'ignored-key mono', m.ticketKey));
+    if (m.at) row.appendChild(el('span', 'ignored-when', 'since ' + fmtRelative(m.at)));
+    if (m.reason) row.appendChild(el('span', 'ignored-reason', m.reason));
+    const undo = el('button', 'btn btn-ghost btn-sm', 'Process again');
+    undo.addEventListener('click', () => doUnignore(m.ticketKey));
+    row.appendChild(undo);
+    box.appendChild(row);
+  });
+  box.hidden = false;
+}
+
+// Pause/resume a single ticket; surface the one-per-project warning inline.
+async function doTicketPause(ticketKey, paused) {
+  if (ticketPausePending.has(ticketKey)) return;
+  ticketPausePending.set(ticketKey, paused);
+  renderLiveMonitor(lastStatus || {}, lastActivity);
   try {
-    const r = await api('/api/retry', { method: 'POST', body: JSON.stringify({ ticketKey, fresh }) });
-    pauseNote = r && r.error ? r.error : '';
+    const r = await mutate('/api/pause', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused, ticketKey }),
+    });
+    pauseNote = r && r.warning ? r.warning : '';
+    if (lastStatus) {
+      const keys = new Set(Array.isArray(lastStatus.pausedTickets) ? lastStatus.pausedTickets : []);
+      if (paused) keys.add(ticketKey);
+      else keys.delete(ticketKey);
+      lastStatus = { ...lastStatus, pausedTickets: [...keys] };
+    }
+    ticketPausePending.delete(ticketKey);
+    renderLiveMonitor(lastStatus || {}, lastActivity);
+    toast(paused
+      ? 'Pause requested · the current step will finish first'
+      : 'Ticket will keep running');
     await poll();
   } catch (e) {
+    ticketPausePending.delete(ticketKey);
+    renderLiveMonitor(lastStatus || {}, lastActivity);
+    toast('Could not change ticket pause state');
     setConn(false);
+  }
+}
+
+// Resume (fresh=false) or restart-fresh (fresh=true) a resumable ticket now.
+async function doRetry(ticketKey, fresh) {
+  if (retryPending.has(ticketKey)) return;
+  retryPending.add(ticketKey);
+  if (activeView === 'history') renderHistoryFeed();
+  try {
+    await mutate('/api/retry', { method: 'POST', body: JSON.stringify({ ticketKey, fresh }) });
+    pauseNote = '';
+    toast(fresh ? 'Starting a new run' : 'Continuing from the saved checkpoint');
+  } catch (e) {
+    pauseNote = e.message || String(e);
+    toast(pauseNote);
+  } finally {
+    retryPending.delete(ticketKey);
+    if (activeView === 'history') fetchHistory('filter');
+    else await poll();
   }
 }
 
 // The running run for a given ticket in the activity feed (for its live stage).
-function findRunByTicket(activity, ticket) {
-  return (Array.isArray(activity) ? activity : []).find((r) => r && r.ticket === ticket && r.outcome === 'running') || null;
+function findRunByTicket(activity, ticket, project) {
+  return (Array.isArray(activity) ? activity : []).find((r) =>
+    r && r.ticket === ticket && (!project || r.project === project) && r.outcome === 'running',
+  ) || null;
 }
 
 // ---- poll loop ----
@@ -674,6 +1040,7 @@ async function poll() {
     renderUsage(usage);
     renderActivity(activity);
     renderLiveMonitor(status, activity);
+    renderIgnored(status);
     live = isLive(status, activity);
   } catch (e) {
     setConn(false); // keep last-good UI, show reconnecting
@@ -704,16 +1071,36 @@ async function doScan() {
 // ---- pause / resume button ----
 async function doPauseToggle() {
   const btn = $('#pauseBtn');
-  if (!btn) return;
+  if (!btn || systemPausePending != null) return;
   const paused = btn.dataset.paused === '1';
-  btn.disabled = true;
+  const nextPaused = !paused;
+  systemPausePending = nextPaused;
+  renderStatus(lastStatus || { paused, activeRuns: [] });
+  renderLiveMonitor(lastStatus || {}, lastActivity);
   try {
-    await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused: !paused }) });
-    await poll();
+    const result = await mutate('/api/pause', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused: nextPaused }),
+    });
+    systemPausePending = null;
+    lastStatus = { ...(lastStatus || {}), paused: !!result.paused };
+    renderStatus(lastStatus);
+    renderLiveMonitor(lastStatus, lastActivity);
+    const activeCount = Array.isArray(lastStatus.activeRuns) ? lastStatus.activeRuns.length : 0;
+    toast(nextPaused
+      ? activeCount
+        ? 'Pause requested · active steps will finish first'
+        : 'Ticket processing paused'
+      : 'Ticket processing resumed');
+    if (activeView === 'history') await fetchHistory('filter');
+    else await poll();
   } catch (e) {
+    systemPausePending = null;
+    renderStatus(lastStatus || { paused, activeRuns: [] });
+    renderLiveMonitor(lastStatus || {}, lastActivity);
+    toast('Could not change processing state');
     setConn(false);
-  } finally {
-    btn.disabled = false;
   }
 }
 
@@ -738,6 +1125,7 @@ const hist = {
   ctrl: null, // AbortController for the in-flight request
   paging: false,
   debounce: null,
+  status: null,
 };
 
 function newFilters() {
@@ -823,10 +1211,15 @@ async function fetchHistory(mode) {
   }
   try {
     const qs = filtersToQuery(hist.filters).toString();
-    const data = await api('/api/history' + (qs ? '?' + qs : ''), { signal: ctrl.signal });
+    const [data, status] = await Promise.all([
+      api('/api/history' + (qs ? '?' + qs : ''), { signal: ctrl.signal }),
+      api('/api/status', { signal: ctrl.signal }),
+    ]);
     if (seq !== hist.seq) return; // superseded
     hist.runs = Array.isArray(data.runs) ? data.runs : [];
     hist.total = Number(data.total) || 0;
+    hist.status = status;
+    renderStatus(status);
     hist.loaded = true;
   } catch (e) {
     if (seq !== hist.seq || (e && e.name === 'AbortError')) return;
@@ -1034,7 +1427,8 @@ function renderHistoryChips() {
     }));
   }
   const n = chips.length;
-  $('#hFilterToggle').textContent = n ? 'Filters (' + n + ')' : 'Filters';
+  const filterOpen = !$('#hFilterBody').classList.contains('is-collapsed');
+  $('#hFilterToggle').textContent = (filterOpen ? 'Hide filters' : 'Show filters') + (n ? ' (' + n + ')' : '');
   if (!n) {
     box.hidden = true;
     return;
@@ -1073,15 +1467,16 @@ function renderHistorySkeleton() {
   const feed = $('#historyFeed');
   const frag = document.createDocumentFragment();
   for (let i = 0; i < 3; i++) {
-    const li = el('li', 'run skel');
-    const head = el('div', 'run-head');
-    const main = el('div', 'run-main');
-    main.appendChild(el('div', 'skel-bar skel-w60'));
+    const li = el('li', 'run history-run skel');
+    const head = el('div', 'history-run-head');
+    const main = el('div', 'history-run-main');
     main.appendChild(el('div', 'skel-bar skel-w35'));
+    main.appendChild(el('div', 'skel-bar skel-w60'));
     main.appendChild(el('div', 'skel-bar skel-w80'));
     head.appendChild(main);
-    const side = el('div', 'run-side');
+    const side = el('div', 'history-run-side');
     side.appendChild(el('div', 'skel-bar skel-pill'));
+    side.appendChild(el('div', 'skel-bar skel-w80'));
     head.appendChild(side);
     li.appendChild(head);
     frag.appendChild(li);
@@ -1093,7 +1488,7 @@ function renderHistorySkeleton() {
 function renderHistoryFeed() {
   const feed = $('#historyFeed');
   const frag = document.createDocumentFragment();
-  hist.runs.forEach((r) => frag.appendChild(renderRun(r)));
+  hist.runs.forEach((r) => frag.appendChild(renderHistoryRun(r)));
   feed.replaceChildren(frag);
 }
 
@@ -1114,8 +1509,8 @@ function renderHistoryCount() {
   const noun = hist.total === 1 ? ' run' : ' runs';
   const start = f.offset + 1;
   const end = Math.min(f.offset + f.limit, hist.total);
-  node.textContent = hist.total.toLocaleString() + noun + (hasActiveFilters(f) ? ' match' : '') +
-    ' · showing ' + start.toLocaleString() + '–' + end.toLocaleString();
+  node.textContent = start.toLocaleString() + '–' + end.toLocaleString() + ' of ' +
+    hist.total.toLocaleString() + noun + (hasActiveFilters(f) ? ' found' : '');
 }
 
 function renderHistoryEmpty() {
@@ -1300,6 +1695,8 @@ function bindHistory() {
     const body = $('#hFilterBody');
     const open = body.classList.toggle('is-collapsed') === false;
     $('#hFilterToggle').setAttribute('aria-expanded', String(open));
+    const n = document.querySelectorAll('#hChips .filter-chip').length;
+    $('#hFilterToggle').textContent = (open ? 'Hide filters' : 'Show filters') + (n ? ' (' + n + ')' : '');
   });
 
   $('#hRefresh').addEventListener('click', async () => {
@@ -1584,6 +1981,7 @@ function renderSettings() {
     field('Permission mode', selectIn('s_run_perm', runner.permissionMode, ['bypass', 'acceptEdits', 'default']), 'bypass lets steps use any tool — safety comes from worktrees + guardrails.'),
     field('Max turns per step', numIn('s_run_turns', runner.maxTurns, 1, 1000), 'Claude-only ceiling; Codex CLI does not expose the same limit.'),
     field('Step timeout (seconds)', numIn('s_run_timeout', runner.stageTimeoutSec, 0, 86400), '0 = no timeout (long coding steps run as long as they need).'),
+    field('Idle timeout (seconds)', numIn('s_run_idle_timeout', runner.stageIdleTimeoutSec, 0, 86400), 'Stops a hung stage after no output. The default is 1800 seconds; 0 disables this safeguard.'),
   ]);
 
   group('Tracker defaults', 'Which tickets the loop picks up. Each project can override these.', [
@@ -1615,6 +2013,7 @@ async function saveSettings() {
       permissionMode: str('s_run_perm'),
       maxTurns: num('s_run_turns'),
       stageTimeoutSec: num('s_run_timeout'),
+      stageIdleTimeoutSec: num('s_run_idle_timeout'),
     },
     tracker: {
       simpleLabel: str('s_trk_label'),

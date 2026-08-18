@@ -11,8 +11,15 @@
 import { DEFAULT_INSTRUCTIONS } from '../config.js'
 import type { CatalogStep, StepCapabilities } from './types.js'
 
-function step(s: Omit<CatalogStep, 'version' | 'builtin' | 'instruction'>): CatalogStep {
-  return { ...s, version: 1, builtin: true, instruction: DEFAULT_INSTRUCTIONS[s.id as never] }
+type StepSeed = Omit<CatalogStep, 'version' | 'builtin' | 'instruction'> & { instruction?: string }
+
+function step(s: StepSeed): CatalogStep {
+  return {
+    ...s,
+    version: 1,
+    builtin: true,
+    instruction: s.instruction ?? DEFAULT_INSTRUCTIONS[s.id as never],
+  }
 }
 
 // Shorthands for the capability blocks that repeat.
@@ -188,6 +195,23 @@ export const BUILTIN_STEPS: CatalogStep[] = [
     resumePolicy: 'idempotent', // a retry must not double-post
     consumes: ['plan', 'fix', 'featurePr', 'exportFile', 'devDeployment', 'verifyDev'],
     produces: { key: 'comment', type: 'text' },
+  }),
+  step({
+    id: 'cleanup',
+    name: 'Clean up workspace',
+    description: 'Run optional project-specific cleanup before the harness removes a completed worktree.',
+    instruction:
+      'Clean up temporary files, generated artifacts, background processes, containers, or other local resources ' +
+      'created by this ticket run, following the project instructions. Stay inside the isolated workspace. Never ' +
+      'remove the Git worktree itself, delete its branch, reset or discard tracked changes, or touch another checkout. ' +
+      'Keep any requested export or other deliverable needed by the final report. Report what you cleaned. If there ' +
+      'is nothing to clean, pass without making changes.',
+    defaults: { executionProfile: 'fast', effort: 'low', allowedTools: 'Read,Edit,Bash', enabled: true },
+    contract: 'verdict',
+    capabilities: { workspace: 'change', mutatesRepo: true, perRepo: 'once', devOnly: false, externalEffects: [] },
+    resumePolicy: 'rerun',
+    consumes: ['fix', 'verify', 'featurePr', 'exportFile'],
+    produces: { key: 'cleanup', type: 'text' },
   }),
 ]
 

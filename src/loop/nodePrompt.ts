@@ -122,8 +122,9 @@ export function buildNodePrompt(step: CatalogStep, ctx: NodeContext): string {
         'line, nothing after it:\n' +
         '  VERDICT: pass            (satisfied — move on)\n' +
         '  VERDICT: fail — <reason> (a real problem with the work; it goes back for repair)\n' +
-        '  VERDICT: wait — <reason> (nothing is wrong, but something OUTSIDE your control must ' +
-        'happen first: a human approval, a queued deployment, a pending external job)\n' +
+        '  VERDICT: wait[approval] — <reason>   (a person must approve)\n' +
+        '  VERDICT: wait[deployment] — <reason> (a deployment is queued or in flight)\n' +
+        '  VERDICT: wait[external] — <reason>   (another service or job must recover or finish)\n' +
         '  VERDICT: skip — <reason> (this step does not apply to this ticket)\n' +
         'Choose "wait" over "fail" whenever the work is fine and you are simply blocked on ' +
         'someone or something else — a failure sends the code back to be rewritten, which is ' +
