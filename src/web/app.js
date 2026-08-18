@@ -1981,6 +1981,7 @@ function renderSettings() {
     field('Permission mode', selectIn('s_run_perm', runner.permissionMode, ['bypass', 'acceptEdits', 'default']), 'bypass lets steps use any tool — safety comes from worktrees + guardrails.'),
     field('Max turns per step', numIn('s_run_turns', runner.maxTurns, 1, 1000), 'Claude-only ceiling; Codex CLI does not expose the same limit.'),
     field('Step timeout (seconds)', numIn('s_run_timeout', runner.stageTimeoutSec, 0, 86400), '0 = no timeout (long coding steps run as long as they need).'),
+    field('Idle timeout (seconds)', numIn('s_run_idle_timeout', runner.stageIdleTimeoutSec, 0, 86400), 'Stops a hung stage after no output. The default is 1800 seconds; 0 disables this safeguard.'),
   ]);
 
   group('Tracker defaults', 'Which tickets the loop picks up. Each project can override these.', [
@@ -2012,6 +2013,7 @@ async function saveSettings() {
       permissionMode: str('s_run_perm'),
       maxTurns: num('s_run_turns'),
       stageTimeoutSec: num('s_run_timeout'),
+      stageIdleTimeoutSec: num('s_run_idle_timeout'),
     },
     tracker: {
       simpleLabel: str('s_trk_label'),

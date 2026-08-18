@@ -30,6 +30,7 @@ const DEFAULTS: Config = {
     permissionMode: 'bypass',
     maxTurns: 40,
     stageTimeoutSec: 900,
+    stageIdleTimeoutSec: 1800,
   },
   server: { port: 4317, host: '127.0.0.1' },
   tracker: {
@@ -280,6 +281,7 @@ function migrateConfig(raw: any): any {
       permissionMode: oldRunner.permissionMode,
       maxTurns: oldRunner.maxTurns,
       stageTimeoutSec: oldRunner.stageTimeoutSec,
+      stageIdleTimeoutSec: oldRunner.stageIdleTimeoutSec,
     }
     const pinClaudeModels = (stages: any) => {
       for (const stage of Object.values(stages || {}) as any[]) {

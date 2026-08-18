@@ -33,6 +33,7 @@ runner:
   permissionMode: bypass
   maxTurns: 40 # Claude only; Codex CLI has no matching flag
   stageTimeoutSec: 900
+  stageIdleTimeoutSec: 1800 # kill a stage after 30 minutes with no output; 0 disables
 
 server:
   host: 127.0.0.1

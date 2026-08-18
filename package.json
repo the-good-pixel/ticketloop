@@ -26,7 +26,7 @@
     "start": "tsx src/cli.ts",
     "dev": "tsx watch src/cli.ts watch",
     "typecheck": "tsc --noEmit",
-    "smoke": "tsx scripts/smoke-workflows.ts && tsx scripts/smoke-support.ts",
+    "smoke": "tsx scripts/smoke-workflows.ts && tsx scripts/smoke-support.ts && tsx scripts/smoke-watchdog.ts && tsx scripts/smoke-runner-timeout.ts",
     "check": "npm run typecheck && node --check src/web/app.js && node --check src/web/catalog.js && node --check src/web/wfdiagram.js && npm run smoke",
     "test": "npm run check",
     "prepack": "npm run check"

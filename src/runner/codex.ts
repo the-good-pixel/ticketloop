@@ -5,6 +5,7 @@ import { registerChild, unregisterChild } from './children.js'
 import { parseResetHint } from './claude.js'
 import type { AgentResult, RunAgentOpts } from './types.js'
 import type { ProviderFailure } from '../types.js'
+import { createStageWatchdog, stageTimeoutMessage } from './watchdog.js'
 
 export function classifyCodexFailure(message: string): ProviderFailure | undefined {
   const text = message || ''
@@ -77,7 +78,6 @@ export async function runCodex(o: RunAgentOpts): Promise<AgentResult> {
     const inflightKey = pgid ? registerChild(pgid, { model, ticketKey: o.ticketKey }) : ''
     const reap = () => { if (pgid) unregisterChild(pgid, inflightKey) }
     let settled = false
-    let timedOut = false
     let text = ''
     let stderr = ''
     let raw = ''
@@ -88,16 +88,19 @@ export async function runCodex(o: RunAgentOpts): Promise<AgentResult> {
     let input = 0
     let output = 0
     let cacheRead = 0
-    const timeoutMs = (o.runner.stageTimeoutSec ?? 900) * 1000
     const killTree = (sig: NodeJS.Signals) => {
       try { if (child.pid) process.kill(-child.pid, sig) }
       catch { try { child.kill(sig) } catch { /* already gone */ } }
     }
-    const timer = timeoutMs > 0 ? setTimeout(() => {
-      timedOut = true
-      killTree('SIGTERM')
-      setTimeout(() => killTree('SIGKILL'), 3000)
-    }, timeoutMs) : null
+    let forceKillTimer: NodeJS.Timeout | null = null
+    const watchdog = createStageWatchdog(
+      o.runner.stageTimeoutSec ?? 900,
+      o.runner.stageIdleTimeoutSec ?? 1800,
+      () => {
+        killTree('SIGTERM')
+        forceKillTimer = setTimeout(() => killTree('SIGKILL'), 3000)
+      },
+    )
 
     const parseLine = (line: string) => {
       if (!line.trim()) return
@@ -119,6 +122,7 @@ export async function runCodex(o: RunAgentOpts): Promise<AgentResult> {
       } catch { /* partial or non-JSON line */ }
     }
     child.stdout.on('data', (d) => {
+      watchdog.touch()
       const chunk = d.toString()
       raw += chunk
       buf += chunk
@@ -128,23 +132,29 @@ export async function runCodex(o: RunAgentOpts): Promise<AgentResult> {
         buf = buf.slice(idx + 1)
       }
     })
-    child.stderr.on('data', (d) => { stderr += d.toString() })
+    child.stderr.on('data', (d) => {
+      watchdog.touch()
+      stderr += d.toString()
+    })
     child.stdin.end(prompt)
     child.on('error', (err) => {
       if (settled) return
       settled = true
-      if (timer) clearTimeout(timer)
+      watchdog.clear()
+      if (forceKillTimer) clearTimeout(forceKillTimer)
       reap()
       resolve(errorResult(model, `failed to spawn "${provider.bin}": ${err.message}`))
     })
     child.on('close', (code) => {
       if (settled) return
       settled = true
-      if (timer) clearTimeout(timer)
+      watchdog.clear()
+      if (forceKillTimer) clearTimeout(forceKillTimer)
       reap()
       parseLine(buf)
       if (stderr.trim()) log.debug(`codex stderr: ${stderr.trim().slice(0, 500)}`)
-      if (timedOut) return resolve(errorResult(model, `stage timed out after ${o.runner.stageTimeoutSec ?? 900}s and was killed`))
+      const timeoutKind = watchdog.timedOut()
+      if (timeoutKind) return resolve(errorResult(model, stageTimeoutMessage(timeoutKind, o.runner)))
       if (code !== 0) isError = true
       if (!text && isError) text = `codex exited ${code}: ${stderr.trim().slice(0, 300)}`
       // Only failure events and a failed process may classify provider errors.

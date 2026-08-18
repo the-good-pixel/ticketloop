@@ -98,6 +98,9 @@ export interface RunnerConfig {
   // kill a stage's coding-agent subprocess after this many seconds (prevents hangs
   // from freezing the loop). Default 900 (15 min).
   stageTimeoutSec?: number
+  // kill a live stage that produces no stdout/stderr for this many seconds.
+  // This remains active when stageTimeoutSec=0 allows unlimited total runtime.
+  stageIdleTimeoutSec?: number
 }
 
 export interface ServerConfig {

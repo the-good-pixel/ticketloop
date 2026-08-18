@@ -566,6 +566,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
           if (p.runner.permissionMode) cfg.runner.permissionMode = p.runner.permissionMode
           if (p.runner.maxTurns !== undefined) cfg.runner.maxTurns = num(p.runner.maxTurns, 1, 1000)
           if (p.runner.stageTimeoutSec !== undefined) cfg.runner.stageTimeoutSec = num(p.runner.stageTimeoutSec, 0, 86400)
+          if (p.runner.stageIdleTimeoutSec !== undefined) cfg.runner.stageIdleTimeoutSec = num(p.runner.stageIdleTimeoutSec, 0, 86400)
         }
         if (p.tracker) {
           if (p.tracker.simpleLabel !== undefined) cfg.tracker.simpleLabel = String(p.tracker.simpleLabel)

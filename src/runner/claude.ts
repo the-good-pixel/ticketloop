@@ -3,6 +3,7 @@ import { registerChild, unregisterChild } from './children.js'
 import { log } from '../logger.js'
 import type { AgentResult, RunAgentOpts } from './types.js'
 import { classifyKind } from '../loop/classify.js'
+import { createStageWatchdog, stageTimeoutMessage } from './watchdog.js'
 
 // Claude's real "you've hit your limit" signal — the reliable backstop.
 export function isRateLimitText(t: string): boolean {
@@ -114,11 +115,6 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
     }
 
     let settled = false
-    let timedOut = false
-    // stageTimeoutSec <= 0 (or null) = NO wall-clock timeout — coding tasks can
-    // legitimately run for hours. A hung stage then blocks until the daemon is
-    // restarted (which kills the child via the process-group handler).
-    const timeoutMs = (o.runner.stageTimeoutSec ?? 900) * 1000
     const killTree = (sig: NodeJS.Signals) => {
       try {
         if (child.pid) process.kill(-child.pid, sig)
@@ -126,14 +122,15 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
         try { child.kill(sig) } catch { /* already gone */ }
       }
     }
-    const timer =
-      timeoutMs > 0
-        ? setTimeout(() => {
-            timedOut = true
-            killTree('SIGTERM')
-            setTimeout(() => killTree('SIGKILL'), 3000)
-          }, timeoutMs)
-        : null
+    let forceKillTimer: NodeJS.Timeout | null = null
+    const watchdog = createStageWatchdog(
+      o.runner.stageTimeoutSec ?? 900,
+      o.runner.stageIdleTimeoutSec ?? 1800,
+      () => {
+        killTree('SIGTERM')
+        forceKillTimer = setTimeout(() => killTree('SIGKILL'), 3000)
+      },
+    )
 
     let text = ''
     let usage = {
@@ -150,6 +147,7 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
     let stderr = ''
 
     child.stdout.on('data', (d) => {
+      watchdog.touch()
       buf += d.toString()
       let idx: number
       while ((idx = buf.indexOf('\n')) >= 0) {
@@ -178,23 +176,29 @@ export async function runClaude(o: RunAgentOpts): Promise<AgentResult> {
         }
       }
     })
-    child.stderr.on('data', (d) => (stderr += d.toString()))
+    child.stderr.on('data', (d) => {
+      watchdog.touch()
+      stderr += d.toString()
+    })
 
     child.on('error', (err) => {
       if (settled) return
       settled = true
-      if (timer) clearTimeout(timer)
+      watchdog.clear()
+      if (forceKillTimer) clearTimeout(forceKillTimer)
       reap()
       resolve(errorResult(model, `failed to spawn "${provider.bin}": ${err.message}`))
     })
     child.on('close', (code) => {
       if (settled) return
       settled = true
-      if (timer) clearTimeout(timer)
+      watchdog.clear()
+      if (forceKillTimer) clearTimeout(forceKillTimer)
       reap()
       if (stderr.trim()) log.debug(`claude stderr: ${stderr.trim().slice(0, 500)}`)
-      if (timedOut) {
-        resolve(errorResult(model, `stage timed out after ${o.runner.stageTimeoutSec ?? 900}s and was killed`))
+      const timeoutKind = watchdog.timedOut()
+      if (timeoutKind) {
+        resolve(errorResult(model, stageTimeoutMessage(timeoutKind, o.runner)))
         return
       }
       // A retry event followed by a successful result is not an exhausted

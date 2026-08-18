@@ -24,6 +24,7 @@ All notable changes are recorded here. Ticketloop follows semantic versioning, w
 - Waiting runs keep their checkpoints and can continue from the blocked step when a safe checkpoint exists.
 - Legacy waiting records remain readable and filterable without rewriting stored run files.
 - New activity no longer silently revives tickets marked Never process.
+- Silent agent or tool subprocesses are stopped after the configured idle timeout, while completed steps and checkpoints remain available for Continue run.
 
 ## 0.1.0 - 2026-08-14
 
