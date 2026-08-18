@@ -280,6 +280,7 @@ const MOCK_TEXTS: Record<string, string> = {
   comment:
     'Updated the submit button label to 立即提交. PR: https://github.com/demo/demo-app/pull/142 — please review.\n' +
     '— 🤖 via ticketloop\nCOMMENT_URL: https://linear.app/demo/issue/DEMO/#comment-mockcomment',
+  cleanup: 'Removed temporary files and stopped local background processes.\nVERDICT: pass',
 }
 
 MOCK_TEXTS.clarify = MOCK_TEXTS.answer

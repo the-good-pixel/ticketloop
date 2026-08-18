@@ -96,6 +96,7 @@ Ticketloop runs headless coding agents with broad tool access. Safety comes from
 
 - The dashboard binds to `127.0.0.1` by default.
 - Change work uses an isolated git worktree based on the remote default branch.
+- The harness removes delivered or fully shipped worktrees deterministically; resumable and failed worktrees remain available for continuation or inspection.
 - Project exclude rules block protected-path changes before shipping.
 - Workflow capabilities are validated against explicit project permissions.
 - Instruction text cannot grant workflow authority.

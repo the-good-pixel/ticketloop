@@ -61,6 +61,27 @@ export interface Workspace {
   useWorktree: boolean
 }
 
+/**
+ * Remove an isolated workspace after its useful state exists somewhere durable.
+ * The caller decides when that is true: data exports are already delivered, or
+ * every changed repo has a successfully opened PR. Paused/waiting/failed runs
+ * never call this because their checkpoint still points at these worktrees.
+ *
+ * Branches with PRs must remain for review. Empty branches created for context-
+ * only repos have no durable purpose, so remove those along with the worktree.
+ */
+export function cleanupWorkspace(
+  ctx: RepoCtx,
+  ws: Workspace | undefined,
+  durableBranches: ReadonlySet<string> = new Set(),
+): void {
+  if (!ws?.useWorktree) return
+  for (const r of ws.repos) {
+    ctx.repo.removeWorktree(r.srcPath, r.workdir)
+    if (!durableBranches.has(r.name)) ctx.repo.deleteBranch(r.srcPath, r.branch)
+  }
+}
+
 // Serialize a live Workspace into the checkpoint so a resumed run can reattach.
 export function toWorkspaceCk(ws: Workspace): WorkspaceCk {
   return { repos: ws.repos.map((r) => ({ ...r })), cwd: ws.cwd, multi: ws.multi, useWorktree: ws.useWorktree }
@@ -191,4 +212,3 @@ export function scanRepos(
   }
   return { dirty }
 }
-

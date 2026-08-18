@@ -39,6 +39,7 @@ import { buildNodePrompt, type PriorOutput } from './nodePrompt.js'
 import { parseResult, parseRouteField, parseRouteReason } from './verdict.js'
 import { artifactSucceeded, extractArtifact, parseCommentUrl } from './artifacts.js'
 import {
+  cleanupWorkspace,
   reattachWorkspace,
   scanRepos,
   setupWorkspace,
@@ -196,8 +197,30 @@ export async function runWorkflow(
   if (cls === 'waiting' && !rec.blocker) {
     rec.blocker = { kind: 'external', reason: note, resume: 'manual' }
   }
-  finish(s, resolveOutcome(s, cls, explicit?.outcome), note)
+  const outcome = resolveOutcome(s, cls, explicit?.outcome)
+  finish(s, outcome, note)
+  cleanupCompletedWorkspace(ctx, s, outcome)
   return rec
+}
+
+/**
+ * Deterministic terminal action, deliberately outside workflow data. Cleanup is
+ * an engine invariant: a custom workflow cannot forget it or prompt it away.
+ * Keep resumable and inspectable workspaces; remove only delivered exports or a
+ * fully shipped workspace whose changed branches now live behind open PRs.
+ */
+function cleanupCompletedWorkspace(ctx: InterpCtx, s: State, outcome: RunOutcome): void {
+  if (!s.ws) return
+  if (outcome === 'exported') {
+    cleanupWorkspace(ctx, s.ws)
+    return
+  }
+  if (s.prs.some((p) => p.status === 'failed')) return
+  const durable = new Set(s.prs.filter((p) => p.status === 'opened').map((p) => p.repo))
+  for (const artifact of Object.values(s.artifacts)) {
+    if (artifact.type === 'github-pr' && artifactSucceeded(artifact)) durable.add(artifact.repo)
+  }
+  if (durable.size) cleanupWorkspace(ctx, s.ws, durable)
 }
 
 // A stop node's note names the terminal in general terms ("Triage: ineligible

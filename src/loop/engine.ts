@@ -21,7 +21,7 @@ import { classifyKind } from './classify.js'
 import { runWorkflow } from './interpreter.js'
 import { planForProject } from '../commands/catalog.js'
 import { buildStagePrompt, CHECK_STAGES, POST_STAGES, type PriorOutputs, type StageExtras } from './prompts.js'
-import { reattachWorkspace, scanRepos, setupWorkspace, toWorkspaceCk, type WorkRepo } from './workspace.js'
+import { cleanupWorkspace, reattachWorkspace, scanRepos, setupWorkspace, toWorkspaceCk, type WorkRepo } from './workspace.js'
 // Re-exported for callers that still import it from the engine.
 export { resolveBranch } from './workspace.js'
 import { extractImageUrls, downloadImages, latestHumanActivity } from './context.js'
@@ -175,12 +175,7 @@ async function runDataPath(
     return rec
   } finally {
     // Throwaway worktree — nothing to ship; always remove it + its empty branch.
-    if (ws.useWorktree) {
-      for (const r of ws.repos) {
-        ctx.repo.removeWorktree(r.srcPath, r.workdir)
-        ctx.repo.deleteBranch(r.srcPath, r.branch)
-      }
-    }
+    cleanupWorkspace(ctx, ws)
   }
 }
 
@@ -576,12 +571,7 @@ export async function processTicket(
       // Clean up worktrees only on FULL success — branches/PRs carry the work.
       if (ws.useWorktree && prs.length && !failedRepos.length) {
         const shipped = new Set(dirty.map((r) => r.name))
-        for (const r of ws.repos) {
-          ctx.repo.removeWorktree(r.srcPath, r.workdir)
-          // Untouched repo → empty branch; delete it so unused per-ticket
-          // branches don't pile up. Shipped repos keep theirs — the PR needs it.
-          if (!shipped.has(r.name)) ctx.repo.deleteBranch(r.srcPath, r.branch)
-        }
+        cleanupWorkspace(ctx, ws, shipped)
       }
       return rec
     } catch (e) {
