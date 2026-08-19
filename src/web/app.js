@@ -53,9 +53,9 @@ function fmtRelative(ms) {
   let s = Math.round(Math.abs(diff) / 1000);
   let out;
   if (s < 45) out = s + 's';
-  else if (s < 3600) out = Math.round(s / 60) + 'm';
-  else if (s < 86400) out = Math.round(s / 3600) + 'h';
-  else out = Math.round(s / 86400) + 'd';
+  else if (s < 3600) out = Math.floor(s / 60) + 'm';
+  else if (s < 86400) out = Math.floor(s / 3600) + 'h';
+  else out = Math.floor(s / 86400) + 'd';
   return future ? 'in ' + out : out + ' ago';
 }
 
@@ -69,13 +69,50 @@ function fmtResetsLine(ms) {
 function fmtDuration(startMs, endMs) {
   if (!startMs) return '';
   const end = endMs || Date.now();
-  let s = Math.max(0, Math.round((end - startMs) / 1000));
+  return fmtDurationMs(end - startMs);
+}
+
+function fmtDurationMs(ms) {
+  let s = Math.max(0, Math.round((ms || 0) / 1000));
   if (s < 60) return s + 's';
   const m = Math.floor(s / 60);
   const rs = s % 60;
   if (m < 60) return m + 'm ' + rs + 's';
   const h = Math.floor(m / 60);
   return h + 'h ' + (m % 60) + 'm';
+}
+
+// A run can be resumed in place, so startedAt is its first activity, not its
+// latest. Stage timestamps tell us when Ticketloop most recently did work.
+function runActivityAt(run) {
+  const times = [run.startedAt, run.endedAt];
+  (run.stages || []).forEach((stage) => times.push(stage.startedAt, stage.endedAt));
+  if (run.outcome === 'running' || !run.endedAt) times.push(Date.now());
+  return Math.max(0, ...times.filter((value) => Number.isFinite(value)));
+}
+
+// Count actual stage execution instead of wall-clock time. A run may spend
+// hours paused or waiting for an external system, which is not processing time.
+function runWorkedMs(run) {
+  const cap = run.endedAt || Date.now();
+  const stages = (run.stages || []).filter((stage) => Number.isFinite(stage.startedAt));
+  if (!stages.length) return Math.max(0, cap - (run.startedAt || cap));
+  return stages.reduce((total, stage) => {
+    const end = Number.isFinite(stage.endedAt) ? stage.endedAt : cap;
+    return total + Math.max(0, end - stage.startedAt);
+  }, 0);
+}
+
+function renderRunTiming(run, workedMs) {
+  const wrap = el('div', 'run-timing');
+  const running = run.outcome === 'running' || !run.endedAt;
+  const activityAt = runActivityAt(run);
+  const activity = el('span', 'run-time run-updated', running ? 'Working now' : 'Updated ' + fmtRelative(activityAt));
+  activity.title = 'latest activity ' + fmtClock(activityAt);
+  const worked = el('span', 'run-time run-worked', 'Worked ' + fmtDurationMs(workedMs));
+  worked.title = 'Time spent executing ticket steps; paused and waiting time is excluded';
+  wrap.append(activity, worked);
+  return wrap;
 }
 
 function fillClass(pct) {
@@ -417,11 +454,7 @@ function renderTicketGroup(g) {
   metrics.appendChild(el('span', null, fmtTokens(g.totalTokens) + ' tok'));
   metrics.appendChild(el('span', null, fmtMoney(g.costUsd)));
   side.appendChild(metrics);
-  const running = latest.outcome === 'running' || !latest.endedAt;
-  const timeStr = running ? fmtDuration(latest.startedAt, latest.endedAt) : fmtRelative(latest.endedAt || latest.startedAt);
-  const time = el('span', 'run-time', timeStr);
-  time.title = 'started ' + fmtClock(latest.startedAt) + (latest.endedAt ? '\nended ' + fmtClock(latest.endedAt) : '');
-  side.appendChild(time);
+  side.appendChild(renderRunTiming(latest, g.workedMs));
   head.appendChild(side);
 
   head.addEventListener('click', () => toggleTicket(g.key));
@@ -460,11 +493,7 @@ function renderRun(r) {
   metrics.appendChild(el('span', null, fmtTokens(r.totalTokens) + ' tok'));
   metrics.appendChild(el('span', null, fmtMoney(r.costUsd)));
   side.appendChild(metrics);
-  const running = r.outcome === 'running' || !r.endedAt;
-  const timeStr = running ? fmtDuration(r.startedAt, r.endedAt) : fmtRelative(r.endedAt || r.startedAt);
-  const time = el('span', 'run-time', timeStr);
-  time.title = 'started ' + fmtClock(r.startedAt) + (r.endedAt ? '\nended ' + fmtClock(r.endedAt) : '');
-  side.appendChild(time);
+  side.appendChild(renderRunTiming(r, runWorkedMs(r)));
   head.appendChild(side);
 
   head.addEventListener('click', (e) => { e.stopPropagation(); toggleExpand(r.id); });
@@ -504,6 +533,7 @@ function renderHistoryRun(r) {
   const started = el('time', null, fmtHistoryDate(r.startedAt));
   started.dateTime = new Date(r.startedAt).toISOString();
   timing.appendChild(started);
+  timing.appendChild(el('span', null, fmtDurationMs(runWorkedMs(r)) + ' worked'));
   timing.appendChild(el('span', null, fmtDuration(r.startedAt, r.endedAt) + ' elapsed'));
   if (r.resumes) timing.appendChild(el('span', null, 'Resumed ' + r.resumes + '×'));
   main.appendChild(timing);
@@ -678,6 +708,7 @@ function groupByTicket(runs) {
         autonomy: r.autonomy,
         totalTokens: 0,
         costUsd: 0,
+        workedMs: 0,
         runs: [],
       };
       groups.set(key, g);
@@ -685,8 +716,20 @@ function groupByTicket(runs) {
     g.runs.push(r);
     g.totalTokens += r.totalTokens || 0;
     g.costUsd += r.costUsd || 0;
+    g.workedMs += runWorkedMs(r);
   }
-  return [...groups.values()];
+  const result = [...groups.values()];
+  result.forEach((group) => {
+    group.runs.sort((a, b) => runActivityAt(b) - runActivityAt(a));
+    const latest = group.runs[0];
+    group.project = latest.project;
+    group.ticket = latest.ticket;
+    group.ticketTitle = latest.ticketTitle;
+    group.ticketUrl = latest.ticketUrl;
+    group.autonomy = latest.autonomy;
+    group.activityAt = runActivityAt(latest);
+  });
+  return result.sort((a, b) => b.activityAt - a.activityAt);
 }
 
 function renderFeedFromState() {
