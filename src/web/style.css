@@ -809,6 +809,21 @@ body {
   white-space: nowrap;
 }
 
+.run-timing {
+  display: flex;
+  align-items: center;
+  gap: 5px 9px;
+}
+
+.run-updated {
+  color: var(--text-dim);
+}
+
+.run-worked {
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+}
+
 /* expanded detail */
 .run-detail {
   border-top: 1px solid var(--border);
@@ -3185,6 +3200,9 @@ body.workflow-node-open #viewWorkflows.is-editing .wf-body > .section-head { rig
     justify-self: start;
     flex-direction: row;
     align-items: center;
+    flex-wrap: wrap;
+  }
+  .run-timing {
     flex-wrap: wrap;
   }
   .topbar {

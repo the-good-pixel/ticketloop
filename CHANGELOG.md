@@ -5,6 +5,7 @@ All notable changes are recorded here. Ticketloop follows semantic versioning, w
 ## Unreleased
 
 - Fixed the workflow screen so the standard template can be versioned without changing a project's assignment, and every workflow now shows the enforced worktree setup and cleanup steps.
+- Fixed Activity ordering to use each ticket's latest work timestamp, and added active processing time beside the relative update time.
 
 ## 0.2.0 - 2026-08-18
 
