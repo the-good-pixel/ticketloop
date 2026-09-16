@@ -308,10 +308,10 @@ function migrateConfig(raw: any): any {
     version = 4
   }
   if (version < 5) {
-    // standard@2 fails closed when triage omits or invents DECISION/KIND.
+    // standard@3 also gives data exports a narrow, no-code workflow.
     // Upgrade only the built-in v1 pin; custom workflows remain untouched.
     for (const project of raw.projects || []) {
-      if (!project.workflow || project.workflow === 'standard@1') project.workflow = 'standard@2'
+      if (!project.workflow || project.workflow === 'standard@1' || project.workflow === 'standard@2') project.workflow = 'standard@3'
     }
     version = 5
   }

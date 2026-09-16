@@ -176,6 +176,12 @@ export interface ProjectConfig {
   // built-in `standard` workflow (today's pipeline). A legacy `stages` block
   // still applies on top, compiled into per-node overrides.
   workflow?: string
+  // Optional credentials made available only to the data export step. Values
+  // are read at invocation time and never included in prompts or run records.
+  dataExport?: {
+    envFile: string
+    allowedEnv: string[]
+  }
   // What this project is ALLOWED to do. Project policy is the hard runtime
   // boundary: a workflow or an imported step can request authority, never grant
   // it. Anything unset is denied.

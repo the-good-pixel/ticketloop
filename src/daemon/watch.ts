@@ -393,7 +393,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
   // checkpoint. It fetches the ticket DIRECTLY (so it works even if the ticket
   // has moved out of the watched states) and launches it — subject to the
   // one-per-project rule.
-  function retryTicket(ticketKey: string, fresh: boolean): { ok: true } | { error: string } {
+  function retryTicket(ticketKey: string, fresh: boolean, clean: boolean): { ok: true } | { error: string } {
     const idx = ticketKey.indexOf(':')
     if (idx < 0) return { error: 'bad ticket key' }
     const projectName = ticketKey.slice(0, idx)
@@ -423,7 +423,7 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
       state.set(ticketKey, { ...prev, attempts: 0 }) // clear the give-up cap
       saveState(state)
     }
-    log.info(`↻ ${fresh ? 'restart (fresh)' : 'resume'} requested for ${ticketKey}`)
+    log.info(`↻ ${fresh ? 'restart (fresh)' : 'resume'}${clean ? ' with bot history hidden' : ''} requested for ${ticketKey}`)
     // Fetch + launch out of band (works regardless of the ticket's current state).
     activeRuns.set(ticketKey, { project: project.name, ticket: identifier }) // reserve the slot
     const tc = resolveTracker(cfg, project)
@@ -436,7 +436,8 @@ export async function watch(cfg: Config, opts: WatchOpts): Promise<void> {
         log.error(`retry: ticket ${identifier} not found in ${project.name}`)
         return
       }
-      await runJob({ project, tracker, ticket: t, key, marker: latestHumanActivity(t), reprocess: true })
+      const ticket = clean ? { ...t, comments: (t.comments || []).filter((comment) => !comment.isBot) } : t
+      await runJob({ project, tracker, ticket, key, marker: latestHumanActivity(t), reprocess: true })
     })()
       .catch((e) => log.error(`retry ${ticketKey}: ${String(e)}`))
       .finally(() => {

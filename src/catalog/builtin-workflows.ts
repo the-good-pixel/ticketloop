@@ -205,4 +205,47 @@ v2Kind.branch.default = [
   },
 ]
 
-export const BUILTIN_WORKFLOWS: Workflow[] = [STANDARD_WORKFLOW, STANDARD_WORKFLOW_V2]
+// Version 3 gives data requests their own narrow path. It does not prepare or
+// edit application code, and verification reads only the produced export.
+export const STANDARD_WORKFLOW_V3: Workflow = structuredClone(STANDARD_WORKFLOW_V2)
+STANDARD_WORKFLOW_V3.version = 3
+
+const v3Kind = STANDARD_WORKFLOW_V3.phases.find((phase) => isBranchNode(phase) && phase.id === 'route-kind')
+if (!v3Kind || !isBranchNode(v3Kind)) throw new Error('standard workflow kind branch is missing')
+v3Kind.branch.cases.data = [
+  {
+    id: 'data-plan',
+    step: S.plan,
+    overrides: {
+      instructionMode: 'replace',
+      instruction:
+        'Plan a read-only data export. Define the exact source tables, joins, filters, output columns, timezone conversions, boolean values, null handling, and validation counts. Do not propose application code changes, migrations, tests, browser work, or a pull request.',
+    },
+    on: { pass: 'next' },
+  },
+  {
+    id: 'data-export',
+    step: S.export,
+    overrides: {
+      instructionMode: 'replace',
+      instruction:
+        'Create the requested export using read-only access. Start a read-only transaction when the database supports it. Do not edit application code or create any file except the final export. Save the final export inside the current worktree and report its exact path, row count, columns, and query checks.',
+    },
+    on: { pass: 'next', wait: 'suspend', fail: 'stop' },
+  },
+  {
+    id: 'data-verify',
+    step: S.review,
+    overrides: {
+      skill: null,
+      allowedTools: 'Read,Bash',
+      instructionMode: 'replace',
+      instruction:
+        'Verify only the recorded export file against the ticket and data plan. Do not run application tests, start servers, use a browser, or edit files. Check that the file exists and is non-empty; validate its exact headers, row count, filters, boolean representation, timezone conversion, null handling, and duplicates. Report concise evidence and end with VERDICT: pass or VERDICT: fail.',
+    },
+    on: { pass: 'next', fail: 'stop', wait: 'suspend', skip: 'stop' },
+  },
+  { id: 'data-done', stop: 'success', outcome: 'exported', note: 'Verified data export posted to the ticket.' },
+]
+
+export const BUILTIN_WORKFLOWS: Workflow[] = [STANDARD_WORKFLOW, STANDARD_WORKFLOW_V2, STANDARD_WORKFLOW_V3]

@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { writeFileSync } from 'node:fs'
 import { registerChild, unregisterChild } from './children.js'
 import { log } from '../logger.js'
 import type { AgentResult, RunAgentOpts } from './types.js'
@@ -318,6 +319,11 @@ async function mockRun(o: RunAgentOpts): Promise<AgentResult> {
   // Ship text carries a per-repo PR URL (workdir basename) so multi-repo demos
   // produce distinct PRs the engine can parse into rec.prs.
   let text = MOCK_TEXTS[kind] || 'ok'
+  if (kind === 'export') {
+    const path = `${o.cwd}/member-export.csv`
+    writeFileSync(path, 'email,marketing_opt_in\nmember@example.com,true\n')
+    text = `Connected read-only and wrote ${path} (1 row; columns: email, marketing_opt_in).`
+  }
   // Test hook: make triage classify the ticket as "no action needed".
   if (kind === 'triage') {
     const k = mockTriageKind(o.prompt)

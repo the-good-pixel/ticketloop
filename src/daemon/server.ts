@@ -94,7 +94,7 @@ export interface ServerHooks {
   // Edit the global (non-project) settings from the dashboard.
   saveSettings: (patch: Record<string, unknown>) => { ok: true } | { error: string }
   // Continue a resumable ticket now; `fresh` discards its resume checkpoint.
-  retryTicket: (ticketKey: string, fresh: boolean) => { ok: true } | { error: string }
+  retryTicket: (ticketKey: string, fresh: boolean, clean: boolean) => { ok: true } | { error: string }
   // Stop a ticket's run immediately (kills its agent), and/or mark it
   // never-process. Both are independent — either, or both together.
   stopTicket: (ticketKey: string, opts: { ignore?: boolean; reason?: string }) => {
@@ -463,9 +463,9 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
       // ---- Resume / restart a failed or paused ticket now ----
       if (path === '/api/retry' && req.method === 'POST') {
         readBody(req).then((body) => {
-          const b = body as { ticketKey?: string; fresh?: boolean }
+          const b = body as { ticketKey?: string; fresh?: boolean; clean?: boolean }
           if (!b.ticketKey) return json(res, { error: 'ticketKey required' })
-          json(res, hooks.retryTicket(b.ticketKey, !!b.fresh))
+          json(res, hooks.retryTicket(b.ticketKey, !!b.fresh, !!b.clean))
         }).catch((e) => serverError(res, e))
         return
       }

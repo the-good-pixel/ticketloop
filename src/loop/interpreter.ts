@@ -35,7 +35,8 @@ import { appendRun, appendUsage } from '../store.js'
 import { log } from '../logger.js'
 import { buildNodePrompt, type PriorOutput } from './nodePrompt.js'
 import { parseResult, parseRouteField, parseRouteReason } from './verdict.js'
-import { artifactSucceeded, extractArtifact, parseCommentUrl } from './artifacts.js'
+import { artifactSucceeded, extractArtifact, parseCommentUrl, validateFileArtifact } from './artifacts.js'
+import { loadDataExportEnv } from './dataAccess.js'
 import {
   reattachWorkspace,
   scanRepos,
@@ -486,6 +487,21 @@ async function invoke(
 
   await ensureWorkspace(ctx, s, node)
   const workdir = repo?.workdir || workdirFor(s, node)
+  let exportEnv: Record<string, string> | undefined
+  if (step.id === 'export') {
+    try {
+      exportEnv = loadDataExportEnv(s.project)
+    } catch (e) {
+      return {
+        signal: {
+          type: 'suspend',
+          reason: 'waiting-external',
+          nodeId: node.id,
+          detail: String(e instanceof Error ? e.message : e),
+        },
+      }
+    }
+  }
   const sr = beginStage(s.rec, step.id as StageName, node)
   log.info(
     `  ▸ ${node.id} (${provider}/${node.settings.model || 'default'})${node.settings.skill ? ` +skill:${node.settings.skill}` : ''} — ${s.rec.ticket}`,
@@ -522,10 +538,12 @@ async function invoke(
     mockKind: step.id,
     // Post steps get the tracker key in the ENV so they hit the right workspace
     // via the API. It never enters the prompt text and is never logged.
-    env:
-      step.capabilities.externalEffects.includes('tracker-comment') && s.trackerKey && ctx.cfg.tracker.type === 'linear'
+    env: {
+      ...(exportEnv || {}),
+      ...(step.capabilities.externalEffects.includes('tracker-comment') && s.trackerKey && ctx.cfg.tracker.type === 'linear'
         ? { LINEAR_API_KEY: s.trackerKey }
-        : undefined,
+        : {}),
+    },
     ticketKey: `${s.project.name}:${s.ticket.identifier}`,
   })
 
@@ -572,7 +590,13 @@ async function applyResult(
   result: StepResult,
   reason: string,
 ): Promise<Signal> {
-  const artifact = extractArtifact(node.step, text, result, s.project.name)
+  let artifact = extractArtifact(node.step, text, result, s.project.name)
+  if (node.step.produces.type === 'file') {
+    artifact = artifact?.type === 'file' ? validateFileArtifact(artifact, workdirFor(s, node)) : undefined
+    if (!artifact) {
+      return applyTransition(s, node, 'wait', text, 'The export step did not produce a real, non-empty file inside the worktree.')
+    }
+  }
   if (artifact) s.artifacts[node.step.produces.key] = artifact
   if (node.step.contract === 'post') {
     const url = parseCommentUrl(text)
@@ -583,6 +607,10 @@ async function applyResult(
   // model call.
   if (node.step.capabilities.mutatesRepo) {
     const blocked = guardrail(ctx, s)
+    if (blocked) return blocked
+  }
+  if (artifact?.type === 'file') {
+    const blocked = exportChangeGuard(ctx, s, artifact.path)
     if (blocked) return blocked
   }
   return applyTransition(s, node, result, text, reason)
@@ -661,6 +689,25 @@ function guardrail(ctx: InterpCtx, s: State): Signal | undefined {
   const scan = scanRepos(ctx, s.project, s.ws)
   s.dirty = scan.dirty
   if (scan.block) return { type: 'stop', terminal: 'blocked', note: scan.block, reported: false }
+  return undefined
+}
+
+/** Data exports may create their declared file and nothing else. */
+function exportChangeGuard(ctx: InterpCtx, s: State, artifactPath: string): Signal | undefined {
+  if (!s.ws) return undefined
+  for (const repo of s.ws.repos) {
+    const changed = ctx.repo.changedFilesVsBase(repo.workdir, repo.base)
+    const allowed = artifactPath.startsWith(`${repo.workdir}/`) ? artifactPath.slice(repo.workdir.length + 1) : ''
+    const extra = changed.filter((path) => path !== allowed)
+    if (extra.length) {
+      return {
+        type: 'stop',
+        terminal: 'blocked',
+        note: `Data export changed code or extra files: ${extra.join(', ')}.`,
+        reported: false,
+      }
+    }
+  }
   return undefined
 }
 

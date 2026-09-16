@@ -278,6 +278,8 @@ export interface FileArtifact {
   type: 'file'
   path: string
   summary?: string
+  bytes?: number
+  sha256?: string
 }
 
 export type Artifact = PrArtifact | DeploymentArtifact | FileArtifact

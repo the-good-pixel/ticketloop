@@ -6,6 +6,10 @@
 // parsed once, typed, and stored.
 
 import type { Artifact, CatalogStep, DeploymentArtifact, FileArtifact, PrArtifact } from '../catalog/types.js'
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, relative, resolve } from 'node:path'
 
 const trim = (s: string) => s.replace(/[).,;]+$/, '')
 
@@ -31,9 +35,24 @@ export function parseDeployment(text: string, result: 'pass' | 'fail' | 'wait' |
 
 /** The export step's file. Models report it as a path; take the last one named. */
 export function parseFile(text: string): FileArtifact | undefined {
-  const m = [...(text || '').matchAll(/(?:^|\s)((?:\.?\/|~\/)?[\w./-]+\.(?:csv|tsv|json|xlsx?|txt|md))\b/gi)]
+  const m = [...(text || '').matchAll(/(?:<((?:\/|~\/|\.?\/)[^>]+\.(?:csv|tsv|json|xlsx?|txt|md))>|(?:^|[\s(])((?:\/|~\/|\.?\/)[^\s)>]+\.(?:csv|tsv|json|xlsx?|txt|md))(?=$|[\s)>.,;]))/gi)]
   if (!m.length) return undefined
-  return { type: 'file', path: trim(m[m.length - 1][1]) }
+  const last = m[m.length - 1]
+  return { type: 'file', path: trim((last[1] || last[2]).trim()) }
+}
+
+/** Resolve and prove that a reported export is a real, non-empty workspace file. */
+export function validateFileArtifact(file: FileArtifact, workdir: string): FileArtifact | undefined {
+  const expanded = file.path.startsWith('~/') ? resolve(homedir(), file.path.slice(2)) : file.path
+  const candidate = isAbsolute(expanded) ? resolve(expanded) : resolve(workdir, expanded)
+  if (!existsSync(candidate)) return undefined
+  const actual = realpathSync(candidate)
+  const rel = relative(realpathSync(workdir), actual)
+  if (rel.startsWith('..') || isAbsolute(rel)) return undefined
+  const stat = statSync(actual)
+  if (!stat.isFile() || stat.size === 0) return undefined
+  const sha256 = createHash('sha256').update(readFileSync(actual)).digest('hex')
+  return { ...file, path: actual, bytes: stat.size, sha256 }
 }
 
 /** Where a post step said it landed. */

@@ -133,7 +133,7 @@ export const BUILTIN_STEPS: CatalogStep[] = [
     contract: 'verdict',
     capabilities: readOnlyWorktree,
     resumePolicy: 'rerun',
-    consumes: ['plan', 'fix', 'verify'],
+    consumes: ['plan', 'fix', 'verify', 'exportFile'],
     produces: { key: 'review', type: 'text' },
   }),
   step({
