@@ -120,6 +120,11 @@ const state = {
 };
 const retryPending = new Set();
 
+let lastStatus = null;
+let lastActivity = [];
+let systemPausePending = null;
+const ticketPausePending = new Map();
+
 const OUTCOME_LABELS = {
   answered: 'Answer posted',
   exported: 'Export posted',
@@ -129,13 +134,13 @@ const OUTCOME_LABELS = {
   partial: 'Partly completed',
   merged: 'Merged',
   skipped: 'No action needed',
+  cancelled: 'Stopped by you',
   blocked: 'Safety block',
   'waiting-provider': 'Waiting for model quota',
   'waiting-approval': 'Waiting for approval',
   'waiting-deployment': 'Waiting for deployment',
   'waiting-external': 'Waiting on another system',
   paused: 'Paused',
-  cancelled: 'Stopped',
   failed: 'Needs attention',
   running: 'Running',
 };
@@ -198,17 +203,32 @@ function setConn(ok) {
 
 // ---- rendering: header/status ----
 function renderStatus(s) {
-  state.systemPaused = !!s.paused;
+  lastStatus = s;
+  const paused = systemPausePending == null ? !!s.paused : systemPausePending;
+  state.systemPaused = paused;
   state.resumable = new Map((s.resumableTickets || []).map((item) => [item.key, item]));
   $('#statusDot').classList.toggle('running', !!s.running);
-  $('#statusDot').classList.toggle('paused', !!s.paused);
-  $('#statusDot').title = s.paused ? 'loop paused' : s.running ? 'loop running' : 'loop idle';
+  $('#statusDot').classList.toggle('paused', paused);
+  $('#statusDot').title = paused ? 'ticket processing paused' : s.running ? 'ticket processing running' : 'ticket processing idle';
   const pauseBtn = $('#pauseBtn');
   if (pauseBtn) {
-    pauseBtn.textContent = s.paused ? '▶ Resume' : '⏸ Pause';
-    pauseBtn.classList.toggle('is-paused', !!s.paused);
-    pauseBtn.dataset.paused = s.paused ? '1' : '';
+    const pending = systemPausePending != null;
+    pauseBtn.textContent = pending
+      ? paused ? 'Pausing…' : 'Resuming…'
+      : paused ? '▶ Resume all' : '⏸ Pause all';
+    pauseBtn.classList.toggle('is-paused', paused);
+    pauseBtn.classList.toggle('is-pending', pending);
+    pauseBtn.dataset.paused = paused ? '1' : '';
+    pauseBtn.disabled = pending;
+    pauseBtn.setAttribute('aria-pressed', String(paused));
+    pauseBtn.setAttribute('aria-busy', String(pending));
+    pauseBtn.title = pending
+      ? paused ? 'Sending pause request…' : 'Resuming ticket processing…'
+      : paused
+        ? 'Resume ticket processing'
+        : 'Pause new work now; active steps finish at their next safe boundary';
   }
+  renderGlobalPauseState(s, paused);
   const mode = s.authMode === 'api' ? 'API' : 'subscription';
   $('#planBadge').textContent = (s.provider || 'claude') + ' · ' + mode;
 
@@ -224,6 +244,27 @@ function renderStatus(s) {
   } else {
     warnBox.hidden = true;
   }
+}
+
+function renderGlobalPauseState(status, paused) {
+  const box = $('#pauseState');
+  if (!box) return;
+  if (!paused) {
+    box.hidden = true;
+    return;
+  }
+
+  const activeCount = Array.isArray(status.activeRuns) ? status.activeRuns.length : 0;
+  const pending = systemPausePending === true;
+  const finishing = activeCount > 0;
+  $('#pauseStateTitle').textContent = pending || finishing
+    ? 'Pause requested'
+    : 'Ticket processing is paused';
+  $('#pauseStateDetail').textContent = finishing
+    ? activeCount + ' active ' + (activeCount === 1 ? 'run is' : 'runs are') + ' finishing the current step. No new tickets will start.'
+    : 'No new tickets will start until you resume processing.';
+  box.classList.toggle('is-finishing', finishing);
+  box.hidden = false;
 }
 
 // ---- rendering: quota meter card ----
@@ -256,7 +297,16 @@ function renderProviderQuota(snapshot) {
     row.appendChild(reset);
     node.appendChild(row);
   });
-  if (snapshot.fetchedAt) node.appendChild(el('div', 'meter-resets', 'Provider status · as of ' + fmtRelative(snapshot.fetchedAt)));
+  // Say where the number came from, not just how old it is. A live poll and a
+  // reading scraped from another tool's cache age very differently, and the card
+  // used to present both as "Provider status".
+  if (snapshot.fetchedAt) {
+    const cached = snapshot.source === 'local-cache';
+    const origin = cached ? 'Cached from Claude Code' : 'Polled from provider';
+    node.appendChild(el('div', 'meter-resets' + (cached ? ' is-stale' : ''), origin + ' · as of ' + fmtRelative(snapshot.fetchedAt)));
+  } else {
+    node.appendChild(el('div', 'meter-resets is-stale', 'Not polled yet'));
+  }
   return node;
 }
 
@@ -264,6 +314,18 @@ function renderUsage(u) {
   const grid = $('#quotaGrid');
   grid.replaceChildren();
   (u.providers || []).forEach((snapshot) => grid.appendChild(renderProviderQuota(snapshot)));
+}
+
+// Why the run ended this way. `error` covers failures; `summary` covers every
+// outcome, which is what a skipped ticket needs — "skipped" alone never told the
+// user whether triage saw a sign-off, an off-limits path, or nothing at all.
+// Show one line: the error when there is one, otherwise the summary.
+function appendWhy(main, run) {
+  if (run.error) {
+    main.appendChild(el('div', 'run-error', run.error));
+  } else if (run.summary) {
+    main.appendChild(el('div', 'run-why', run.summary));
+  }
 }
 
 // ---- rendering: stage tracker (compact pills) ----
@@ -325,7 +387,7 @@ function renderTicketGroup(g) {
   // At-a-glance: the latest run's progress.
   main.appendChild(renderStageTracker(latest.stages));
   if (isManualWait(latest.outcome)) main.appendChild(renderWaitNotice(latest, g.key));
-  else if (latest.error) main.appendChild(el('div', 'run-error', latest.error));
+  else appendWhy(main, latest);
 
   // Resume / Restart act on the TICKET (they continue its latest work).
   if (!isManualWait(latest.outcome) && (latest.outcome === 'failed' || latest.outcome === 'paused' || latest.outcome === 'blocked' || latest.outcome === 'waiting-provider')) {
@@ -386,7 +448,7 @@ function renderRun(r) {
   if (r.resumes) sub.appendChild(el('span', null, '↻ resumed ' + r.resumes + '×'));
   main.appendChild(sub);
   main.appendChild(renderStageTracker(r.stages));
-  if (r.error) main.appendChild(el('div', 'run-error', r.error));
+  appendWhy(main, r);
   head.appendChild(main);
 
   // side column
@@ -720,9 +782,13 @@ function runningStageName(run) {
 
 let pauseNote = ''; // transient warning shown after a ticket resume that can't run yet
 
+// Tickets with a stop request in flight, so the button can show progress.
+const stopping = new Set();
+
 function renderLiveMonitor(status, activity) {
   const box = $('#liveMonitor');
   status = status || {};
+  lastActivity = Array.isArray(activity) ? activity : [];
   const live = isLive(status, activity);
   if (!live && !pauseNote) {
     box.hidden = true;
@@ -733,7 +799,7 @@ function renderLiveMonitor(status, activity) {
   // Parallel runs: one row per active run (one per project). Fall back to the
   // running runs in the activity feed if the daemon didn't report activeRuns.
   const runs = Array.isArray(status.activeRuns) && status.activeRuns.length
-    ? status.activeRuns.map((a) => ({ project: a.project, ticket: a.ticket, run: findRunByTicket(activity, a.ticket) }))
+    ? status.activeRuns.map((a) => ({ project: a.project, ticket: a.ticket, run: findRunByTicket(activity, a.ticket, a.project) }))
     : (Array.isArray(activity) ? activity : [])
         .filter((r) => r && r.outcome === 'running')
         .map((r) => ({ project: r.project, ticket: r.ticket, run: r }));
@@ -742,33 +808,192 @@ function renderLiveMonitor(status, activity) {
   if (pauseNote) box.appendChild(el('div', 'live-note', pauseNote));
   if (runs.length > 1) box.appendChild(el('div', 'live-head mono', runs.length + ' running in parallel'));
 
+  const pausedTickets = new Set(Array.isArray(status.pausedTickets) ? status.pausedTickets : []);
   runs.forEach(({ project, ticket, run }) => {
     const step = runningStageName(run) || '…';
+    const ticketKey = project + ':' + ticket;
+    const pending = ticketPausePending.get(ticketKey);
+    const globallyPaused = !!status.paused || systemPausePending === true;
+    const pauseRequested = globallyPaused || pausedTickets.has(ticketKey) || pending === true;
     const row = el('div', 'live-row');
+    row.classList.toggle('is-pause-requested', pauseRequested);
     const dot = el('span', 'live-dot');
     dot.setAttribute('aria-hidden', 'true');
     row.appendChild(dot);
-    row.appendChild(el('span', 'live-label', 'Processing'));
+    row.appendChild(el('span', 'live-label', pending === true
+      ? 'Pausing…'
+      : pending === false
+        ? 'Resuming…'
+        : pauseRequested ? 'Pause requested' : 'Processing'));
     const who = project && ticket ? project + ' · ' + ticket : project || ticket;
     if (who) row.appendChild(el('span', 'live-ticket', who));
-    row.appendChild(el('span', 'live-step-chip', step));
-    const btn = el('button', 'btn btn-ghost btn-sm live-pause', '⏸');
-    btn.title = 'Pause this ticket at its next stage boundary';
-    btn.addEventListener('click', () => doTicketPause(project + ':' + ticket, true));
+    row.appendChild(el('span', 'live-step-chip', pauseRequested ? 'Finishing ' + step : step));
+    const btn = el('button', 'btn btn-ghost btn-sm live-pause', pauseRequested ? 'Cancel pause' : '⏸ Pause');
+    btn.disabled = pending != null || globallyPaused;
+    btn.title = globallyPaused
+      ? 'All ticket processing is paused; use Resume all in the header'
+      : pauseRequested
+        ? 'Let this ticket continue after its current step'
+        : 'Pause this ticket after its current step finishes';
+    btn.addEventListener('click', () => doTicketPause(ticketKey, !pauseRequested));
     row.appendChild(btn);
+
+    // Stop is the escape hatch for a ticket that should never have been picked
+    // up. Unlike Pause it kills the step in flight, so it asks first.
+    const stop = el('button', 'btn btn-ghost btn-sm live-stop', stopping.has(ticketKey) ? 'Stopping…' : '✋ Stop');
+    stop.disabled = stopping.has(ticketKey);
+    stop.title = 'Stop this run immediately, discarding the step in progress';
+    stop.addEventListener('click', () => openStopDialog(ticketKey));
+    row.appendChild(stop);
     box.appendChild(row);
   });
 
   box.hidden = false;
 }
 
-// Pause/resume a single ticket; surface the one-per-project warning inline.
-async function doTicketPause(ticketKey, paused) {
+// Stopping kills work in progress and can permanently exclude the ticket, so it
+// is confirmed rather than fired from a single click. The two effects are
+// independent: stop this run, never process again, or both.
+function openStopDialog(ticketKey) {
+  const wrap = el('div', 'overlay');
+  const card = el('div', 'modal');
+
+  const head = el('div', 'modal-head');
+  head.appendChild(el('h2', null, 'Stop ' + ticketKey + '?'));
+  const close = el('button', 'icon-btn', '\u00d7');
+  close.setAttribute('aria-label', 'Close');
+  close.addEventListener('click', () => wrap.remove());
+  head.appendChild(close);
+  card.appendChild(head);
+
+  const body = el('div', 'modal-body');
+  body.appendChild(el('p', 'stop-note',
+    'The step running right now is killed and its work is discarded. Any branch or worktree already created is left in place for you to inspect.'));
+  const label = el('label', 'stop-check');
+  const cb = el('input');
+  cb.type = 'checkbox';
+  label.appendChild(cb);
+  label.appendChild(el('span', null, 'Also never process this ticket again'));
+  body.appendChild(label);
+  body.appendChild(el('p', 'stop-note',
+    'New comments will not wake it. Clear the mark from the "Never processed" list to undo.'));
+  card.appendChild(body);
+
+  const foot = el('div', 'modal-foot');
+  const actions = el('div', 'modal-actions');
+  const cancel = el('button', 'btn btn-ghost', 'Keep running');
+  cancel.addEventListener('click', () => wrap.remove());
+  const confirm = el('button', 'btn btn-danger', 'Stop now');
+  confirm.addEventListener('click', () => {
+    wrap.remove();
+    doStop(ticketKey, cb.checked);
+  });
+  actions.appendChild(cancel);
+  actions.appendChild(confirm);
+  foot.appendChild(actions);
+  card.appendChild(foot);
+
+  wrap.appendChild(card);
+  wrap.addEventListener('click', (e) => { if (e.target === wrap) wrap.remove(); });
+  document.addEventListener('keydown', function esc(e) {
+    if (e.key !== 'Escape') return;
+    document.removeEventListener('keydown', esc);
+    wrap.remove();
+  });
+  document.body.appendChild(wrap);
+  confirm.focus();
+}
+
+async function doStop(ticketKey, ignore) {
+  stopping.add(ticketKey);
+  renderLiveMonitor(lastStatus || {}, lastActivity);
   try {
-    const r = await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused, ticketKey }) });
-    pauseNote = r && r.warning ? r.warning : '';
+    const r = await mutate('/api/stop', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticketKey, ignore }),
+    });
+    toast(r && r.stopped
+      ? (ignore ? 'Stopped · will not be processed again' : 'Stopped')
+      : (ignore ? 'Marked never-process' : 'Nothing was running for that ticket'));
     await poll();
   } catch (e) {
+    toast('Could not stop that ticket');
+    setConn(false);
+  } finally {
+    stopping.delete(ticketKey);
+    renderLiveMonitor(lastStatus || {}, lastActivity);
+  }
+}
+
+async function doUnignore(ticketKey) {
+  try {
+    await mutate('/api/unignore', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ticketKey }),
+    });
+    toast(ticketKey + ' will be processed again');
+    await poll();
+  } catch (e) {
+    toast('Could not clear that mark');
+    setConn(false);
+  }
+}
+
+// The never-process list. Hidden entirely when empty — a mark the user cannot
+// see is a mark they cannot undo, but an always-visible empty box is noise.
+function renderIgnored(status) {
+  const box = $('#ignoredBox');
+  if (!box) return;
+  const marks = Array.isArray(status && status.ignoredTickets) ? status.ignoredTickets : [];
+  box.replaceChildren();
+  if (!marks.length) {
+    box.hidden = true;
+    return;
+  }
+  box.appendChild(el('div', 'ignored-head', 'Never processed (' + marks.length + ')'));
+  marks.forEach((m) => {
+    const row = el('div', 'ignored-row');
+    row.appendChild(el('span', 'ignored-key mono', m.ticketKey));
+    if (m.at) row.appendChild(el('span', 'ignored-when', 'since ' + fmtRelative(m.at)));
+    if (m.reason) row.appendChild(el('span', 'ignored-reason', m.reason));
+    const undo = el('button', 'btn btn-ghost btn-sm', 'Process again');
+    undo.addEventListener('click', () => doUnignore(m.ticketKey));
+    row.appendChild(undo);
+    box.appendChild(row);
+  });
+  box.hidden = false;
+}
+
+// Pause/resume a single ticket; surface the one-per-project warning inline.
+async function doTicketPause(ticketKey, paused) {
+  if (ticketPausePending.has(ticketKey)) return;
+  ticketPausePending.set(ticketKey, paused);
+  renderLiveMonitor(lastStatus || {}, lastActivity);
+  try {
+    const r = await mutate('/api/pause', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused, ticketKey }),
+    });
+    pauseNote = r && r.warning ? r.warning : '';
+    if (lastStatus) {
+      const keys = new Set(Array.isArray(lastStatus.pausedTickets) ? lastStatus.pausedTickets : []);
+      if (paused) keys.add(ticketKey);
+      else keys.delete(ticketKey);
+      lastStatus = { ...lastStatus, pausedTickets: [...keys] };
+    }
+    ticketPausePending.delete(ticketKey);
+    renderLiveMonitor(lastStatus || {}, lastActivity);
+    toast(paused
+      ? 'Pause requested · the current step will finish first'
+      : 'Ticket will keep running');
+    await poll();
+  } catch (e) {
+    ticketPausePending.delete(ticketKey);
+    renderLiveMonitor(lastStatus || {}, lastActivity);
+    toast('Could not change ticket pause state');
     setConn(false);
   }
 }
@@ -793,8 +1018,10 @@ async function doRetry(ticketKey, fresh) {
 }
 
 // The running run for a given ticket in the activity feed (for its live stage).
-function findRunByTicket(activity, ticket) {
-  return (Array.isArray(activity) ? activity : []).find((r) => r && r.ticket === ticket && r.outcome === 'running') || null;
+function findRunByTicket(activity, ticket, project) {
+  return (Array.isArray(activity) ? activity : []).find((r) =>
+    r && r.ticket === ticket && (!project || r.project === project) && r.outcome === 'running',
+  ) || null;
 }
 
 // ---- poll loop ----
@@ -819,6 +1046,7 @@ async function poll() {
     renderUsage(usage);
     renderActivity(activity);
     renderLiveMonitor(status, activity);
+    renderIgnored(status);
     live = isLive(status, activity);
   } catch (e) {
     setConn(false); // keep last-good UI, show reconnecting
@@ -849,17 +1077,36 @@ async function doScan() {
 // ---- pause / resume button ----
 async function doPauseToggle() {
   const btn = $('#pauseBtn');
-  if (!btn) return;
+  if (!btn || systemPausePending != null) return;
   const paused = btn.dataset.paused === '1';
-  btn.disabled = true;
+  const nextPaused = !paused;
+  systemPausePending = nextPaused;
+  renderStatus(lastStatus || { paused, activeRuns: [] });
+  renderLiveMonitor(lastStatus || {}, lastActivity);
   try {
-    await api('/api/pause', { method: 'POST', body: JSON.stringify({ paused: !paused }) });
+    const result = await mutate('/api/pause', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ paused: nextPaused }),
+    });
+    systemPausePending = null;
+    lastStatus = { ...(lastStatus || {}), paused: !!result.paused };
+    renderStatus(lastStatus);
+    renderLiveMonitor(lastStatus, lastActivity);
+    const activeCount = Array.isArray(lastStatus.activeRuns) ? lastStatus.activeRuns.length : 0;
+    toast(nextPaused
+       ? activeCount
+         ? 'Pause requested · active steps will finish first'
+         : 'Ticket processing paused'
+       : 'Ticket processing resumed');
     if (activeView === 'history') await fetchHistory('filter');
     else await poll();
   } catch (e) {
+    systemPausePending = null;
+    renderStatus(lastStatus || { paused, activeRuns: [] });
+    renderLiveMonitor(lastStatus || {}, lastActivity);
+    toast('Could not change processing state');
     setConn(false);
-  } finally {
-    btn.disabled = false;
   }
 }
 
