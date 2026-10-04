@@ -6,11 +6,11 @@
  * tracker credentials.
  */
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, realpathSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const root = mkdtempSync(join(tmpdir(), 'ticketloop-workflow-smoke-'))
+const root = realpathSync(mkdtempSync(join(tmpdir(), 'ticketloop-workflow-smoke-')))
 
 async function main(): Promise<void> {
   // Runner mock counters are read when the module loads, so set every injector
@@ -41,6 +41,16 @@ async function main(): Promise<void> {
 
   const tracker = new MockTracker(config.tracker)
   const ctx = makeEngineCtx(config, true)
+  // The export mock writes a real file; make the mock worktree exist and expose
+  // that declared file to the data guard rather than MockRepo's code-change fixture.
+  const createWorktree = ctx.repo.createWorktree.bind(ctx.repo)
+  ctx.repo.createWorktree = (repo, path, branch, base) => {
+    mkdirSync(path, { recursive: true })
+    createWorktree(repo, path, branch, base)
+  }
+  const changedFiles = ctx.repo.changedFilesVsBase.bind(ctx.repo)
+  ctx.repo.changedFilesVsBase = (path, base) =>
+    path.endsWith('/SMOKE-DATA') ? ['member-export.csv'] : changedFiles(path, base)
   const ticket = (identifier: string, title: string, description: string, labels: string[] = []) => ({
     id: identifier.toLowerCase(),
     identifier,

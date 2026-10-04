@@ -1,0 +1,676 @@
+{
+  "date": "2026-10-04",
+  "baseline": "68ebe6f",
+  "adk": "2.2.0",
+  "node": "v26.8.1",
+  "dependencies": 201,
+  "recovery": [
+    {
+      "mode": "pause",
+      "probePassed": true,
+      "compatible": true,
+      "prepared": 1,
+      "remote": 0,
+      "actions": [
+        {
+          "action": "prepare",
+          "turn": "first"
+        },
+        {
+          "action": "approval",
+          "turn": "first"
+        },
+        {
+          "action": "finish",
+          "turn": "second"
+        }
+      ],
+      "eventCount": 4,
+      "sqliteBytes": 45056,
+      "observed": "Persisted human-input pause resumes across processes without repeating preparation."
+    },
+    {
+      "mode": "crash",
+      "probePassed": true,
+      "compatible": false,
+      "prepared": 2,
+      "remote": 1,
+      "actions": [
+        {
+          "action": "prepare",
+          "turn": "first"
+        },
+        {
+          "action": "blocked-before-action",
+          "turn": "first"
+        },
+        {
+          "action": "prepare",
+          "turn": "second"
+        },
+        {
+          "action": "remote-action",
+          "turn": "second"
+        },
+        {
+          "action": "finish",
+          "turn": "second"
+        }
+      ],
+      "eventCount": 4,
+      "sqliteBytes": 45056,
+      "observed": "Fresh Runner invocation repeats completed preparation after an unplanned interruption."
+    },
+    {
+      "mode": "error",
+      "probePassed": true,
+      "compatible": false,
+      "prepared": 2,
+      "remote": 1,
+      "actions": [
+        {
+          "action": "prepare",
+          "turn": "first"
+        },
+        {
+          "action": "error",
+          "turn": "first"
+        },
+        {
+          "action": "prepare",
+          "turn": "second"
+        },
+        {
+          "action": "remote-action",
+          "turn": "second"
+        },
+        {
+          "action": "finish",
+          "turn": "second"
+        }
+      ],
+      "eventCount": 5,
+      "sqliteBytes": 45056,
+      "observed": "Fresh Runner invocation repeats completed preparation after an unplanned interruption."
+    },
+    {
+      "mode": "side-effect",
+      "probePassed": true,
+      "compatible": false,
+      "prepared": 2,
+      "remote": 2,
+      "actions": [
+        {
+          "action": "prepare",
+          "turn": "first"
+        },
+        {
+          "action": "remote-action",
+          "turn": "first"
+        },
+        {
+          "action": "prepare",
+          "turn": "second"
+        },
+        {
+          "action": "remote-action",
+          "turn": "second"
+        },
+        {
+          "action": "finish",
+          "turn": "second"
+        }
+      ],
+      "eventCount": 4,
+      "sqliteBytes": 45056,
+      "observed": "Hard crash repeats both preparation and the simulated remote action."
+    },
+    {
+      "mode": "reconcile",
+      "probePassed": true,
+      "compatible": false,
+      "prepared": 2,
+      "remote": 1,
+      "actions": [
+        {
+          "action": "prepare",
+          "turn": "first"
+        },
+        {
+          "action": "remote-action",
+          "turn": "first"
+        },
+        {
+          "action": "prepare",
+          "turn": "second"
+        },
+        {
+          "action": "reconciled",
+          "turn": "second"
+        },
+        {
+          "action": "finish",
+          "turn": "second"
+        }
+      ],
+      "eventCount": 4,
+      "sqliteBytes": 45056,
+      "observed": "ADK repeats preparation; custom external-result reconciliation prevents repeating the remote action."
+    }
+  ],
+  "probeResults": {
+    "node-probes.ts": [
+      {
+        "name": "resume policies",
+        "probePassed": true,
+        "compatible": false,
+        "counts": {
+          "replay": 1,
+          "rerun": 1,
+          "revalidate": 1,
+          "idempotent": 1
+        },
+        "note": "Completed graph nodes were skipped even with rerunOnResume true. Ticketloop rerun/revalidate semantics require additional handling."
+      },
+      {
+        "name": "transient retries",
+        "passed": true,
+        "attempts": 3
+      },
+      {
+        "name": "timeout prevents downstream execution",
+        "passed": true
+      },
+      {
+        "name": "cancellation without process-group bridge",
+        "passed": true,
+        "targetAlive": true,
+        "peerAlive": true
+      },
+      {
+        "name": "cancellation with Ticketloop process-group bridge",
+        "passed": true,
+        "targetAlive": false,
+        "peerAlive": true
+      }
+    ],
+    "domain-probes.ts": [
+      {
+        "name": "new activity invalidates checkpoint at shared engine entry",
+        "passed": true
+      },
+      {
+        "name": "plan changes during suspension",
+        "probePassed": true,
+        "compatible": false,
+        "existingGap": true,
+        "observed": "Current engine accepts a changed plan digest while replaying cached outputs; snapshot enforcement is not implemented at this entry."
+      },
+      {
+        "name": "missing permissions rejected before execution",
+        "passed": true
+      },
+      {
+        "name": "quota suspension and resume through both executors",
+        "passed": true
+      },
+      {
+        "name": "shared workspace reattachment detects missing worktree",
+        "passed": true,
+        "note": "helper check; complete real-run recovery was not exercised"
+      },
+      {
+        "name": "bundle trust declarations and checksum refusal retained",
+        "passed": true
+      },
+      {
+        "name": "built-in deployment steps declare DEV-only capability",
+        "passed": true,
+        "note": "catalog inspection; no deployment was invoked"
+      }
+    ]
+  },
+  "benchmark": {
+    "scope": "five fresh Node processes per module; import only, not an end-to-end daemon benchmark",
+    "samples": {
+      "current": [
+        {
+          "ms": 50.915584,
+          "rss": 66420736
+        },
+        {
+          "ms": 48.88199999999999,
+          "rss": 66813952
+        },
+        {
+          "ms": 40.112542,
+          "rss": 66519040
+        },
+        {
+          "ms": 39.52570899999999,
+          "rss": 66568192
+        },
+        {
+          "ms": 39.839999999999996,
+          "rss": 66912256
+        }
+      ],
+      "adk": [
+        {
+          "ms": 771.178041,
+          "rss": 164839424
+        },
+        {
+          "ms": 609.9545,
+          "rss": 164478976
+        },
+        {
+          "ms": 643.542917,
+          "rss": 166330368
+        },
+        {
+          "ms": 564.2216659999999,
+          "rss": 164364288
+        },
+        {
+          "ms": 605.8461669999999,
+          "rss": 163725312
+        }
+      ]
+    },
+    "medians": {
+      "current": {
+        "ms": 40.112542,
+        "rss": 66568192
+      },
+      "adk": {
+        "ms": 609.9545,
+        "rss": 164478976
+      }
+    }
+  },
+  "comparisons": [
+    {
+      "scenario": "question",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "answered"
+        ],
+        "ms": 45.72325000000001,
+        "rss": 70533120
+      },
+      "adk": {
+        "outcomes": [
+          "answered"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 6
+        },
+        "ms": 59.89470800000004,
+        "rss": 180846592
+      }
+    },
+    {
+      "scenario": "data",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "exported"
+        ],
+        "ms": 122.0145,
+        "rss": 71499776
+      },
+      "adk": {
+        "outcomes": [
+          "exported"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 9
+        },
+        "ms": 136.56012499999997,
+        "rss": 179798016
+      }
+    },
+    {
+      "scenario": "bug",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "ms": 192.43016599999999,
+        "rss": 71843840
+      },
+      "adk": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 15
+        },
+        "ms": 222.282416,
+        "rss": 181501952
+      }
+    },
+    {
+      "scenario": "change",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "ms": 178.979625,
+        "rss": 72187904
+      },
+      "adk": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 14
+        },
+        "ms": 213.54366700000003,
+        "rss": 181567488
+      }
+    },
+    {
+      "scenario": "no-action",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "skipped"
+        ],
+        "ms": 28.648792,
+        "rss": 71663616
+      },
+      "adk": {
+        "outcomes": [
+          "skipped"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 4
+        },
+        "ms": 46.25324999999998,
+        "rss": 181125120
+      }
+    },
+    {
+      "scenario": "ineligible",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "skipped"
+        ],
+        "ms": 28.47758299999998,
+        "rss": 71106560
+      },
+      "adk": {
+        "outcomes": [
+          "skipped"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 4
+        },
+        "ms": 64.52766700000006,
+        "rss": 178094080
+      }
+    },
+    {
+      "scenario": "verify-repair",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "ms": 227.137667,
+        "rss": 71155712
+      },
+      "adk": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 16
+        },
+        "ms": 254.688083,
+        "rss": 180289536
+      }
+    },
+    {
+      "scenario": "review-repair",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "ms": 239.59650000000002,
+        "rss": 72925184
+      },
+      "adk": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 17
+        },
+        "ms": 258.5530829999999,
+        "rss": 181452800
+      }
+    },
+    {
+      "scenario": "ship-repair",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "ms": 261.465625,
+        "rss": 72302592
+      },
+      "adk": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 18
+        },
+        "ms": 259.18108300000006,
+        "rss": 180355072
+      }
+    },
+    {
+      "scenario": "ship-wait",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "waiting-external",
+          "pr-opened"
+        ],
+        "ms": 337.71995799999996,
+        "rss": 71270400
+      },
+      "adk": {
+        "outcomes": [
+          "waiting-external",
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 104,
+          "events": 25
+        },
+        "ms": 315.4992910000001,
+        "rss": 180256768
+      }
+    },
+    {
+      "scenario": "deploy-wait",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "waiting-approval",
+          "deployed"
+        ],
+        "ms": 334.017375,
+        "rss": 72171520
+      },
+      "adk": {
+        "outcomes": [
+          "waiting-approval",
+          "deployed"
+        ],
+        "metrics": {
+          "nodes": 104,
+          "events": 26
+        },
+        "ms": 368.01595800000007,
+        "rss": 180322304
+      }
+    },
+    {
+      "scenario": "no-progress",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "failed"
+        ],
+        "ms": 166.481083,
+        "rss": 71942144
+      },
+      "adk": {
+        "outcomes": [
+          "failed"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 11
+        },
+        "ms": 191.032334,
+        "rss": 179879936
+      }
+    },
+    {
+      "scenario": "pause-resume",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "paused",
+          "pr-opened"
+        ],
+        "ms": 280.23875,
+        "rss": 71630848
+      },
+      "adk": {
+        "outcomes": [
+          "paused",
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 104,
+          "events": 22
+        },
+        "ms": 263.754,
+        "rss": 181862400
+      }
+    },
+    {
+      "scenario": "ship-error-resume",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "failed",
+          "pr-opened"
+        ],
+        "ms": 323.060916,
+        "rss": 70860800
+      },
+      "adk": {
+        "outcomes": [
+          "failed",
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 104,
+          "events": 25
+        },
+        "ms": 339.4675,
+        "rss": 181862400
+      }
+    },
+    {
+      "scenario": "codex",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "ms": 184.82891700000002,
+        "rss": 71761920
+      },
+      "adk": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 14
+        },
+        "ms": 229.27854200000002,
+        "rss": 180781056
+      }
+    },
+    {
+      "scenario": "multi-repo",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "ms": 219.57925,
+        "rss": 71450624
+      },
+      "adk": {
+        "outcomes": [
+          "pr-opened"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 14
+        },
+        "ms": 238.66720799999985,
+        "rss": 179240960
+      }
+    },
+    {
+      "scenario": "forbidden-path",
+      "passed": true,
+      "current": {
+        "outcomes": [
+          "blocked"
+        ],
+        "ms": 114.93862500000002,
+        "rss": 71417856
+      },
+      "adk": {
+        "outcomes": [
+          "blocked"
+        ],
+        "metrics": {
+          "nodes": 52,
+          "events": 7
+        },
+        "ms": 207.63691700000004,
+        "rss": 179109888
+      }
+    }
+  ]
+}

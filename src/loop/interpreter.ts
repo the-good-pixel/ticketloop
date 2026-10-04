@@ -21,6 +21,7 @@ import type {
 } from '../types.js'
 import type { Artifact, StepResult, TerminalClass } from '../catalog/types.js'
 import type {
+  CompiledBranchNode,
   CompiledLoopNode,
   CompiledPhase,
   CompiledStepNode,
@@ -55,12 +56,14 @@ export interface InterpCtx {
 }
 
 /** How a node's execution continues. Signals bubble up until something owns them. */
-type Signal =
+export type WorkflowSignal =
   | { type: 'continue' }
   | { type: 'stop'; terminal: TerminalClass; outcome?: RunOutcome; note?: string; reported?: boolean }
   | { type: 'suspend'; reason: string; nodeId: string; detail?: string; provider?: AgentProvider; resumeAt?: number }
   | { type: 'repair'; loopId: string; detail: string }
   | { type: 'exit-loop'; loopId?: string }
+
+type Signal = WorkflowSignal
 
 const CONTINUE: Signal = { type: 'continue' }
 
@@ -114,6 +117,17 @@ export interface RunWorkflowOpts {
   imagePaths?: string[]
 }
 
+/** Narrow execution seam for evaluating another graph driver. Domain work stays shared. */
+export interface WorkflowExecution {
+  step(node: CompiledStepNode, iteration?: number): Promise<WorkflowSignal>
+  branch(node: CompiledBranchNode): string | undefined
+  findings(text: string): void
+  degraded(note: string): void
+  hasPr(): boolean
+}
+
+export type WorkflowDriver = (execution: WorkflowExecution) => Promise<WorkflowSignal>
+
 // ---- entry point -----------------------------------------------------------
 
 export async function runWorkflow(
@@ -124,6 +138,7 @@ export async function runWorkflow(
   rec: RunRecord,
   ck: Checkpoint,
   opts: RunWorkflowOpts = {},
+  driver?: WorkflowDriver,
 ): Promise<RunRecord> {
   const s: State = {
     rec,
@@ -161,7 +176,19 @@ export async function runWorkflow(
 
   let signal: Signal
   try {
-    signal = await runPhases(ctx, s, plan.phases)
+    signal = driver
+      ? await driver({
+          step: (node, iteration) => runStepNode(ctx, s, node, iteration),
+          branch: (node) => {
+            const source = s.outputs.get(s.plan.nodes.get(node.on.nodeId)?.step.produces.key || '')
+            s.routeReason = source ? parseRouteReason(source.text) : undefined
+            return source ? parseRouteField(source.text, node.on.field) : undefined
+          },
+          findings: (text) => { s.openFindings = text },
+          degraded: (note) => { s.degraded = note },
+          hasPr: () => s.prs.some((p) => p.status === 'opened'),
+        })
+      : await runPhases(ctx, s, plan.phases)
   } catch (e) {
     if (e instanceof WorkflowPaused) {
       finish(s, 'paused', `Paused before "${e.nodeId}". Resume to continue.`)
