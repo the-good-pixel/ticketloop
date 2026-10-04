@@ -21,6 +21,7 @@ import {
   workflowsCmd,
 } from './commands/catalog.js'
 import { DAEMON_STATE } from './paths.js'
+import { listOperations, resolveOperation } from './loop/operations.js'
 import { ticketloopVersion } from './version.js'
 
 interface Flags {
@@ -74,6 +75,9 @@ Usage:
   ticketloop ignore <ticket>      Never process this ticket (does not stop a live run)
   ticketloop unignore <ticket>    Undo an ignore — the ticket becomes a candidate again
   ticketloop status               Print quota meters + recent runs
+  ticketloop operation list [key] Inspect saved external actions for <project>:<ID>
+  ticketloop operation resolve ID URL|performed|not-performed --reason TEXT
+                                  Record a reviewed recovery decision (pause first)
   ticketloop steps [<id>@<v>]     List the step catalog, or show one step
   ticketloop workflows            List workflows and which projects use them
   ticketloop workflow show [ref]  Print the compiled execution plan (--project <name>)
@@ -168,6 +172,18 @@ async function main() {
     return
   }
   if (cmd === 'init') return initCmd()
+  if (cmd === 'operation') {
+    if (flags.positional[0] === 'list') {
+      console.log(JSON.stringify(listOperations(flags.positional[1]).map(({ output, ...operation }) => operation), null, 2))
+      return
+    }
+    if (flags.positional[0] === 'resolve' && flags.positional[1] && flags.positional[2]) {
+      resolveOperation(flags.positional[1], flags.positional[2], flags.reason || '')
+      log.info('Saved the local recovery decision. Continue the run after reviewing its remaining work.')
+      return
+    }
+    throw new Error('usage: ticketloop operation list [project:ID] | resolve <operation-id> <URL|performed|not-performed> --reason <review>')
+  }
   // Pause/resume just flip the cross-process control file — no config needed.
   // The running daemon reads it before its next scan / stage boundary.
   // With no arg → system-level; with a ticket id/key → that ticket only.

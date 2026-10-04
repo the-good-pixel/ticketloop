@@ -81,7 +81,7 @@ export function supportBundleCmd(cfg: Config, configPath: string | null, output?
       repositoryCount: project.repos?.length || 1,
       autonomy: project.autonomy,
       worktree: project.useWorktree !== false,
-      engine: project.engine || 'legacy',
+      engine: project.engine || 'workflow',
       workflow: {
         source: workflowEntry?.scope === 'builtin' ? 'built-in' : 'custom',
         version: workflowVersion,

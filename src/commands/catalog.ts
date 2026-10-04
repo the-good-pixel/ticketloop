@@ -34,7 +34,25 @@ export const DEFAULT_WORKFLOW_REF = 'standard@3'
 
 /** The workflow a project runs, and the legacy stage blocks layered on it. */
 export function planForProject(cfg: Config, project: ProjectConfig, cat = loadCatalog()): ExecutionPlan {
-  const wf = getWorkflow(cat, project.workflow || DEFAULT_WORKFLOW_REF)
+  const wf = structuredClone(getWorkflow(cat, project.workflow || DEFAULT_WORKFLOW_REF))
+  // Old stage settings continue to configure the built-in pipeline.
+  if (wf.builtin && wf.id === 'standard') {
+    const visit = (phases: typeof wf.phases) => {
+      for (const phase of phases) {
+        if ('loop' in phase) phase.loop.maxIterations = cfg.loop.enabled === false ? 1 : Math.max(1, cfg.loop.maxFixIterations)
+        if ('branch' in phase) {
+          if (phase.id === 'route-kind' && project.autonomy === 'clarify') {
+            for (const kind of ['change', 'bug'])
+              phase.branch.cases[kind] = structuredClone(phase.branch.cases.question).map(node =>
+                'id' in node ? { ...node, id: `${kind}-${node.id}` } : node)
+          }
+          for (const list of Object.values(phase.branch.cases)) visit(list)
+          if (Array.isArray(phase.branch.default)) visit(phase.branch.default)
+        }
+      }
+    }
+    visit(wf.phases)
+  }
   return compileWorkflow(cat, wf, {
     config: cfg,
     project,
@@ -239,8 +257,8 @@ export function workflowAssignCmd(
   if (engine) project.engine = engine as ProjectConfig['engine']
   const written = saveConfig(cfg, configPath)
   log.info(`project "${projectName}" now runs ${pinned}${engine ? ` on the ${engine} engine` : ''} (saved to ${written})`)
-  if ((project.engine || 'legacy') === 'legacy')
-    log.warn(`  …but project "${projectName}" still uses engine: legacy, so the workflow is not what actually runs. Set engine: workflow to switch it.`)
+  if (project.engine === 'legacy')
+    log.warn(`  …but project "${projectName}" still uses engine: legacy, new runs are blocked until you remove the setting or set engine: workflow. Existing legacy checkpoints can still finish.`)
 }
 
 // ---- sharing ----------------------------------------------------------------

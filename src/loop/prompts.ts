@@ -1,3 +1,5 @@
+import { ticketBlock, commentThread } from './ticketText.js'
+export { ticketBlock, commentThread } from './ticketText.js'
 import type { ProjectConfig, StageName, Ticket } from '../types.js'
 
 // The pre-ship checks that run together after fix (order matters — earlier
@@ -43,20 +45,6 @@ export interface StageExtras {
   // data path: shared stages (plan/prepare/verify) run read-only for a data
   // export, overriding any change-oriented wording in the project's instruction
   dataMode?: boolean
-}
-
-export function ticketBlock(t: Ticket): string {
-  return `Ticket ${t.identifier}: ${t.title}\n\nDescription:\n${t.description || '(none)'}\nLink: ${t.url}`
-}
-
-export function commentThread(t: Ticket): string {
-  const cs = t.comments || []
-  if (!cs.length) return ''
-  const lines = cs.map((c) => {
-    const who = c.isBot ? `${c.authorName} (ticketloop)` : c.authorName
-    return `- ${who}: ${c.body}`
-  })
-  return `Comment thread (oldest first):\n${lines.join('\n')}`
 }
 
 /**

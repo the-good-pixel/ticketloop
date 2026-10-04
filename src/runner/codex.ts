@@ -57,6 +57,18 @@ export function buildCodexArgs(o: RunAgentOpts): { args: string[]; prompt: strin
     args.push('--sandbox', mode === 'acceptEdits' ? 'workspace-write' : 'read-only')
     args.push('-c', 'approval_policy="never"')
   }
+  if (o.env && Object.keys(o.env).length) {
+    // Codex's core inheritance and default secret exclusions would drop scoped
+    // tracker/data credentials. Allow only core shell variables and this step's
+    // explicit environment. Credential values stay in the child env, never argv.
+    const names = [...new Set(['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR',
+      'TEMP', 'TMP', 'LANG', 'LC_ALL', 'TERM', 'TZ', 'SystemRoot', 'COMSPEC', 'PATHEXT',
+      ...Object.keys(o.env).filter(name => !(o.authMode === 'subscription' && ['OPENAI_API_KEY', 'CODEX_API_KEY'].includes(name)))])]
+    args.push('-c', 'shell_environment_policy.inherit="all"',
+      '-c', 'shell_environment_policy.ignore_default_excludes=true',
+      '-c', 'shell_environment_policy.exclude=[]',
+      '-c', `shell_environment_policy.include_only=${toml(names)}`)
+  }
   addMcpArgs(args, o.mcp)
   return { args, prompt }
 }

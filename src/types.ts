@@ -170,10 +170,9 @@ export interface ProjectConfig {
   // branch in repoPath instead.
   useWorktree?: boolean
   worktreeBase?: string | null // where to put worktrees (default ~/.ticketloop/worktrees)
-  // Which execution engine runs this project. `legacy` (default) is the
-  // hard-coded pipeline in engine.ts; `workflow` interprets the assigned
-  // workflow. Opt in per project so one project can prove the new path while
-  // everything else keeps running the old one.
+  // New runs use the workflow interpreter. `legacy` is accepted only so older
+  // config can load with recovery guidance; unfinished legacy checkpoints drain
+  // through the compatibility executor regardless of the project setting.
   engine?: 'legacy' | 'workflow'
   // Which workflow this project runs, as "<id>@<version>". Omit for the
   // built-in `standard` workflow (today's pipeline). A legacy `stages` block

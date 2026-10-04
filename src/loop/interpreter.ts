@@ -6,7 +6,8 @@
 // resumable. Git isolation, the off-limits guardrail, quota waits, pause, usage
 // accounting and run history all reuse the same code the legacy engine uses.
 //
-// It is off by default. A project opts in with `engine: workflow`.
+// This is the executor for every new run. Legacy checkpoints have a separate
+// compatibility path until they finish.
 
 import type {
   AgentProvider,
@@ -47,6 +48,8 @@ import {
   type WorkRepo,
   type Workspace,
 } from './workspace.js'
+import { selectPlan } from './planSnapshot.js'
+import { prepareOperations, completeOperations, lookupOperation, OperationReviewError, type Reconciler } from './operations.js'
 import { type Checkpoint, saveCheckpoint } from './checkpoint.js'
 import { legacyWaitKind } from '../waiting.js'
 
@@ -55,6 +58,8 @@ export interface InterpCtx {
   repo: Repo
   governor: Governor
   mock: boolean
+  reconcileOperation?: Reconciler
+  invokeAgent?: typeof runAgent
 }
 
 /** How a node's execution continues. Signals bubble up until something owns them. */
@@ -88,6 +93,7 @@ interface State {
   prs: PrRecord[]
   /** Set when the workflow finished, but not cleanly (loop exhausted, ship gaps). */
   degraded?: string
+  reportingWait?: string
   /** The REASON the route step gave for the branch it just sent us down. A stop
    *  node's own note describes the terminal generically ("ineligible"); this is
    *  the model's specific account of why THIS ticket went there.
@@ -128,6 +134,19 @@ export async function runWorkflow(
   ck: Checkpoint,
   opts: RunWorkflowOpts = {},
 ): Promise<RunRecord> {
+  try {
+    plan = selectPlan(ck, () => plan, ctx.cfg, project)
+    ck.executor = 'workflow'
+    saveCheckpoint(ck)
+  } catch (e) {
+    const note = String(e instanceof Error ? e.message : e)
+    rec.outcome = 'waiting'
+    rec.blocker = { kind: 'approval', reason: note, resume: 'manual' }
+    rec.summary = rec.error = note
+    rec.endedAt = Date.now()
+    appendRun(rec)
+    return rec
+  }
   const s: State = {
     rec,
     ck,
@@ -154,18 +173,27 @@ export async function runWorkflow(
     log.info(`  ⤿ resuming ${ticket.identifier} on ${plan.workflow.id}@${plan.workflow.version} — ${cachedCount} node(s) cached`)
   if (s.ck.workspace && reattachWorkspace(s.ck.workspace, ctx.mock)) {
     s.ws = reattachWorkspace(s.ck.workspace, ctx.mock)!
+    // Current restrictions apply even when workspace descriptors were saved earlier.
+    for (const repo of s.ws.repos) {
+      const current = project.repos?.find(r => r.name === repo.name)
+      repo.exclude = [...new Set([...repo.exclude, ...(current?.exclude || [])])]
+      repo.shipDisabled ||= !!current?.shipDisabled
+    }
   } else if (s.ck.workspace) {
     // The worktree is gone (a human cleaned up). Cached edits are unusable —
     // replaying them into an empty tree would look like "no changes".
-    log.warn('  checkpoint worktree gone — discarding cached work, starting fresh')
-    s.ck.nodeOutputs = {}
-    s.ck.workspace = undefined
+    finishApproval(s, 'Saved worktree is missing. Restore it or review the existing PRs and operations before starting fresh.')
+    return rec
   }
 
   let signal: Signal
   try {
     signal = await runPhases(ctx, s, plan.phases)
   } catch (e) {
+    if (e instanceof OperationReviewError) {
+      finishApproval(s, e.message)
+      return rec
+    }
     if (e instanceof WorkflowPaused) {
       finish(s, 'paused', `Paused before "${e.nodeId}". Resume to continue.`)
       return rec
@@ -193,6 +221,10 @@ export async function runWorkflow(
   // is reported as partial, never as a clean success.
   const cls: TerminalClass = terminal === 'success' && s.degraded ? 'partial' : terminal
   if (!explicit?.reported) await runFinally(ctx, s, cls)
+  if (s.reportingWait) {
+    finishApproval(s, s.reportingWait)
+    return rec
+  }
   const note = withRouteReason(s, explicit?.note || describeOutcome(s, cls))
   if (cls === 'waiting' && !rec.blocker) {
     rec.blocker = { kind: 'external', reason: note, resume: 'manual' }
@@ -527,17 +559,37 @@ async function invoke(
 
   await ensureWorkspace(ctx, s, node)
   const workdir = repo?.workdir || workdirFor(s, node)
+  const prepared = await prepareOperations({
+    runId: s.rec.id, ticketKey: s.ck.ticketKey, ticketId: s.ticket.id, nodeKey: key,
+    effects: step.capabilities.externalEffects, cwd: workdir,
+    branch: repo?.branch || s.ws?.repos[0]?.branch, base: repo?.base || s.ws?.repos[0]?.base,
+  }, ctx.reconcileOperation || (ctx.mock ? (async () => ({ state: 'absent' as const })) : (op => lookupOperation(op, s.trackerKey))), ctx.mock)
+  if ('wait' in prepared) {
+    persist(s)
+    return { signal: { type: 'suspend', nodeId: node.id, blocker: {kind: 'approval', reason: prepared.wait, resume: 'manual'} } }
+  }
+  if (prepared.recoveredOutput && step.contract === 'verdict' && !/VERDICT:\s*(pass|fail|wait|skip)/i.test(prepared.recoveredOutput))
+    return { signal: { type: 'suspend', nodeId: node.id, blocker: {kind: 'approval', resume: 'manual', reason: 'Comment delivery was recovered, but the step verdict was not saved. Review the remaining gate work.'} } }
+  if (prepared.recoveredOutput) {
+    completeOperations(prepared.operations, prepared.recoveredOutput)
+    s.ck.nodeOutputs![key] = prepared.recoveredOutput
+    storeOutput(s, node, prepared.recoveredOutput)
+    const recovered = beginStage(s.rec, step.id as StageName, node)
+    endStage(s.rec, recovered, 'ok', '⤿ recovered completed external action', prepared.recoveredOutput)
+    persist(s)
+    return { text: prepared.recoveredOutput, ...classify(step, prepared.recoveredOutput) }
+  }
   const sr = beginStage(s.rec, step.id as StageName, node)
   log.info(
     `  ▸ ${node.id} (${provider}/${node.settings.model || 'default'})${node.settings.skill ? ` +skill:${node.settings.skill}` : ''} — ${s.rec.ticket}`,
   )
 
-  const res = await runAgent({
+  const res = await (ctx.invokeAgent || runAgent)({
     prompt: buildNodePrompt(step, {
       ticket: s.ticket,
       project: s.project,
       workdir,
-      instruction: node.settings.instruction,
+      instruction: [node.settings.instruction, prepared.prompt].filter(Boolean).join('\n\n'),
       imagePaths: s.imagePaths,
       isReprocess: s.isReprocess,
       workspace: s.ws?.multi ? s.ws.repos.map((r) => ({ name: r.name, base: r.base, readOnly: r.shipDisabled })) : undefined,
@@ -563,10 +615,8 @@ async function invoke(
     mockKind: step.id,
     // Post steps get the tracker key in the ENV so they hit the right workspace
     // via the API. It never enters the prompt text and is never logged.
-    env:
-      step.capabilities.externalEffects.includes('tracker-comment') && s.trackerKey && ctx.cfg.tracker.type === 'linear'
-        ? { LINEAR_API_KEY: s.trackerKey }
-        : undefined,
+    env: step.capabilities.externalEffects.includes('tracker-comment') && s.trackerKey && (s.project.tracker?.type || ctx.cfg.tracker.type) === 'linear'
+      ? { LINEAR_API_KEY: s.trackerKey } : undefined,
     ticketKey: `${s.project.name}:${s.ticket.identifier}`,
   })
 
@@ -597,6 +647,11 @@ async function invoke(
   if (res.isError) throw new Error(`step "${node.id}" failed: ${firstLine(res.text)}`)
   clearRateLimited(res.provider, Date.now())
 
+  completeOperations(prepared.operations, res.text)
+  if (step.capabilities.externalEffects.includes('tracker-comment') && !parseCommentUrl(res.text)) {
+    persist(s)
+    return { signal: { type: 'suspend', nodeId: node.id, blocker: {kind: 'approval', resume: 'manual', reason: 'Comment delivery has no confirmed URL. Review the saved operation before continuing.'} } }
+  }
   s.ck.nodeOutputs![key] = res.text
   storeOutput(s, node, res.text)
   persist(s)
@@ -687,6 +742,11 @@ function waitingKind(node: CompiledStepNode): WaitKind {
   return 'external'
 }
 
+function finishApproval(s: State, reason: string): void {
+  s.rec.blocker = { kind: 'approval', reason, resume: 'manual' }
+  finish(s, 'waiting', reason)
+}
+
 // ---- workspace + guardrail --------------------------------------------------
 
 /** Create the worktree(s) the first time a node actually needs a repo. */
@@ -732,13 +792,17 @@ async function runFinally(ctx: InterpCtx, s: State, cls: TerminalClass): Promise
       // to success must report the success too.
       const key = checkpointKey(s.plan, node.id, undefined, cls)
       const res = await invoke(ctx, s, node, key)
-      if ('signal' in res) return // paused / out of quota — report on the next resume
+      if ('signal' in res) {
+        s.reportingWait = res.signal.type === 'suspend' ? res.signal.blocker.reason || 'Final report needs continuation.' : 'Final report needs continuation.'
+        return
+      }
       if (node.step.contract === 'post') {
         const url = parseCommentUrl(res.text)
         if (url) s.rec.commentUrl = url
       }
     } catch (e) {
       // A failed report must not turn a successful run into a failed one.
+      s.reportingWait = `Final report delivery is unconfirmed. Review its saved operation before continuing. (${String(e)})`
       log.warn(`final report "${node.id}" failed: ${e}`)
     }
   }

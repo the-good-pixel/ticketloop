@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,6 +15,19 @@ try {
     import('../src/commands/support.js'),
   ])
   const { config } = loadConfig()
+  const { buildCodexArgs } = await import('../src/runner/codex.js')
+  const options = { prompt: 'Scoped posting test', cwd: root, stage: {}, runner: config.runner,
+    authMode: 'subscription' as const, env: { LINEAR_API_KEY: 'private-key-canary', OPENAI_API_KEY: 'billing-key-canary' } }
+  const scoped = buildCodexArgs(options)
+  assert.ok(scoped.args.includes('shell_environment_policy.inherit="all"'))
+  assert.ok(scoped.args.includes('shell_environment_policy.ignore_default_excludes=true'))
+  const include = scoped.args.find(arg => arg.startsWith('shell_environment_policy.include_only='))!
+  assert.ok(include.includes('LINEAR_API_KEY'))
+  assert.ok(!include.includes('OPENAI_API_KEY'))
+  assert.ok(!scoped.args.join(' ').includes('private-key-canary'))
+  assert.ok(!scoped.args.join(' ').includes('billing-key-canary'))
+  assert.ok(!buildCodexArgs({ ...options, env: undefined }).args.some(arg => arg.startsWith('shell_environment_policy.')))
+
   const privateName = 'private-project-canary'
   const privatePath = join(root, 'private-repository-canary')
   const privateTicket = 'SECRET-987'

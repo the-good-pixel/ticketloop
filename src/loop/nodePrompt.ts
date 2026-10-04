@@ -8,7 +8,7 @@
 
 import type { ProjectConfig, Ticket } from '../types.js'
 import type { CatalogStep } from '../catalog/types.js'
-import { ticketBlock, commentThread } from './prompts.js'
+import { ticketBlock, commentThread } from './ticketText.js'
 
 /** One earlier step's output, offered to a later step that declared it. */
 export interface PriorOutput {

@@ -1,0 +1,24 @@
+{
+  "workflow": "standard@2",
+  "matching": [
+    "question",
+    "data",
+    "bug",
+    "change",
+    "no-action",
+    "ineligible",
+    "verify-repair",
+    "review-repair",
+    "ship-repair",
+    "ship-wait",
+    "deploy-wait",
+    "no-progress",
+    "pause-resume",
+    "ship-error-resume",
+    "codex",
+    "multi-repo",
+    "forbidden-path"
+  ],
+  "comparison": "order,status,replay,verdict,detail,artifacts,PRs,comments,outcomes",
+  "provider": "explicit metadata excluded; separate Codex selection check"
+}

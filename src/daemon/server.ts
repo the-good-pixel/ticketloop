@@ -251,7 +251,7 @@ function buildCatalogView(cfg: Config) {
   }))
   const projects = cfg.projects.map((p) => ({
     name: p.name,
-    engine: p.engine || 'legacy',
+    engine: p.engine || 'workflow',
     workflow: p.workflow || DEFAULT_WORKFLOW_REF,
     permissions: { ...(cfg.permissions || {}), ...(p.permissions || {}) },
   }))
@@ -619,12 +619,11 @@ export function startServer(cfg: Config, hooks: ServerHooks): { close: () => voi
           if ('error' in saved) return json(res, saved)
           json(res, {
             ok: true,
-            engine: candidate.engine || 'legacy',
-            // Assigning a workflow to a legacy-engine project changes nothing at
-            // runtime; say so rather than letting it look done.
+            engine: candidate.engine || 'workflow',
+            // Legacy settings require an explicit config migration for new runs.
             warning:
-              (candidate.engine || 'legacy') === 'legacy'
-                ? `Project "${b.project}" still runs engine: legacy, so this workflow is not what executes. Switch it to the workflow engine under Projects.`
+              candidate.engine === 'legacy'
+                ? `Project "${b.project}" has engine: legacy. New runs are blocked; select the workflow engine under Projects. Existing legacy checkpoints can still finish.`
                 : undefined,
           })
         }).catch((e) => serverError(res, e))

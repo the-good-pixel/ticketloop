@@ -39,3 +39,13 @@ Do not run old and new versions against the same state directory at the same tim
 - Patch releases contain fixes and compatible documentation or UI changes.
 - Minor releases may change config, workflow, checkpoint, or command behavior.
 - Every breaking or migration-relevant change must appear in the changelog.
+
+## Workflow executor and recovery changes
+
+New runs use the workflow interpreter. Projects without an `engine` setting use their assigned workflow, defaulting to `standard@3`. Existing stage overrides, provider choices, loop limits, and clarify-only autonomy apply to the built-in standard workflow. Explicit `engine: legacy` blocks new runs with migration guidance. Existing legacy checkpoints, including empty checkpoints in the old format, retain the legacy executor regardless of the project's new engine setting.
+
+New workflow checkpoints include the resolved plan and an integrity checksum. Continue keeps that plan even if instructions or catalog versions change. Current permission restrictions and excluded paths still apply. Changes to repository, runner, tracker or MCP configuration require review. Older workflow checkpoints without a snapshot must match the current digest; the stronger digest now includes resolved step definitions, so checkpoints created by older releases may require review rather than automatic continuation.
+
+External-action records live in `~/.ticketloop/operations` and survive checkpoint removal, stop requests, and new ticket activity. Records are retained until a separate retention policy is introduced. A pending action from an older run blocks a new real run. Inspect and resolve reviewed operations with the commands documented in README; do not delete pending records to force a retry. Existing actions made before these records were introduced cannot be reconstructed reliably from local output alone.
+
+The legacy compatibility module cannot be removed until old checkpoints have finished or been explicitly abandoned after review. No live project settings or checkpoints are changed by the source update alone.
