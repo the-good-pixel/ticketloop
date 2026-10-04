@@ -69,4 +69,4 @@ identified safely. Error messages identify the damaged file.
 
 The smoke suite now covers these cases. Full checks passed after the fixes.
 Pilot tickets MRM-226 and MRM-227 were created in Common Infrastructure, Backlog,
-without labels. Their live runs have not started.
+without labels. Their isolated live runs passed; see [live-pilot-results.md](live-pilot-results.md).

@@ -3,7 +3,7 @@
 Date: 2026-10-04
 Baseline: `68ebe6f`
 Branch: `fix/recovery-consolidation`
-Status: implemented and verified locally; no live rollout.
+Status: implementation committed; isolated live pilot passed. The normal daemon is unchanged. See [live-pilot-results.md](live-pilot-results.md).
 
 ## Changes
 
