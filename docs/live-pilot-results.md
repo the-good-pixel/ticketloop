@@ -17,7 +17,9 @@ The pilot used `standard@3`, a worktree off `origin/main`, default step instruct
 and explicit permissions allowing a feature PR but denying merges and all
 deployments. DEV steps were disabled. This tested the shared lifecycle and standard
 workflow; it did not exercise the scheduler or the assigned `miles-loyalty@5`
-custom workflow. Both tickets stayed in Backlog, outside the normal watched states.
+custom workflow. Both tickets started in Backlog. Final readback showed MRM-226 in Backlog and
+MRM-227 in In Progress after PR creation; neither state is watched by the normal
+configuration.
 
 ## Results
 
@@ -84,3 +86,11 @@ The normal daemon and custom workflow have not been switched to this branch.
 Existing legacy and older workflow checkpoints still need the documented drain or
 review before a wider rollout. Pilot raw records and verification snapshots remain
 in the isolated state directory.
+
+## Cleanup and integration
+
+The user requested cancellation of both pilot tickets and closure of PR #705.
+Linear confirmed Canceled for both tickets; GitHub confirmed CLOSED with no merge
+timestamp. The recovery commits were then integrated onto current main, retaining
+its unified waiting outcome and structured blockers, workspace cleanup and runner
+watchdogs. The full combined check suite passed before merging.
