@@ -2152,9 +2152,10 @@ function autonomyLabel(a) {
 }
 
 function workflowSummary(p) {
-  if (p.engine !== 'workflow' || !p.workflow) return null;
-  const workflow = (setup.config?.workflows || []).find((item) => item.ref === p.workflow);
-  const version = String(p.workflow).includes('@') ? 'v' + String(p.workflow).split('@').pop() : '';
+  if (p.engine === 'legacy') return { name: 'Legacy setting needs migration', version: '' };
+  const ref = p.workflow || 'standard@3';
+  const workflow = (setup.config?.workflows || []).find((item) => item.ref === ref);
+  const version = String(ref).includes('@') ? 'v' + String(ref).split('@').pop() : '';
   return {
     name: workflow?.id === 'standard' ? 'Standard template' : (workflow?.name || 'Custom workflow'),
     version,
@@ -2544,9 +2545,8 @@ function openForm(name) {
       : workflow.name;
     workflowSelect.appendChild(new Option(label, workflow.ref));
   }
-  // Legacy projects have not actively chosen a visual workflow yet, even if a
-  // compatibility pin exists in their config.
-  workflowSelect.value = p?.engine === 'workflow' ? p.workflow || '' : '';
+  // Projects without an engine setting use the standard workflow.
+  workflowSelect.value = p?.engine === 'legacy' ? '' : p?.workflow || 'standard@3';
   const workflowField = inputRow(
     'Workflow',
     workflowSelect,
@@ -2805,7 +2805,7 @@ function buildProjectFromForm() {
   if (workflow) {
     proj.workflow = workflow;
     proj.engine = 'workflow';
-  } else if (existing?.engine === 'workflow') {
+  } else if (existing && existing.engine !== 'legacy') {
     // Do not silently turn off an active workflow just because an older client
     // omitted the field. The current form always includes it.
     proj.workflow = existing.workflow;

@@ -35,6 +35,9 @@ All notable changes are recorded here. Ticketloop follows semantic versioning, w
 
 ### Added
 
+- Saved workflow plans, durable PR/comment operation records, and local recovery review commands.
+- Hard-crash, scheduler, remote-lookup and workflow regression checks.
+
 - Full-screen visual workflow builder with project-specific immutable workflow versions.
 - Categorized work and flow steps, triage branches, multiple non-nested loops, per-step model and effort settings, and editable default step instructions.
 - Guided first-project setup that saves the daemon paused.
@@ -43,6 +46,9 @@ All notable changes are recorded here. Ticketloop follows semantic versioning, w
 - Public security, contribution, issue, platform, and upgrade documentation.
 
 ### Changed
+
+- New runs use the workflow interpreter; old legacy checkpoints retain a recovery-only executor.
+- Resume preserves resolved instructions and stops for changed execution context, revoked permission or uncertain external completion.
 
 - Project cards show their assigned workflow and readiness.
 - Activity uses plain outcome labels and shows only steps that ran.

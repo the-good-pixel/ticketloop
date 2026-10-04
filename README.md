@@ -109,13 +109,19 @@ Only process tickets and comments written by people you trust. Read [SECURITY.md
 
 ## Continue, start over, and pause
 
-- Continue run reuses completed steps and resumes at the interrupted work.
-- Start over discards the checkpoint and runs the current workflow from the beginning.
+- Continue run uses the saved workflow plan, replays completed work, and reruns steps whose recovery policy requires fresh checks. Current permissions and excluded paths still apply.
+- Start over discards the checkpoint and runs the current workflow from the beginning. Saved external-action records remain; uncertain actions require review before another run.
 - `ticketloop pause` stops new work and checkpoints an in-flight run at the next step boundary.
 - `ticketloop pause APP-123` pauses one ticket.
 - `ticketloop resume` or the Activity button resumes processing.
 
-Use Start over after changing an earlier step whose completed output must be regenerated. Use Continue run for connection failures, provider limits, daemon restarts, and unchanged work.
+Use Start over after changing an earlier step whose completed output must be regenerated. Use Continue run for connection failures, provider limits, daemon restarts, and unchanged work. A missing saved worktree, changed repository/tool settings, revoked permission, or uncertain external action stops for review.
+
+Every new run uses the workflow interpreter (`standard@3` unless another workflow is assigned). Existing `stages` settings still apply. `engine: legacy` cannot start new runs; remove the setting or select `engine: workflow`. Older legacy checkpoints finish through a compatibility executor.
+
+For an uncertain PR/comment action, inspect the local operation records with `ticketloop operation list PROJECT:TICKET`. Pause the ticket and wait for its current step to finish. After checking remote state, record the result with `ticketloop operation resolve OPERATION_ID URL --reason "Checked remote action"`, or use `not-performed` in place of the URL only after verifying that no action occurred. For a verified completed DEV deployment, use `performed` and include the deployment evidence in the review reason. Corrupt records with known ownership block only their ticket; older corrupt records without ownership still require review before any run. The command records a local decision and sends no remote request. Then use Continue run. Starting over does not erase these records.
+
+Automatic recovery can adopt a delivered comment or an existing branch PR. An existing PR still needs shipping checks. Unsupported effects such as interrupted deployments require review. Model-owned writes and remote visibility prevent an exactly-once guarantee; uncertain absence never triggers an automatic production retry.
 
 ## Commands
 

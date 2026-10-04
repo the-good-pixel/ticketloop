@@ -47,12 +47,12 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
 - `src/config.ts` — `DEFAULTS` (global stage config), `DEFAULT_INSTRUCTIONS` (per-stage
   built-in instruction), `resolveStage` (global < project override), `resolveInstruction`
   (default combined with the user's `replace`/`append`), `loadConfig`/`saveConfig`.
-- `src/loop/engine.ts` — the heart. `processTicket` runs the pipeline: triage → route to
-  **question** (clarify), **data** (plan→prepare→export⇄verify→comment, throwaway
-  worktree, read-only), or **change** (locate→plan→prepare→**fix ⇄ verify→review→ship→
-  deploy-dev?→verify-dev?**→comment). `stage()` is the one place a `claude -p` runs; it
-  also does checkpoint replay + pause boundary. `setupWorkspace`/`scanRepos` = git
-  isolation + the off-limits guardrail.
+- `src/loop/engine.ts` — shared lifecycle and stable `processTicket` entry. New runs
+  use the workflow interpreter. `src/loop/legacy.ts` drains old checkpoints only;
+  never route a new run there. Remove the compatibility module after the drain.
+- `src/loop/planSnapshot.ts` — resolved plan serialization, integrity and current
+  permission checks. `src/loop/operations.ts` — durable external-action intents,
+  read-only PR/comment reconciliation and explicit local recovery decisions.
 - `src/loop/prompts.ts` — `buildStagePrompt` assembles the prompt; `CHECK_STAGES`,
   `VERDICT_STAGES`, `POST_STAGES` classify stages; `PriorOutputs`/`StageExtras`.
 - `src/loop/checkpoint.ts` — per-ticket resume checkpoint (cached stage outputs +
@@ -82,8 +82,8 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
   there is one source of truth). `store.ts` = YAML load/save + immutable versions.
   `compile.ts` = workflow + project policy → `ExecutionPlan`. `validate.ts` = the
   diagnostics that block an unsafe plan.
-- `src/loop/interpreter.ts` — **executes** a compiled plan. Opt-in per project via
-  `engine: workflow`; `processTicket` dispatches to it and shares the run record,
+- `src/loop/interpreter.ts` — **executes** the saved compiled plan for every new run.
+  `processTicket` shares the run record,
   checkpoint, marker and images so history/resume behave the same either way.
   Supporting parts: `verdict.ts` (pass/fail/**wait**/skip), `artifacts.ts` (typed PR /
   deployment / file state), `nodePrompt.ts` (prompt built from a step's contract +
@@ -148,10 +148,9 @@ Mock stage text lives in `MOCK_TEXTS`; mock control flow in `MockRepo` / `MockTr
 
 ## Adding a new stage (checklist)
 
-Both engines are live, so a new stage must be added in BOTH places: the stage list
-below (legacy), and the catalog (`src/catalog/builtin-steps.ts` + a node in
-`builtin-workflows.ts`). Run `npx tsx src/cli.ts workflow validate` after, and compare
-traces across both engines before committing.
+New stages belong in the catalog and workflow interpreter. The legacy executor is
+compatibility-only: do not add new stages there. Validate the workflow and exercise
+its mock trace before committing.
 
 A step's `contract` decides how its RESULT is read; `produces.type` decides what typed
 artifact is recorded. They are independent — `ship` is a `verdict` step that produces a
@@ -167,8 +166,8 @@ trust report. A capability a user cannot see is one they cannot refuse.
    `DEFAULT_INSTRUCTIONS`.
 3. `prompts.ts`: add to `VERDICT_STAGES` if it's a gate / `POST_STAGES` if it posts; add
    any prior-feeding + a safety/context note in `buildStagePrompt`; extend `PriorOutputs`.
-4. `engine.ts`: wire the `stage(...)` call with a unique ckKey (`name#<iter>` inside the
-   loop) at the right point; thread its output into `priors`; add to `MOCK_KIND`.
+4. Add the catalog step and workflow node with a unique node id, declared effects,
+   permissions, contract and recovery policy. Keep workspace guards shared.
 5. `runner/claude.ts`: add a `MOCK_TEXTS[name]` (with `VERDICT: pass` if gated) and, if
    useful, a `TICKETLOOP_MOCK_FAIL_<NAME>` injector.
 6. `npm run typecheck`, then a mock `tsx` script exercising it.

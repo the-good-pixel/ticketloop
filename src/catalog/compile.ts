@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 // Workflow compiler: workflow + catalog + project policy → immutable execution plan.
 //
 // Compilation is where a workflow stops being editable YAML and becomes the
@@ -10,7 +11,7 @@
 // resolves and reports. Validation lives in validate.ts and runs from here.
 
 import type { Config, ProjectConfig, StageName, StagesConfig } from '../types.js'
-import { resolveInstruction } from '../config.js'
+import { inferProvider } from '../config.js'
 import { validatePlan, type Diagnostic } from './validate.js'
 import { getStep, type Catalog } from './store.js'
 import type {
@@ -153,12 +154,6 @@ export function checkpointKey(
   return parts.join('/')
 }
 
-function djb2(s: string): string {
-  let h = 5381
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0
-  return h.toString(36)
-}
-
 function resolveProfiles(
   cfg: Config | undefined,
   project: ProjectConfig | undefined,
@@ -215,17 +210,18 @@ function resolveSettings(
   const o: NodeOverrides = { ...(legacy || {}), ...(overrides || {}) }
   const profileName = o.executionProfile || step.defaults.executionProfile || 'balanced'
   const profile = profiles[profileName] || {}
-  const provider = o.provider ?? profile.provider
+  const provider = o.provider ?? inferProvider(o.model) ?? profile.provider ?? inferProvider(profile.model) ?? opts.config?.runner.defaultProvider
+  const explicitProfileEffort = opts.project?.executionProfiles?.[profileName]?.effort ?? opts.config?.executionProfiles?.[profileName]?.effort
   const providerSkill = provider ? step.skills?.[provider] : undefined
   return {
     enabled: o.enabled ?? step.defaults.enabled ?? true,
     profile: profileName,
     provider,
-    model: o.model ?? profile.model,
-    effort: o.effort ?? profile.effort ?? step.defaults.effort,
+    model: o.model ?? profile.model ?? (provider ? opts.config?.runner.providers[provider].defaultModel : undefined),
+    effort: o.effort ?? explicitProfileEffort ?? (profileName === 'fast' ? profile.effort : undefined) ?? step.defaults.effort ?? (provider ? opts.config?.runner.providers[provider].defaultEffort : undefined) ?? profile.effort,
     skill: o.skill !== undefined ? o.skill : (providerSkill ?? step.defaults.skill ?? null),
     allowedTools: o.allowedTools !== undefined ? o.allowedTools : (step.defaults.allowedTools ?? null),
-    permissionMode: o.permissionMode ?? step.defaults.permissionMode,
+    permissionMode: o.permissionMode ?? step.defaults.permissionMode ?? opts.config?.runner.permissionMode,
     // The step's instruction IS the built-in default; a node override replaces
     // or appends exactly as a stage instruction does today.
     instruction: o.instruction
@@ -350,7 +346,7 @@ export function compileWorkflow(cat: Catalog, wf: Workflow, opts: CompileOpts = 
 
   const plan: ExecutionPlan = {
     workflow: { id: wf.id, version: wf.version, name: wf.name },
-    digest: djb2(JSON.stringify({ wf, profiles, permissions, legacy: opts.legacyStages || [] })),
+    digest: '',
     phases: compiledPhases,
     finallyNodes,
     outcomes: wf.outcomes || {},
@@ -360,6 +356,8 @@ export function compileWorkflow(cat: Catalog, wf: Workflow, opts: CompileOpts = 
     permissions,
     profiles,
   }
+  // Include resolved step definitions: changing a step must change plan identity.
+  plan.digest = createHash('sha256').update(JSON.stringify({ phases: plan.phases, finallyNodes, outcomes: plan.outcomes, permissions, profiles })).digest('hex')
   plan.diagnostics.push(...validatePlan(plan))
   return plan
 }

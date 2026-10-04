@@ -44,6 +44,8 @@ export interface Checkpoint {
   // it (and everything after) re-runs on resume; a completed stage replays.
   stageOutputs: Record<string, string>
   // ---- workflow interpreter (absent on legacy-engine checkpoints) ----------
+  executor?: 'legacy' | 'workflow'
+  snapshot?: import('./planSnapshot.js').PlanSnapshot
   plan?: PlanCk
   // node checkpoint key → the node's output text. Keys are
   // `<workflow>@<v>/<node-id>[/<iteration>][/<repo>]`, so the same catalog step
@@ -58,13 +60,19 @@ function ckFile(ticketKey: string): string {
   return join(CHECKPOINTS_DIR, encodeURIComponent(ticketKey) + '.json')
 }
 
-export function loadCheckpoint(ticketKey: string): Checkpoint | null {
+export function loadCheckpoint(ticketKey: string, strict = false): Checkpoint | null {
   const f = ckFile(ticketKey)
   if (!existsSync(f)) return null
   try {
-    return JSON.parse(readFileSync(f, 'utf8')) as Checkpoint
+    const ck = JSON.parse(readFileSync(f, 'utf8')) as Checkpoint
+    const outputs = (value: unknown) => !!value && typeof value === 'object' && !Array.isArray(value) && Object.values(value).every(text => typeof text === 'string')
+    if (!ck || ck.ticketKey !== ticketKey || typeof ck.runId !== 'string' || typeof ck.marker !== 'string' ||
+        !outputs(ck.stageOutputs) || (ck.nodeOutputs !== undefined && !outputs(ck.nodeOutputs)) || !Array.isArray(ck.imagePaths))
+      throw new Error('invalid checkpoint format')
+    return ck
   } catch {
-    return null // a corrupt checkpoint just means "start fresh" — never fatal
+    if (strict) throw new Error('Saved checkpoint is unreadable or invalid. Preserve the file and review recovery before starting fresh.')
+    return null // Dashboard inspection must not crash; execution uses strict reads.
   }
 }
 

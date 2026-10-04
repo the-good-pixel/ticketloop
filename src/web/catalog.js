@@ -86,7 +86,7 @@ function renderRail() {
     main.append(el('span', 'wf-item-ref', wf?.name || 'Standard template'));
     li.append(main);
     const tags = el('div', 'wf-item-tags');
-    tags.append(el('span', 'tag tag-use', project.engine === 'workflow' ? 'Custom workflow' : 'Custom instructions'));
+    tags.append(el('span', 'tag tag-use', project.engine !== 'legacy' ? 'Custom workflow' : 'Legacy settings'));
     li.append(tags);
     li.addEventListener('click', () => selectProject(project.name));
     wfList.append(li);

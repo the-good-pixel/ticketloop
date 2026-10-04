@@ -1,183 +1,26 @@
-import type {
-  AgentProvider,
-  Config,
-  ProjectConfig,
-  PrRecord,
-  RunRecord,
-  StageName,
-  StageRecord,
-  Ticket,
-} from '../types.js'
-import { resolveStage, resolveInstruction } from '../config.js'
+import type { Config, ProjectConfig, RunRecord, Ticket } from '../types.js'
 import { Governor } from '../governor/governor.js'
-import { setRateLimited, clearRateLimited } from '../governor/cooldown.js'
-import { runAgent } from '../runner/index.js'
-import type { AgentResult } from '../runner/index.js'
 import type { Tracker } from '../adapters/tracker/tracker.js'
 import { makeRepo, type Repo } from '../adapters/repo/github.js'
-import { appendRun, appendUsage, getRun } from '../store.js'
-import { parseRouteReason } from './verdict.js'
-import { classifyKind } from './classify.js'
+import { appendRun, getRun, readRuns } from '../store.js'
 import { runWorkflow } from './interpreter.js'
 import { planForProject } from '../commands/catalog.js'
-import { buildStagePrompt, CHECK_STAGES, POST_STAGES, type PriorOutputs, type StageExtras } from './prompts.js'
-import { cleanupWorkspace, reattachWorkspace, scanRepos, setupWorkspace, toWorkspaceCk, type WorkRepo } from './workspace.js'
-// Re-exported for callers that still import it from the engine.
-export { resolveBranch } from './workspace.js'
-import { extractImageUrls, downloadImages, latestHumanActivity } from './context.js'
+import { uncertainOperations, OperationReviewError } from './operations.js'
+import { reattachWorkspace } from './workspace.js'
+import { selectPlan } from './planSnapshot.js'
+import { PausedError, ProviderUnavailableError } from './legacyErrors.js'
+import { extractImageUrls, downloadImages } from './context.js'
 import { DATA_DIR } from '../paths.js'
 import { join } from 'node:path'
 import { log } from '../logger.js'
-import {
-  type Checkpoint,
-  loadCheckpoint,
-  saveCheckpoint,
-  deleteCheckpoint,
-} from './checkpoint.js'
-
-// Thrown by a stage when a pause was requested at its boundary. It carries the
-// run up to the outer handler, which marks the run 'paused' (not failed), keeps
-// the worktree + checkpoint, and returns — a later `resume` continues from here.
-export class PausedError extends Error {
-  constructor(public stage: StageName) {
-    super(`paused before "${stage}"`)
-    this.name = 'PausedError'
-  }
-}
-
-export class ProviderUnavailableError extends Error {
-  constructor(
-    public provider: AgentProvider,
-    public stage: StageName,
-    public resumeAt?: number,
-  ) {
-    super(`${provider} usage limit reached before "${stage}"`)
-    this.name = 'ProviderUnavailableError'
-  }
-}
-
-// Outcomes whose checkpoint we KEEP so the ticket can resume where it stopped.
-// Everything else (success, skipped) deletes the checkpoint — the work is done.
+import { type Checkpoint, loadCheckpoint, saveCheckpoint, deleteCheckpoint } from './checkpoint.js'
+export { resolveBranch } from './workspace.js'
 const RESUMABLE_OUTCOMES = new Set([
   'failed',
   'blocked',
   'paused',
   'waiting',
 ])
-
-// Per-run mutable context: the run record, its resume checkpoint, and the live
-// pause predicate. Threaded into every stage() so stages can replay from cache
-// and honor a pause request at their boundary.
-interface Session {
-  rec: RunRecord
-  ck: Checkpoint
-  paused: () => boolean
-}
-
-// A CHECK step's verdict. Every check step (see CHECK_STAGES) must end its
-// output with a line `VERDICT: pass` or `VERDICT: fail — <reason>`; the harness
-// appends that requirement to the prompt. The LAST verdict line wins (the model
-// may reason first, then conclude). Missing verdict → fail-OPEN (treat as pass)
-// so a model that forgets the format can't spin the loop forever; the human PR
-// review and the off-limits guardrail remain the hard backstops.
-export function parseVerdict(text: string): { pass: boolean; reason: string } {
-  const m = [...text.matchAll(/VERDICT:\s*(pass|clean|ok|fail|issues|needs[-\s]?fix)\b(.*)/gi)]
-  if (!m.length) {
-    log.warn('check step emitted no VERDICT line — treating as pass (fail-open)')
-    return { pass: true, reason: '' }
-  }
-  const last = m[m.length - 1]
-  const pass = /^(pass|clean|ok)$/i.test(last[1])
-  return { pass, reason: (last[2] || '').replace(/^\s*[—:-]\s*/, '').trim() }
-}
-
-// Store a check step's output where later steps (and the ship/comment prompts)
-// pick it up as context.
-function setPrior(priors: PriorOutputs, stage: StageName, text: string) {
-  if (stage === 'verify') priors.verify = text
-  else if (stage === 'review') priors.review = text
-}
-
-function djb2(s: string): string {
-  let h = 5381
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0
-  return h.toString(36)
-}
-
-// The kind triage emitted (question | data | change | bug), or null if unset.
-function parseKind(text: string): 'question' | 'data' | 'change' | 'bug' | null {
-  if (/KIND:\s*data/i.test(text)) return 'data'
-  if (/KIND:\s*bug/i.test(text)) return 'bug'
-  if (/KIND:\s*change/i.test(text)) return 'change'
-  if (/KIND:\s*question/i.test(text)) return 'question'
-  return null
-}
-
-// The branch `locate` said to refresh (an open PR's head), or undefined for fresh.
-function parseReuse(text: string): string | undefined {
-  const m = (text || '').match(/REUSE:\s*(\S+)/i)
-  if (!m || /^none$/i.test(m[1])) return undefined
-  return m[1].trim().replace(/[).,]+$/, '')
-}
-
-// Data path: plan → prepare → (export ↔ verify) → comment. Read-only, no
-// worktree/branch/PR — runs in the repo checkout; the comment step posts the
-// export file to the ticket with the project's Linear key.
-async function runDataPath(
-  ctx: EngineCtx,
-  s: Session,
-  ticket: Ticket,
-  project: ProjectConfig,
-  priors: PriorOutputs,
-  extras: StageExtras,
-): Promise<RunRecord> {
-  const rec = s.rec
-  // The data path runs in a THROWAWAY worktree that is removed on every exit
-  // (below), so a resumed data run can't reattach a prior worktree — its export
-  // file would be gone. Run it fresh each time (pause still works going forward);
-  // read-only data pulls are cheap enough that this is the safe tradeoff.
-  s.ck.stageOutputs = {}
-  s.ck.workspace = undefined
-  // Isolate in a throwaway worktree so a mis-following stage can't touch the real
-  // checkout. It's read-only work — the export file is written here; no push/PR.
-  const ws = setupWorkspace(ctx, project, ticket.identifier)
-  const workdir = ws.cwd
-  extras.dataMode = true // shared stages (prepare/verify) run read-only, data-aware
-  if (ws.multi) extras.workspace = ws.repos.map((r) => ({ name: r.name, base: r.base, readOnly: r.shipDisabled }))
-  try {
-    priors.plan = (await stage(ctx, s, 'plan', 'plan', project, ticket, priors, workdir, extras)).text
-    await stage(ctx, s, 'prepare', 'prepare', project, ticket, priors, workdir, extras)
-
-    const loopEnabled = ctx.cfg.loop?.enabled !== false
-    const maxIters = Math.max(1, ctx.cfg.loop?.maxFixIterations ?? 1)
-    let iteration = 1
-    let lastSig = ''
-    let exhausted = false
-    while (true) {
-      priors.export = (await stage(ctx, s, 'export', `export#${iteration}`, project, ticket, priors, workdir, extras)).text
-      const v = (await stage(ctx, s, 'verify', `verify#${iteration}`, project, ticket, priors, workdir, extras)).text
-      priors.verify = v
-      if (parseVerdict(v).pass) break // data verified correct → deliver
-
-      if (!loopEnabled || iteration >= maxIters) { exhausted = true; break }
-      const sig = djb2(v)
-      if (sig === lastSig) { exhausted = true; break }
-      lastSig = sig
-      priors.openFindings = `The verify step found problems with the export:\n${v.slice(0, 1500)}`
-      iteration++
-      priors.iteration = iteration
-      log.info(`  ↻ export attempt ${iteration}/${maxIters} — ${ticket.identifier}`)
-    }
-
-    const c = await stage(ctx, s, 'comment', 'comment', project, ticket, priors, workdir, extras)
-    rec.commentUrl = extractCommentUrl(c.text)
-    finish(rec, 'exported', exhausted ? 'Exported, but verify had unresolved concerns.' : 'Data export posted to the ticket.')
-    return rec
-  } finally {
-    // Throwaway worktree — nothing to ship; always remove it + its empty branch.
-    cleanupWorkspace(ctx, ws)
-  }
-}
 
 let runCounterSeed = 0
 function newRunId(ticket: string): string {
@@ -186,6 +29,8 @@ function newRunId(ticket: string): string {
 }
 
 export interface EngineCtx {
+  reconcileOperation?: import('./operations.js').Reconciler
+  invokeAgent?: typeof import('../runner/index.js').runAgent
   cfg: Config
   repo: Repo
   governor: Governor
@@ -199,23 +44,6 @@ export function makeEngineCtx(cfg: Config, mock: boolean): EngineCtx {
     repo: makeRepo(mock),
     governor: new Governor(cfg, mock),
   }
-}
-
-const MOCK_KIND: Record<StageName, any> = {
-  triage: 'triage',
-  clarify: 'answer',
-  export: 'export',
-  locate: 'locate',
-  reproduce: 'reproduce',
-  plan: 'plan',
-  prepare: 'prepare',
-  fix: 'diff',
-  verify: 'verify',
-  review: 'review',
-  ship: 'ship',
-  'deploy-dev': 'deploy-dev',
-  'verify-dev': 'verify-dev',
-  comment: 'comment',
 }
 
 export interface ProcessOpts {
@@ -241,22 +69,51 @@ export async function processTicket(
   // checkpoint from different human activity is stale → discard and start fresh.
   const ticketKey = `${project.name}:${ticket.identifier}`
   const marker = opts.marker || ''
-  let ck = loadCheckpoint(ticketKey)
+  let ck: Checkpoint | null = null
+  let checkpointError: string | undefined
+  try { ck = loadCheckpoint(ticketKey, true) } catch (e) { checkpointError = String(e instanceof Error ? e.message : e) }
   if (ck && ck.marker !== marker) {
     deleteCheckpoint(ticketKey)
     ck = null
   }
-  // Cached work exists under `stageOutputs` (legacy engine) or `nodeOutputs`
-  // (workflow interpreter) — either one means this is a continuation, not a new
-  // attempt, so the SAME run record is reused and its tokens keep accumulating.
-  const resuming =
-    !!ck && (Object.keys(ck.stageOutputs).length > 0 || Object.keys(ck.nodeOutputs || {}).length > 0)
+  // A saved intent may exist before the first output. Any checkpoint continues
+  // the same run, including a crash before its first model response.
+  const resuming = !!ck
 
   // CONTINUE THE SAME RUN when resuming: an interruption isn't a new attempt, so
   // reuse the checkpoint's record instead of minting another one (no duplicate
   // card, and tokens/cost accumulate into the true total for this work).
   // `stages` is rebuilt as the replay re-walks them, so nothing duplicates.
-  const prior = resuming && ck!.runId ? getRun(ck!.runId) : undefined
+  const prior = resuming && ck!.runId ? getRun(ck!.runId) : checkpointError
+    ? readRuns().find(run => run.project === project.name && run.ticket === ticket.identifier && run.marker === marker) : undefined
+  const legacy = ck?.executor === 'legacy' || (!!ck && !ck.executor && !ck.plan && !ck.snapshot && ck.nodeOutputs === undefined && !!ck.stageOutputs)
+  let plan: ReturnType<typeof planForProject> | undefined
+  try {
+    if (checkpointError) throw new Error(checkpointError)
+    if (!ctx.mock && uncertainOperations(ticketKey, ck?.runId).length)
+      throw new Error('An earlier run has uncertain external actions. Review its saved operations before starting a new run.')
+    if (!legacy) {
+      if (project.engine === 'legacy' && !ck?.plan && !ck?.snapshot)
+        throw new Error('engine: legacy is retired for new runs. Remove the setting or set engine: workflow; existing legacy checkpoints can still finish.')
+      const scratch: Checkpoint = ck || { runId: '', ticketKey, marker, imagePaths: [], stageOutputs: {}, updatedAt: 0 }
+      plan = selectPlan(scratch, () => planForProject(ctx.cfg, project), ctx.cfg, project)
+      if (ck?.workspace && !reattachWorkspace(ck.workspace, ctx.mock))
+        throw new Error('Saved worktree is missing. Restore it or review existing PRs and operations before starting fresh.')
+      if (!ck) ck = scratch
+    }
+  } catch (e) {
+    const note = String(e instanceof Error ? e.message : e)
+    const rec: RunRecord = prior || { id: ck?.runId || newRunId(ticket.identifier), ticket: ticket.identifier,
+      ticketTitle: ticket.title, ticketUrl: ticket.url, project: project.name, marker,
+      autonomy: project.autonomy, startedAt: Date.now(), outcome: 'waiting', stages: [], totalTokens: 0, costUsd: 0 }
+    rec.outcome = 'waiting'
+    rec.blocker = { kind: 'approval', reason: note, resume: 'manual' }
+    rec.summary = rec.error = note
+    rec.endedAt = Date.now()
+    appendRun(rec)
+    if (!ck && !checkpointError) saveCheckpoint({ runId: rec.id, ticketKey, marker, executor: 'workflow', imagePaths: [], stageOutputs: {}, updatedAt: 0 })
+    return rec
+  }
   let rec: RunRecord
   if (prior) {
     rec = prior
@@ -265,15 +122,15 @@ export async function processTicket(
     rec.endedAt = undefined
     rec.error = undefined
     rec.blocker = undefined
-    rec.waitReason = undefined
     rec.waitingProvider = undefined
     rec.resumeAt = undefined
+    rec.waitReason = undefined
     rec.resumes = (rec.resumes || 0) + 1
     rec.ticketTitle = ticket.title // keep in sync if it was renamed
     rec.ticketUrl = ticket.url
   } else {
     rec = {
-      id: newRunId(ticket.identifier),
+      id: ck?.runId || newRunId(ticket.identifier),
       ticket: ticket.identifier,
       ticketTitle: ticket.title,
       ticketUrl: ticket.url,
@@ -288,14 +145,14 @@ export async function processTicket(
     }
   }
   appendRun(rec)
-  const priors: PriorOutputs = {}
 
   if (!ck) ck = { runId: rec.id, ticketKey, marker, imagePaths: [], stageOutputs: {}, updatedAt: 0 }
+  ck.executor = legacy ? 'legacy' : 'workflow'
   ck.runId = rec.id // a fresh record adopts the checkpoint (and vice versa)
-  const session: Session = { rec, ck, paused: opts.isPaused || (() => false) }
+  saveCheckpoint(ck)
   if (resuming)
     log.info(
-      `  ⤿ resuming ${ticket.identifier}${prior ? ` (run ${rec.id}, continue #${rec.resumes})` : ''} — ${Object.keys(ck.stageOutputs).length} stage(s) cached`,
+      `  ⤿ resuming ${ticket.identifier}${prior ? ` (run ${rec.id}, continue #${rec.resumes})` : ''} — ${Object.keys(ck.nodeOutputs || ck.stageOutputs).length} stage(s) cached`,
     )
 
   try {
@@ -310,276 +167,21 @@ export async function processTicket(
       }
       ck.imagePaths = imagePaths
     }
-    // --- Workflow interpreter (opt-in per project) --------------------------
-    // The pipeline below is the LEGACY engine. A project with `engine: workflow`
-    // runs its assigned workflow through the interpreter instead, sharing this
-    // function's run record, checkpoint, marker and downloaded images so history
-    // and resume behave identically either way.
-    if (project.engine === 'workflow') {
-      const plan = planForProject(ctx.cfg, project)
-      const errors = plan.diagnostics.filter((d) => d.level === 'error')
-      if (errors.length) {
-        // Never run a plan that failed validation — the diagnostics exist
-        // precisely to stop an unsafe pipeline reaching a real repo.
-        const msg = `workflow ${plan.workflow.id}@${plan.workflow.version} is invalid: ${errors.map((e) => e.message).join('; ')}`
-        finish(rec, 'blocked', msg)
-        rec.error = msg
-        return rec
-      }
-      return await runWorkflow(ctx, plan, ticket, project, rec, ck, {
-        trackerKey: opts.trackerKey,
-        isReprocess: !!opts.reprocess,
-        isPaused: opts.isPaused,
-        imagePaths,
-      })
+    if (legacy) {
+      log.warn('continuing a legacy checkpoint; new runs use the workflow interpreter')
+      const { runLegacyPipeline } = await import('./legacy.js')
+      return await runLegacyPipeline(ctx, ticket, project, rec, ck, opts, imagePaths)
     }
-
-    const extras: StageExtras = { imagePaths, isReprocess: !!opts.reprocess, trackerKey: opts.trackerKey }
-
-    // Triage & clarify are read-only — run them against the main checkout.
-    const repoPath = project.repoPath
-
-    // --- Triage (model decides eligibility + kind) --------------------------
-    const triage = await stage(ctx, session, 'triage', 'triage', project, ticket, priors, repoPath, extras)
-    // Only skip when triage EXPLICITLY says ineligible. A missing/oddly-formatted
-    // decision defaults to eligible (real safety is the exclude guardrail + PR
-    // review, not this soft filter) — so a stray answer never wrongly skips.
-    // Mock mode honors an explicit ineligible too: the mock only emits one when a
-    // test asks for it, so forcing eligible here just made the branch untestable
-    // (and diverged from the workflow engine, which has always honored it).
-    const eligible = !/DECISION:\s*ineligible/i.test(triage.text)
-    const kind = parseKind(triage.text) || classifyKind(ticket) // question | data | change | bug
-
-    // No action needed: the latest activity is a sign-off / approval / ack, or an
-    // ask the loop can't do (deploy to prod). Skip WITHOUT running any pipeline —
-    // this is what stops sign-offs re-triggering a doomed "no file changes" run.
-    // The REASON triage gave. Without it the user sees only the word "skipped"
-    // and has to re-read the ticket to guess what the model concluded.
-    const triageReason = parseRouteReason(triage.text)
-    if (/DECISION:\s*no[-\s]?action/i.test(triage.text)) {
-      finish(rec, 'skipped', triageReason
-        ? `No action required — ${triageReason}`
-        : 'No action required (triage: latest activity is a sign-off / approval / not a request).')
-      return rec
-    }
-
-    if (!eligible) {
-      // firstLine used to be "DECISION: ineligible" — the decision restated, never a reason.
-      finish(rec, 'skipped', `Triage: ineligible${triageReason ? ` — ${triageReason}` : '.'}`)
-      return rec
-    }
-
-    // --- Data path: read-only export in an isolated throwaway worktree ------
-    if (kind === 'data') {
-      return await runDataPath(ctx, session, ticket, project, priors, extras)
-    }
-    skip(rec, 'export', 'not a data request')
-
-    // --- Question path ------------------------------------------------------
-    if (kind === 'question' || project.autonomy === 'clarify') {
-      // The clarify step posts its own answer with the project's Linear key.
-      const ans = await stage(ctx, session, 'clarify', 'clarify', project, ticket, priors, repoPath, extras)
-      skip(rec, 'comment', 'answer posted by the clarify step')
-      rec.commentUrl = extractCommentUrl(ans.text)
-      finish(rec, 'answered', 'Posted an answer comment.')
-      return rec
-    }
-    skip(rec, 'clarify', 'not a question')
-
-    // --- Change path: isolate in a git worktree (default) ------------------
-    // LOCATE: find an existing OPEN PR to refresh (single-repo only for now).
-    let reuseBranch: string | undefined
-    if (!project.repos?.length) {
-      const loc = await stage(ctx, session, 'locate', 'locate', project, ticket, priors, repoPath, extras)
-      reuseBranch = parseReuse(loc.text)
-      if (reuseBranch) log.info(`  ↩ refreshing existing PR on branch ${reuseBranch} — ${ticket.identifier}`)
-    } else {
-      skip(rec, 'locate', 'multi-repo: PR refresh not supported yet')
-    }
-    // If the checkpoint's worktree vanished (user cleaned up), the cached
-    // change-path work (plan/fix edits) is unusable — replaying it into a fresh
-    // empty worktree would look like "no changes". Discard the whole checkpoint
-    // and start clean. (triage/locate already ran this attempt; harmless.)
-    if (ck.workspace && !reattachWorkspace(ck.workspace, ctx.mock)) {
-      log.warn(`  checkpoint worktree gone — discarding cached work, starting fresh`)
-      ck.stageOutputs = {}
-      ck.workspace = undefined
-      saveCheckpoint(ck)
-    }
-    // On resume, reattach the SAME worktree/branch from the checkpoint (rebuilds
-    // the workspace without cutting a new branch). Fresh runs create it and
-    // persist the descriptor so a later resume can reattach.
-    const ws = setupWorkspace(ctx, project, ticket.identifier, reuseBranch, ck.workspace)
-    if (!ck.workspace) {
-      ck.workspace = toWorkspaceCk(ws)
-      saveCheckpoint(ck)
-    }
-    const workdir = ws.cwd // plan→verify run here (workspace root for multi-repo)
-    if (ws.multi) extras.workspace = ws.repos.map((r) => ({ name: r.name, base: r.base, readOnly: r.shipDisabled }))
-    let dirty: WorkRepo[] = []
-
-    try {
-      // Bug Investigation: reproduce + root-cause the bug before planning a fix.
-      if (kind === 'bug') {
-        priors.reproduce = (await stage(ctx, session, 'reproduce', 'reproduce', project, ticket, priors, workdir, extras)).text
-      } else {
-        skip(rec, 'reproduce', 'not a bug investigation')
-      }
-      priors.plan = (await stage(ctx, session, 'plan', 'plan', project, ticket, priors, workdir, extras)).text
-      await stage(ctx, session, 'prepare', 'prepare', project, ticket, priors, workdir, extras)
-      priors.iteration = 1
-      priors.fix = (await stage(ctx, session, 'fix', 'fix#1', project, ticket, priors, workdir, extras)).text
-
-      // ---- Bounded fix-loop: fix → checks → (verify/review) → repeat while ----
-      // not clean, up to maxFixIterations, with a no-progress backstop. Quota
-      // waiting happens at every stage boundary and keeps the checkpoint.
-      const loopEnabled = ctx.cfg.loop?.enabled !== false
-      const maxIters = Math.max(1, ctx.cfg.loop?.maxFixIterations ?? 1)
-      // Dev steps are opt-in per project; when on they gate after ship.
-      const deployDevEnabled = resolveStage(ctx.cfg, 'deploy-dev', project.stages).enabled !== false
-      const verifyDevEnabled = resolveStage(ctx.cfg, 'verify-dev', project.stages).enabled !== false
-      let iteration = 1
-      let lastSig = ''
-      let exhausted = false
-      let prs: PrRecord[] = []
-      while (true) {
-        // Guardrail EVERY iteration, over ALL repos: no off-limits paths, and
-        // something changed. Counts committed (base...HEAD) + uncommitted.
-        const scan = scanRepos(ctx, project, ws)
-        if (scan.block) {
-          finish(rec, 'blocked', scan.block)
-          return rec
-        }
-        if (!scan.dirty.length) {
-          finish(rec, 'failed', 'Fix step produced no file changes (nothing committed or staged in any repo).')
-          return rec
-        }
-        dirty = scan.dirty
-
-        // Sequential gates: verify → review. Each must PASS before the next
-        // runs — reviewing (or shipping) a change that verify already failed is
-        // wasted work — so we stop at the first failing verdict and route
-        // straight back to fix. No separate test command: a check like "run
-        // deno task check" lives inside a step's own instruction.
-        const failures: { stage: StageName; detail: string }[] = []
-        for (const cs of CHECK_STAGES) {
-          const out = (await stage(ctx, session, cs, `${cs}#${iteration}`, project, ticket, priors, workdir, extras)).text
-          setPrior(priors, cs, out) // feed each check's output into the next step's context
-          if (!parseVerdict(out).pass) {
-            failures.push({ stage: cs, detail: out })
-            break // don't run later gates on a change an earlier one rejected
-          }
-        }
-        // Ship ONLY after verify+review pass — never push a PR review rejected.
-        // Ship opens/updates one PR per dirty repo; its own instruction watches
-        // the PR's CI and must return VERDICT: pass. A ship fail routes back to
-        // fix like any other check.
-        if (!failures.length) {
-          prs = []
-          for (const r of dirty) {
-            const shipExtras: StageExtras = { ...extras, shipRepo: ws.multi ? r.name : undefined }
-            const shipRes = await stage(ctx, session, 'ship', `ship:${r.name}#${iteration}`, project, ticket, priors, r.workdir, shipExtras)
-            const prUrl = extractPrUrl(shipRes.text) || undefined
-            const shipOk = parseVerdict(shipRes.text).pass && !!prUrl
-            prs.push({
-              repo: r.name,
-              branch: r.branch,
-              url: prUrl,
-              status: prUrl ? 'opened' : 'failed',
-              error: shipOk ? undefined : firstLine(shipRes.text),
-            })
-            if (!ws.multi) priors.ship = shipRes.text
-            if (!shipOk) failures.push({ stage: 'ship', detail: `[${r.name}] ${shipRes.text}` })
-          }
-          // All repos shipped → (optionally) deploy to dev, then verify in dev.
-          // Each is gated; a failure routes back to fix like any other gate.
-          if (!failures.length && deployDevEnabled) {
-            if (ws.multi) priors.ship = prs.map((p) => (p.url ? `${p.repo}: ${p.url}` : `${p.repo}: SHIP FAILED`)).join('\n')
-            const dep = await stage(ctx, session, 'deploy-dev', `deploy-dev#${iteration}`, project, ticket, priors, workdir, extras)
-            priors.deployDev = dep.text
-            if (!parseVerdict(dep.text).pass) failures.push({ stage: 'deploy-dev', detail: dep.text })
-            else if (verifyDevEnabled) {
-              // Deployed OK → check it actually works in the dev environment.
-              const vd = await stage(ctx, session, 'verify-dev', `verify-dev#${iteration}`, project, ticket, priors, workdir, extras)
-              priors.verifyDev = vd.text
-              if (!parseVerdict(vd.text).pass) failures.push({ stage: 'verify-dev', detail: vd.text })
-            }
-          }
-          if (!failures.length) break // checks + ship (+ deploy-dev + verify-dev) all passed → done
-        }
-
-        if (!loopEnabled || iteration >= maxIters) {
-          exhausted = true
-          break
-        }
-        // no-progress: identical findings twice ⇒ the model is stuck.
-        const sig = djb2(failures.map((f) => f.stage + '::' + f.detail).join('\n'))
-        if (sig === lastSig) {
-          exhausted = true
-          log.warn(`${ticket.identifier}: no progress between fix attempts — stopping the loop`)
-          break
-        }
-        lastSig = sig
-
-        // Repair pass: feed the open findings back into another fix.
-        priors.openFindings = failures
-          .map((f) => `The "${f.stage}" step reported problems:\n${f.detail.slice(0, 1500)}`)
-          .join('\n\n')
-        iteration++
-        priors.iteration = iteration
-        log.info(`  ↻ fix attempt ${iteration}/${maxIters} — ${ticket.identifier}`)
-        priors.fix = (await stage(ctx, session, 'fix', `fix#${iteration}`, project, ticket, priors, workdir, extras)).text
-      }
-
-      // ---- Record PRs · comment · outcome · cleanup ----------------------
-      const opened = prs.filter((p) => p.status === 'opened')
-      const failedRepos = prs.filter((p) => p.status === 'failed')
-      rec.prUrl = opened[0]?.url
-      if (ws.multi) {
-        rec.prs = prs
-        priors.ship = prs.map((p) => (p.url ? `${p.repo}: ${p.url}` : `${p.repo}: SHIP FAILED`)).join('\n')
-      }
-
-      if (!prs.length) {
-        // Verify/review never passed within the cap → nothing was shipped.
-        skip(rec, 'ship', 'never reached — verify/review did not pass')
-        skip(rec, 'comment', 'no PR to report')
-        finish(rec, 'failed', `Couldn't pass verify/review within ${iteration} attempt(s); no PR opened.`)
-      } else {
-        // The comment step posts to Linear itself, with the project's key (right
-        // workspace). The harness never posts — it just records where it landed.
-        const commentText = await stage(ctx, session, 'comment', 'comment', project, ticket, priors, workdir, extras)
-        rec.commentUrl = extractCommentUrl(commentText.text)
-
-        if (ws.multi && opened.length && failedRepos.length) {
-          finish(rec, 'partial', `Opened ${opened.length} PR(s); ${failedRepos.length} repo(s) failed to ship/green — needs a human: ${failedRepos.map((p) => p.repo).join(', ')}.`)
-        } else if (!opened.length) {
-          finish(rec, 'failed', `Ship produced no PRs across ${prs.length} repo(s).`)
-        } else {
-          // Clean finish (not exhausted) with deploy-dev on ⇒ it reached dev.
-          const deployedToDev = deployDevEnabled && !exhausted
-          const outcome = exhausted ? 'pr-opened-with-findings' : deployedToDev ? 'deployed' : 'pr-opened'
-          const note = deployedToDev
-            ? `Deployed to dev${verifyDevEnabled ? ' (verified in dev)' : ''}${rec.prUrl ? ` · PR: ${rec.prUrl}` : ''}.`
-            : rec.prUrl
-              ? `Opened PR${exhausted ? ` (unresolved findings/CI after ${iteration} attempt(s))` : ''}${ws.multi ? ` in ${opened.length} repo(s)` : ''}: ${rec.prUrl}`
-              : 'Shipped (no PR URL parsed).'
-          finish(rec, outcome, note)
-        }
-      }
-
-      // Clean up worktrees only on FULL success — branches/PRs carry the work.
-      if (ws.useWorktree && prs.length && !failedRepos.length) {
-        const shipped = new Set(dirty.map((r) => r.name))
-        cleanupWorkspace(ctx, ws, shipped)
-      }
-      return rec
-    } catch (e) {
-      // Keep the worktree(s) on failure so a human can inspect them.
-      if (ws.useWorktree) log.warn(`left worktree(s) for inspection under: ${ws.cwd}`)
-      throw e
-    }
+    return await runWorkflow(ctx, plan!, ticket, project, rec, ck, {
+      trackerKey: opts.trackerKey, isReprocess: !!opts.reprocess,
+      isPaused: opts.isPaused, imagePaths,
+    })
   } catch (e) {
+    if (e instanceof OperationReviewError) {
+      rec.blocker = { kind: 'approval', reason: e.message, resume: 'manual' }
+      finish(rec, 'waiting', e.message)
+      return rec
+    }
     if (e instanceof PausedError) {
       // Not a failure — the loop was asked to pause. Keep the worktree +
       // checkpoint; `resume` continues from this exact stage.
@@ -587,13 +189,7 @@ export async function processTicket(
       return rec
     }
     if (e instanceof ProviderUnavailableError) {
-      rec.blocker = {
-        kind: 'provider',
-        reason: `${e.provider} quota is unavailable; resume from "${e.stage}" when the provider allows it.`,
-        resume: 'automatic',
-        provider: e.provider,
-        resumeAt: e.resumeAt,
-      }
+      rec.blocker = { kind: 'provider', reason: `${e.provider} quota is unavailable; resume from "${e.stage}" when the provider allows it.`, resume: 'automatic', provider: e.provider, resumeAt: e.resumeAt }
       finish(rec, 'waiting', rec.blocker.reason)
       return rec
     }
@@ -609,179 +205,11 @@ export async function processTicket(
     else deleteCheckpoint(ticketKey)
   }
 }
-// ---- stage runner ----------------------------------------------------------
-
-async function stage(
-  ctx: EngineCtx,
-  s: Session,
-  name: StageName,
-  ckKey: string,
-  project: ProjectConfig,
-  ticket: Ticket,
-  priors: PriorOutputs,
-  workdir: string,
-  extras: StageExtras,
-): Promise<AgentResult> {
-  const rec = s.rec
-  const sc = resolveStage(ctx.cfg, name, project.stages)
-
-  // REPLAY: a stage already completed in a prior attempt returns its cached
-  // output with NO model call. This is what fast-forwards a resumed run to the
-  // exact stage that failed/paused — priors, kind, reuse-branch and loop
-  // counters all rebuild as the surrounding code re-executes on instant replays.
-  const cached = s.ck.stageOutputs[ckKey]
-  if (cached !== undefined) {
-    const sr0 = beginStage(rec, name, sc.provider, sc.model)
-    endStage(rec, sr0, 'ok', `⤿ resumed (cached) — ${firstLine(cached)}`, cached)
-    return { ...emptyResult(sc.provider!, sc.model!), text: cached }
-  }
-
-  if (sc.enabled === false) {
-    const sr0 = beginStage(rec, name, sc.provider, sc.model)
-    endStage(rec, sr0, 'skipped', 'stage disabled in config')
-    return emptyResult(sc.provider!, sc.model!)
-  }
-
-  // PAUSE boundary: before spending a model call, honor a pause request. Persist
-  // the checkpoint and unwind — `resume` re-enters and replays up to here.
-  if (s.paused()) {
-    saveCheckpoint(s.ck)
-    throw new PausedError(name)
-  }
-
-  // QUOTA check before spending a model call: if this provider is still inside
-  // usage-limit window, don't run — end the run (blocked); it resumes here once
-  // the reset passes. (Guards mid-run steps + parallel runs after one hits it.)
-  const gate = ctx.mock ? { ok: true } : ctx.governor.canRun(sc.provider)
-  if (!gate.ok) {
-    saveCheckpoint(s.ck)
-    throw new ProviderUnavailableError(sc.provider!, name, gate.resetAt)
-  }
-
-  const sr = beginStage(rec, name, sc.provider, sc.model)
-  const instruction = resolveInstruction(name, sc)
-  const prompt = buildStagePrompt(name, ticket, project, instruction, priors, workdir, extras)
-  log.info(`  ▸ ${name} (${sc.provider}/${sc.model})${sc.skill ? ` +skill:${sc.skill}` : ''} — ${rec.ticket}`)
-
-  // Post steps get the project's Linear key in the env so they hit the RIGHT
-  // workspace via the API (not the global MCP). The key stays out of the prompt.
-  const env =
-    POST_STAGES.includes(name) && extras.trackerKey && ctx.cfg.tracker.type === 'linear'
-      ? { LINEAR_API_KEY: extras.trackerKey }
-      : undefined
-  const requestStartedAt = Date.now()
-  const res = await runAgent({
-    prompt,
-    cwd: workdir,
-    stage: sc,
-    runner: ctx.cfg.runner,
-    authMode: ctx.cfg.runner.providers[sc.provider!].authMode,
-    mcp: project.mcp || ctx.cfg.mcp,
-    mock: ctx.mock,
-    mockKind: MOCK_KIND[name],
-    env,
-    ticketKey: `${project.name}:${ticket.identifier}`,
-  })
-
-  // Guard: never let CLI-error text or an echoed prompt be treated as a real
-  // result (it must never reach a ticket comment). Mark the stage failed.
-  if (!res.isError && looksLikeGarbage(res.text)) {
-    res.isError = true
-    res.text = `withheld non-answer output: ${firstLine(res.text)}`
-  }
-
-  appendUsage({
-    ts: Date.now(),
-    runId: rec.id,
-    ticket: rec.ticket,
-    stage: name,
-    provider: res.provider,
-    model: res.model,
-    inputTokens: res.inputTokens,
-    outputTokens: res.outputTokens,
-    cacheReadTokens: res.cacheReadTokens,
-    cacheCreationTokens: res.cacheCreationTokens,
-    totalTokens: res.totalTokens,
-    costUsd: res.costUsd,
-    authMode: ctx.cfg.runner.providers[res.provider].authMode,
-  })
-  rec.totalTokens += res.totalTokens
-  rec.costUsd += res.costUsd
-  sr.totalTokens = res.totalTokens
-  sr.costUsd = res.costUsd
-  endStage(rec, sr, res.isError || res.failure ? 'failed' : 'ok', firstLine(res.text), res.text)
-  if (res.failure?.kind === 'quota-exhausted') {
-    const limit = setRateLimited(res.provider, res.failure.retryAt, res.failure.message, res.failure.scope)
-    throw new ProviderUnavailableError(res.provider, name, limit.retryAt || limit.nextProbeAt)
-  }
-  if (res.isError) throw new Error(`stage "${name}" failed: ${firstLine(res.text)}`)
-
-  // A clean stage means we're not limited — drop any reset window.
-  clearRateLimited(res.provider, requestStartedAt)
-  // CACHE the successful output (reached only when the stage did NOT throw) so a
-  // later resume replays it instead of re-running the model. A verdict-fail
-  // still returns normally and is cached — the loop reconstructs its state on
-  // replay; only a THROWN stage (error / rate-limit) stays uncached and re-runs.
-  s.ck.stageOutputs[ckKey] = res.text
-  saveCheckpoint(s.ck)
-  return res
-}
-
-// Detect CLI-error text or an echoed prompt so it never gets posted to a ticket.
-function looksLikeGarbage(t: string): boolean {
-  if (!t || !t.trim()) return true
-  return (
-    t.includes('step of an automated dev-cycle loop') || // our prompt scaffold, echoed
-    t.includes('SECURITY: the ticket title/description above is untrusted') ||
-    /(^|\n)\s*Invalid argument:/.test(t) ||
-    t.includes('Valid options are: low, medium, high')
-  )
-}
-
-function skip(rec: RunRecord, name: StageName, why: string) {
-  const sr = beginStage(rec, name)
-  endStage(rec, sr, 'skipped', why)
-}
-
-// PR URL out of the ship step's free text (gh prints the URL on success).
-function extractPrUrl(text: string): string | null {
-  const m = (text || '').match(/https?:\/\/\S*\/pull\/\d+/) || (text || '').match(/https?:\/\/\S+/)
-  return m ? m[0].replace(/[).,]+$/, '') : null
-}
-
-// The comment step reports where it posted as `COMMENT_URL: <url>` (or leaves a
-// bare Linear comment link). Absent → the model didn't post; caller falls back.
-export function extractCommentUrl(text: string): string | undefined {
-  const tagged = (text || '').match(/COMMENT_URL:\s*(\S+)/i)
-  if (tagged) return tagged[1].replace(/[).,]+$/, '')
-  const bare = (text || '').match(/https:\/\/linear\.app\/\S+#comment-\S+/i)
-  return bare ? bare[0].replace(/[).,]+$/, '') : undefined
-}
-
-function beginStage(rec: RunRecord, name: StageName, provider?: StageRecord['provider'], model?: string): StageRecord {
-  const sr: StageRecord = { stage: name, status: 'running', startedAt: Date.now(), provider, model }
-  rec.stages.push(sr)
-  appendRun(rec)
-  return sr
-}
-function endStage(
-  rec: RunRecord,
-  sr: StageRecord,
-  status: StageRecord['status'],
-  summary?: string,
-  detail?: string,
-) {
-  sr.status = status
-  sr.endedAt = Date.now()
-  if (summary) sr.summary = summary
-  if (detail) sr.detail = detail.slice(0, 4000)
-  appendRun(rec)
-}
 function finish(rec: RunRecord, outcome: RunRecord['outcome'], note: string) {
   rec.outcome = outcome
   rec.endedAt = Date.now()
   const last = rec.stages[rec.stages.length - 1]
-  if (last && last.status === 'running') endStage(rec, last, 'ok')
+  if (last && last.status === 'running') { last.status = 'ok'; last.endedAt = Date.now() }
   // Every outcome carries its reason, not just the failing ones (see the same
   // change in interpreter.ts — both engines must record history identically).
   rec.summary = note
@@ -789,29 +217,3 @@ function finish(rec: RunRecord, outcome: RunRecord['outcome'], note: string) {
   log.info(`  = ${rec.ticket}: ${outcome} — ${note}`)
   appendRun(rec)
 }
-
-function emptyResult(provider: NonNullable<StageRecord['provider']>, model: string): AgentResult {
-  return {
-    text: '',
-    inputTokens: 0,
-    outputTokens: 0,
-    cacheReadTokens: 0,
-    cacheCreationTokens: 0,
-    totalTokens: 0,
-    costUsd: 0,
-    provider,
-    model,
-    isError: false,
-  }
-}
-// Stable key for a bot comment so a crash-retry doesn't double-post: same
-// ticket + same latest-human-activity + same purpose → same key.
-function commentKey(ticket: Ticket, purpose: string): string {
-  const s = `${ticket.identifier}|${latestHumanActivity(ticket)}|${purpose}`
-  let h = 5381
-  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) >>> 0
-  return h.toString(36)
-}
-
-const firstLine = (s: string) => (s || '').trim().split('\n')[0]?.slice(0, 160) || ''
-const fmt = (ms?: number) => (ms ? new Date(ms).toLocaleTimeString() : 'soon')

@@ -321,7 +321,7 @@ function migrateConfig(raw: any): any {
   return raw
 }
 
-function inferProvider(model?: string): AgentProvider | undefined {
+export function inferProvider(model?: string): AgentProvider | undefined {
   if (!model) return undefined
   if (/^(claude-|opus$|sonnet$|haiku$|fable$)/i.test(model)) return 'claude'
   if (/^(gpt-|codex-|o\d)/i.test(model)) return 'codex'
